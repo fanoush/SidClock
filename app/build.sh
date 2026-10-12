@@ -41,6 +41,11 @@ ninja -C "$HERE/build"
 
 # Dev signing key (generated on first use, never commit it). The bootloader
 # validates images by SHA-256 only, so any key works.
+if ! python3 -c "import click, cryptography, cbor2" 2>/dev/null; then
+    echo "error: missing Python packages for image signing (click, cryptography, cbor2)." >&2
+    echo "       Install the build requirements:  pip3 install --user -r \"$ROOT/tools/requirements-build.txt\"" >&2
+    exit 1
+fi
 if [ ! -f "$HERE/sidclock.pem" ]; then
     python3 "$SDK/sdk/mcuboot/scripts/imgtool.py" keygen -t ecdsa-p256 -k "$HERE/sidclock.pem"
 fi
