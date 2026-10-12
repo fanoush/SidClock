@@ -1,0 +1,229 @@
+/*
+ * SidClock hardware overlay for the Saphe T device (nRF54L15):
+ * pin map and flash partition layout.
+ */
+
+#include <zephyr/dt-bindings/gpio/gpio.h>
+#include <zephyr/dt-bindings/i2c/i2c.h>
+#include <zephyr/dt-bindings/pinctrl/nrf-pinctrl.h>
+#include <zephyr/dt-bindings/adc/adc.h>
+#include <zephyr/dt-bindings/adc/nrf-saadc-nrf54l.h>
+
+/ {
+	chosen {
+		zephyr,code-partition = &slot0_partition;
+		zephyr,display = &amo_disp;
+		/* use the built-in split LL and the controller-based RNG,
+		 * not the (unavailable) SoftDevice Controller / PSA RNG */
+		zephyr,bt-hci = &bt_hci_controller;
+		zephyr,entropy = &rng_hci;
+	};
+
+	/* Battery monitor channel (AIN7) */
+	zephyr,user {
+		io-channels = <&adc 7>;
+	};
+};
+
+/* ---------------- internal RRAM partitions ---------------- */
+&cpuapp_rram {
+	partitions {
+		/* drop the nRF54L15-DK defaults */
+		/delete-node/ partition@0;
+		/delete-node/ partition@10000;
+		/delete-node/ partition@61000;
+		/delete-node/ partition@b2000;
+		/delete-node/ partition@103000;
+		/delete-node/ partition@15c000;
+
+		boot_partition: partition@0 {
+			label = "mcuboot";
+			reg = <0x0 0xE000>;
+		};
+
+		slot0_partition: partition@E000 {
+			label = "image-0";
+			reg = <0xE000 0x151000>;
+		};
+	};
+};
+
+/* ---------------- pin control ---------------- */
+&pinctrl {
+	i2c30_default: i2c30_default {
+		group1 {
+			psels = <NRF_PSEL(TWIM_SCL, 0, 0)>,
+				<NRF_PSEL(TWIM_SDA, 0, 1)>;
+			bias-pull-up;
+			nordic,drive-mode = <NRF_DRIVE_S0D1>;
+		};
+	};
+
+	i2c30_sleep: i2c30_sleep {
+		group1 {
+			psels = <NRF_PSEL(TWIM_SCL, 0, 0)>,
+				<NRF_PSEL(TWIM_SDA, 0, 1)>;
+			low-power-enable;
+		};
+	};
+
+	spi00_default: spi00_default {
+		group1 {
+			psels = <NRF_PSEL(SPIM_SCK,  2, 1)>,
+				<NRF_PSEL(SPIM_MOSI, 2, 2)>,
+				<NRF_PSEL(SPIM_MISO, 2, 4)>;
+			nordic,drive-mode = <NRF_DRIVE_E0E1>;
+		};
+	};
+
+	spi00_sleep: spi00_sleep {
+		group1 {
+			psels = <NRF_PSEL(SPIM_SCK,  2, 1)>,
+				<NRF_PSEL(SPIM_MOSI, 2, 2)>,
+				<NRF_PSEL(SPIM_MISO, 2, 4)>;
+			low-power-enable;
+		};
+	};
+
+	/* I2S20 to the speaker amplifier. AW88082 pinout (rev 1/2/default):
+	 * SCK P1.05, LRCK P1.07, SDOUT P1.06. Amp enable (P1.04) is a plain
+	 * GPIO driven by the audio module, not part of this pinctrl.
+	 */
+	i2s20_aw_default: i2s20_aw_default {
+		group1 {
+			psels = <NRF_PSEL(I2S_SCK_M,  1, 5)>,
+				<NRF_PSEL(I2S_LRCK_M, 1, 7)>,
+				<NRF_PSEL(I2S_SDOUT,  1, 6)>;
+			nordic,drive-mode = <NRF_DRIVE_H0H1>;
+		};
+	};
+
+	i2s20_aw_sleep: i2s20_aw_sleep {
+		group1 {
+			psels = <NRF_PSEL(I2S_SCK_M,  1, 5)>,
+				<NRF_PSEL(I2S_LRCK_M, 1, 7)>,
+				<NRF_PSEL(I2S_SDOUT,  1, 6)>;
+			low-power-enable;
+		};
+	};
+};
+
+/* ---------------- Bluetooth controller (split LL) ---------------- */
+&bt_hci_controller {
+	status = "okay";
+};
+
+/* ---------------- I2C30: touch + accelerometer ---------------- */
+&i2c30 {
+	status = "okay";
+	pinctrl-0 = <&i2c30_default>;
+	pinctrl-1 = <&i2c30_sleep>;
+	pinctrl-names = "default", "sleep";
+	clock-frequency = <I2C_BITRATE_STANDARD>;
+
+	ft3168: touch@38 {
+		compatible = "sidclock,ft3168";
+		reg = <0x38>;
+		irq-gpios   = <&gpio1 9  GPIO_ACTIVE_HIGH>;
+		reset-gpios = <&gpio1 10 GPIO_ACTIVE_LOW>;
+		status = "okay";
+	};
+
+	lis2dh: accel@19 {
+		compatible = "st,lis2dh";
+		reg = <0x19>;
+		status = "okay";
+	};
+
+	als_if: als_if@45 {
+		compatible = "sidclock,opt4001";
+		reg = <0x45>;
+		status = "okay";
+	};
+};
+
+/* ---------------- SPIM00: display + external flash ---------------- */
+&spi00 {
+	status = "okay";
+	pinctrl-0 = <&spi00_default>;
+	pinctrl-1 = <&spi00_sleep>;
+	pinctrl-names = "default", "sleep";
+
+	cs-gpios = <&gpio1 8 GPIO_ACTIVE_LOW>,   /* flash   */
+		   <&gpio2 5 GPIO_ACTIVE_LOW>;   /* display */
+
+	/* external MX25R64: OTA secondary slot */
+	mx25r64: mx25r6435f@0 {
+		compatible = "jedec,spi-nor";
+		status = "okay";
+		reg = <0>;
+		spi-max-frequency = <32000000>;
+		size = <0x2000000>;
+		reset-gpios = <&gpio2 0 GPIO_ACTIVE_LOW>;
+		wp-gpios = <&gpio2 3 GPIO_ACTIVE_LOW>;
+
+		partitions {
+			compatible = "fixed-partitions";
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			slot1_partition: partition@0 {
+				label = "image-1";
+				reg = <0x0 0x151000>;
+			};
+
+			storage_partition: partition@151000 {
+				label = "storage";
+				reg = <0x151000 0x2AF000>;
+			};
+		};
+	};
+
+	/* SH8601 AMOLED panel (368x448, QSPI-style framing over SPI) */
+	amo_disp: amo_disp@1 {
+		compatible = "sidclock,gc9307";
+		reg = <1>;
+		spi-max-frequency = <32000000>;
+		reset-gpios = <&gpio0 4 GPIO_ACTIVE_LOW>;
+		width = <368>;
+		height = <448>;
+		status = "okay";
+	};
+};
+
+/* ---------------- I2S20: speaker amplifier ---------------- */
+&i2s20 {
+	status = "okay";
+	pinctrl-0 = <&i2s20_aw_default>;
+	pinctrl-1 = <&i2s20_aw_sleep>;
+	pinctrl-names = "default", "sleep";
+	clock-source = "PCLK32M_HFXO";
+};
+
+/* Battery voltage on AIN7: gain 2/3, internal 0.6 V ref, 10-bit, 15 us. */
+&adc {
+	status = "okay";
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	channel@7 {
+		reg = <7>;
+		zephyr,gain = "ADC_GAIN_2_3";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME(ADC_ACQ_TIME_MICROSECONDS, 15)>;
+		zephyr,input-positive = <NRF_SAADC_AIN7>;
+		zephyr,resolution = <10>;
+		zephyr,oversampling = <0>;
+	};
+};
+
+/* The DK assigns its console UART (uart20) to P1.04 (TX), P1.05 (RX),
+ * P1.06 (RTS) and P1.07 (CTS) - and it drives TX/RTS high/low from boot.
+ * Those are the I2S amplifier pins: uart20 was holding P1.06 (SDOUT) low
+ * and P1.04 high, which is why the amplifier never saw any data while the
+ * SCK/LRCK (its input pins) worked fine. No UART is wired on this board;
+ * logging goes over SEGGER RTT, so the console UART is disabled entirely.
+ */
+&uart20 {
+	status = "disabled";
+};

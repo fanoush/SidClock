@@ -1,0 +1,4360 @@
+/*
+ * SidClock — SID music player firmware for the Saphe T device (nRF54L15).
+ *
+ *   - landscape UI on the 368x448 AMOLED (software rotation: the panel stays
+ *     in its native portrait address space and every window is transposed)
+ *   - main screen: header (clock/date + lux/battery), navigation tiles
+ *     (SID player / sensors / settings), AUTO ROT / SND / AUTO BRI / SLEEP
+ *     buttons and the volume/brightness sliders
+ *   - SID player screen: track info, HOME/TUNE/PLAY/SUB transport buttons,
+ *     volume + brightness sliders and the same header
+ *   - idle face after the configured timeout (15 s .. 5 min): big clock that
+ *     jumps to a random spot once a minute; SLEEP blanks the panel while SID
+ *     playback and alarms keep running
+ *   - alarms: five ONCE/REPEAT alarms, ringtone captured from a SID
+ *   - BLE: Battery Service, Current Time Service, MCUmgr/SMP OTA (secondary
+ *     slot on the external MX25R64) and a debug characteristic (fs_mgmt
+ *     uploads .sid files into /home)
+ *
+ * Update with:
+ *   smpmgr --ble <addr> upgrade zephyr.signed.bin
+ */
+
+#include <zephyr/kernel.h>
+#include <zephyr/device.h>
+#include <zephyr/drivers/display.h>
+#include <zephyr/drivers/i2c.h>
+#include <zephyr/drivers/gpio.h>
+#include <zephyr/drivers/sensor.h>
+#include <zephyr/bluetooth/bluetooth.h>
+#include <zephyr/bluetooth/conn.h>
+#include <zephyr/bluetooth/gatt.h>
+#include <zephyr/sys/byteorder.h>
+#include <zephyr/dfu/mcuboot.h>
+#include <zephyr/logging/log.h>
+#include <zephyr/init.h>
+#include <zephyr/drivers/adc.h>
+#include <zephyr/storage/flash_map.h>
+#include <zephyr/fs/fs.h>
+#include <zephyr/fs/littlefs.h>
+#include <string.h>
+#include <stdio.h>
+
+#include "font1524.h"
+#include "sid_player.h"
+#include "display_gc9307.h"
+#include "opt400x.h"
+#include "audio.h"
+
+LOG_MODULE_REGISTER(sidclock, LOG_LEVEL_INF);
+
+/* Set by CMake (-DSIDCLOCK_VERSION=...), kept in sync with the signed image
+ * version by build.sh.
+ */
+#ifndef SIDCLOCK_VERSION
+#define SIDCLOCK_VERSION "dev"
+#endif
+
+#define SCR_W 448
+#define SCR_H 368
+#define NAT_W 368
+#define NAT_H 448
+/* Native 15x24 DroidSansMono (font1524.h). This used to be the 10x16 font
+ * scaled 3/2, which looked rough; Zephyr's cfb_fonts.c also ships a native
+ * 20x32 version if even bigger text is ever wanted.
+ */
+#define FONT_W 15
+#define FONT_H 24
+#define TEXT_CW FONT_W
+#define TEXT_CH FONT_H
+
+#define COL_BG     0x0000
+#define COL_WHITE  0xFFFF
+#define COL_GREEN  0x07E0
+#define COL_CYAN   0x07FF
+#define COL_YELLOW 0xFFE0
+#define COL_RED    0xF800
+#define COL_BLUE   0x001F
+#define COL_BTN    0x3186  /* dark slate button */
+#define COL_BORDER 0x9CF3  /* light grey border  */
+#define COL_TRACK  0x8410  /* mid grey slider track (turns white in idle mode) */
+
+/* Landscape UI layout (software-rotated 448x368 logical frame):
+ * the main screen = header (clock/date/version + lux/battery block),
+ * navigation tiles (SID player / sensors / settings), utility buttons
+ * (AUTO ROT / SND / AUTO BRI / SLEEP) and the volume + brightness
+ * sliders. Sub-screens share the same header and a centred HOME button on
+ * the second header line; the idle clock face is unchanged. */
+
+/* Shared HOME button, centred between the date and the charging status */
+#define HOME_X 184
+#define HOME_Y 26
+#define HOME_W 80
+#define HOME_H 28
+
+/* Main screen: utility buttons in a centred 2x2 grid between the tiles
+ * and the sliders */
+#define UB_W 136
+#define UB_H 34
+#define UB_X1 80
+#define UB_X2 232
+#define UB_Y1 198
+#define UB_Y2 244
+
+/* Main screen: navigation tiles (SID / alarms / sensors / settings) */
+#define TILE_Y 96
+#define TILE_W 106
+#define TILE_H 92
+#define TILE_SID_X 6
+#define TILE_ALM_X 116
+#define TILE_SENS_X 226
+#define TILE_SET_X 336
+
+/* SID screen: transport + subtune buttons first, then four text lines
+ * (metadata + a scrolling STIL comment line) */
+#define SID_ROW1_Y 84
+#define SID_ROW1_H 42
+#define SID_TUNEL_X 10
+#define SID_TUNEL_W 96
+#define SID_PLAY_X 114
+#define SID_PLAY_W 150
+#define SID_STOP_X 272
+#define SID_STOP_W 70
+#define SID_TUNER_X 350
+#define SID_TUNER_W 88
+#define SID_ROW2_Y 134
+#define SID_SUB_W 136
+#define SID_SUB_H 38
+#define SID_SUBL_X 8
+#define SID_END_X 156
+#define SID_SUBR_X 304
+
+/* text lines under the buttons */
+#define SID_LINE1_Y 182
+#define SID_LINE2_Y 206
+#define SID_LINE3_Y 230
+#define SID_LINE4_Y 254
+
+/* SID screen: chip-model button on the author line */
+#define SID_CHIP_X 280
+#define SID_CHIP_Y 230
+#define SID_CHIP_W 155
+#define SID_CHIP_H 24
+
+/* Settings screen: the three ambient profiles [NIGHT] [INDOOR] [OUTDOOR]
+ * on top, then the LUX + brightness level sliders, a gap, the idle
+ * timeout, and the SAVE STATE button (dir.txt + time + configs, in the
+ * old frame-rate slot). */
+#define SET_BTN_W 136
+#define SET_BTN_H 38
+#define SET_ROW1_Y 82
+#define SET_NIGHT_X 8
+#define SET_INDOOR_X 156
+#define SET_OUTDOOR_X 304
+#define SET_SLD_LUX_Y 142
+#define SET_SLD_BRI_Y 186
+#define SET_SLD_IDLE_Y 264 /* idle-timeout row: same -/+ style as alarms */
+#define SET_SAVE_X 114
+#define SET_SAVE_Y 306
+#define SET_SAVE_W 220
+#define SET_SAVE_H 34
+
+/* Alarms screen: 5 tiles along the bottom, mode + ringtone row, repeat
+ * days row and hour/minute/length sliders. */
+#define ALM_TILE_W 80
+#define ALM_TILE_H 34
+#define ALM_TILE_Y 305 /* moved up by half its height for the LEN row */
+#define ALM_TILE_X0 8
+#define ALM_TILE_DX 88
+#define ALM_MODE_Y 84
+#define ALM_MODE_W 136
+#define ALM_MODE_H 34
+#define ALM_MODE_X 8
+#define ALM_RING_X 156
+#define ALM_RING_W 280
+#define ALM_DAY_Y 124
+#define ALM_DAY_W 56
+#define ALM_DAY_H 32
+#define ALM_DAY_X0 16
+#define ALM_DAY_DX 60
+#define ALM_SLD_HOUR_Y 172
+#define ALM_SLD_MIN_Y 208
+#define ALM_SLD_LEN_Y 244
+
+/* Rows with -/+ step buttons on both sides of the slider (the slider
+ * alone is too coarse): alarm hour/minute/length, settings idle timeout. */
+#define ALM_ARR_W 40
+#define ALM_ARR_X0 8
+#define ALM_SLD_X 56
+#define ALM_SLD_W 336
+#define ALM_ARR_X1 400
+
+/* Auto brightness: three ambient profiles (night/indoor/outdoor). The lux
+ * thresholds and brightness levels are editable on the settings screen and
+ * persisted in /home/bright.cfg. The display's own light leaks into the ALS
+ * (about 0.05 lx at the night preset, 0.3 lx at 120 and 0.9 lx at full), so
+ * the upward thresholds are meant to sit above those floors and downward
+ * switching lags: outdoor->indoor at bri_lux[2] (default 75% of the indoor
+ * threshold) and indoor->night at 75% of bri_lux[0]. */
+#define BRI_NIGHT 20
+#define BRI_DIM 120
+#define BRI_DAY 240
+
+/* Battery / lux readout, top right (clear of the rounded corner) */
+#define BATT_X0 260
+#define BATT_X1 419
+#define BATT_Y0 4
+#define BATT_Y1 76
+
+/* Sliders: volume + brightness on the main and SID screens; LUX level +
+ * brightness for the profile and the idle timeout on the settings
+ * screen. The value is drawn inside the track. */
+#define SLD_X 8
+#define SLD_W 432
+#define SLD_H 26
+#define SLD_VOL_Y 290
+#define SLD_BRI_Y 326
+
+/* Idle timeout (no touch) + countdown bar. Settable on the settings
+ * screen in 15 s steps from 15 s to 5 min (default 60 s). */
+#define IDLE_TIMEOUT_DEF_S 60U
+#define IDLE_TIMEOUT_MIN_S 15U
+#define IDLE_TIMEOUT_MAX_S 300U
+#define CNT_X0 40
+#define CNT_X1 408
+#define CNT_Y 361
+
+/* 7-segment clock geometry (idle face) */
+#define SEG_W 52
+#define SEG_H 92
+#define SEG_T 10
+#define SEG_GAP 10
+#define SEG_COLON_W 18
+#define CLOCK_TOTAL_W (4 * SEG_W + 3 * SEG_GAP + SEG_COLON_W)
+#define CLOCK_DATE_GAP 8
+#define CLOCK_BLOCK_H (SEG_H + CLOCK_DATE_GAP + TEXT_CH)
+#define CLOCK_AREA_Y 80 /* idle clock+date area (battery strip above) */
+
+/* Accelerometer bars, below the value line */
+#define BAR_X 24
+#define BAR_W 406
+#define BAR_CX (BAR_X + BAR_W / 2)
+#define BAR_H 16
+#define BAR_Y0 136
+#define BAR_DY 26
+#define ACCEL_MAX_MG 2000
+
+/* LIS2DH registers (direct fallback path) */
+#define ACC_ADDR       0x19
+#define ACC_WHO_AM_I   0x0F
+#define ACC_CTRL_REG1  0x20
+#define ACC_CTRL_REG4  0x23
+#define ACC_OUT_X_L    0x28
+
+static const struct device *disp;
+static const struct device *accel;
+
+static const struct i2c_dt_spec touch_i2c =
+	I2C_DT_SPEC_GET(DT_NODELABEL(ft3168));
+static const struct gpio_dt_spec touch_rst =
+	GPIO_DT_SPEC_GET(DT_NODELABEL(ft3168), reset_gpios);
+static const struct gpio_dt_spec touch_irq =
+	GPIO_DT_SPEC_GET(DT_NODELABEL(ft3168), irq_gpios);
+static struct gpio_callback touch_irq_cb;
+static volatile bool touch_irq_flag;
+static K_SEM_DEFINE(touch_sem, 0, 1);
+
+static void touch_irq_handler(const struct device *port,
+			      struct gpio_callback *cb, uint32_t pins)
+{
+	ARG_UNUSED(port);
+	ARG_UNUSED(cb);
+	ARG_UNUSED(pins);
+	touch_irq_flag = true;
+	k_sem_give(&touch_sem);
+}
+
+/*
+ * Sensor rail / I2C bus enable.
+ * P1.11 must be driven high before the touch controller and accelerometer
+ * are powered; otherwise they clamp the I2C bus. Runs before the sensor and
+ * display drivers (POST_KERNEL priority 45).
+ */
+static int sensor_rail_init(void)
+{
+	const struct device *p1 = DEVICE_DT_GET(DT_NODELABEL(gpio1));
+
+	if (!device_is_ready(p1)) {
+		return -ENODEV;
+	}
+
+	gpio_pin_configure(p1, 11, GPIO_OUTPUT_ACTIVE);
+	return 0;
+}
+
+SYS_INIT(sensor_rail_init, POST_KERNEL, 45);
+
+/*
+ * Diagnostic: dump the geometry and trailer state of a slot as the
+ * application sees it. Comparing this with the bootloader's view tells us
+ * whether both agree on where the MCUboot trailer lives.
+ */
+static void trailer_dump(uint32_t id, const char *name)
+{
+	const struct flash_area *fa;
+	uint8_t b[64] = { 0 };
+
+	if (flash_area_open(id, &fa) != 0) {
+		LOG_ERR("%s: flash_area_open failed", name);
+		return;
+	}
+
+	/* the info block sits in the last 48 bytes of the area */
+	off_t base = (off_t)fa->fa_size - (off_t)sizeof(b);
+
+	if (flash_area_read(fa, base, b, sizeof(b)) != 0) {
+		LOG_ERR("%s: read failed", name);
+		flash_area_close(fa);
+		return;
+	}
+
+	/* indices inside the 64-byte window */
+	uint8_t swap_info = b[24];
+	uint8_t copy_done = b[32];
+	uint8_t image_ok  = b[40];
+	uint8_t magic0    = b[48];
+
+	LOG_INF("%s: off=0x%lx size=0x%lx magic0=0x%02x ok=0x%02x done=0x%02x swap=0x%02x",
+		name, (unsigned long)fa->fa_off, (unsigned long)fa->fa_size,
+		magic0, image_ok, copy_done, swap_info);
+
+	flash_area_close(fa);
+}
+
+static uint8_t band_buf[SCR_W * 16 * 2];
+static uint8_t rot_buf[SCR_W * 16 * 2]; /* transposed window (software rot) */
+
+static bool accel_direct;   /* use the direct-poll fallback */
+static bool display_on = true;
+static bool touch_was_down;
+static bool rot_270;         /* landscape mapping: false = 90, true = 270 */
+static bool auto_rot = true; /* AUTO ROT: follow the device orientation */
+static bool idle_mode;
+static bool idle_blank;     /* dark idle (SLEEP): no drawing, alarms on */
+static bool sleep_armed;    /* dark idle: wait for the SLEEP tap release */
+static int idle_rot;        /* idle face orientation: 0/2 landscape, 1/3 portrait */
+static uint8_t idle_quad;   /* last accelerometer quadrant (debug) */
+
+/* Logical frame of the idle face (portrait for rotations 1 and 3). */
+static int idle_fw(void)
+{
+	return (idle_rot & 1) ? NAT_W : SCR_W;
+}
+
+static int idle_fh(void)
+{
+	return (idle_rot & 1) ? NAT_H : SCR_H;
+}
+static uint8_t brightness = 0x80U;
+static uint16_t idle_timeout_s = IDLE_TIMEOUT_DEF_S; /* 15..300 s */
+static bool bri_auto = true;     /* brightness follows the ambient profiles */
+static uint8_t auto_step = 1;    /* 0 = night, 1 = dim, 2 = day */
+
+/* Ambient profiles, editable on the settings screen and persisted in
+ * /home/bright.cfg:
+ *   bri_lux[]: mlx levels - [0] night->indoor, [1] indoor->outdoor,
+ *              [2] outdoor->indoor (downward safety threshold),
+ *   bri_lvl[]: display brightness for night/indoor/outdoor.
+ * Defaults reproduce the original fixed presets. */
+static uint16_t bri_lux[3] = { 600, 2500, 1875 };
+static uint8_t bri_lvl[3] = { BRI_NIGHT, BRI_DIM, BRI_DAY };
+static uint8_t bri_manual = 0x80; /* last manual brightness (AUTO off) */
+static int bri_sel;        /* profile being edited on the settings screen */
+static bool bri_cfg_dirty; /* needs saving to /home/bright.cfg */
+
+/* Alarms (5), edited on the alarms screen, persisted in /home/alarms.cfg.
+ * They trigger only while the idle face is up and nothing is playing, and
+ * stop when the playback length expires or the screen is touched. */
+struct alarm_cfg {
+	uint8_t mode;     /* 0 = off, 1 = once, 2 = repeat */
+	uint8_t hour;
+	uint8_t min;
+	uint16_t len_sec; /* playback length, 15..300 s (15 s steps) */
+	uint8_t days;     /* repeat: bit 0 = Monday .. bit 6 = Sunday */
+	uint8_t sub;      /* ringtone subsong, 0-based */
+	char sid[24];     /* ringtone file name ("" = none) */
+	char title[20];   /* ringtone title for display */
+};
+static struct alarm_cfg alarms[5];
+static int alm_sel;         /* alarm being edited */
+static bool alm_cfg_dirty;  /* needs saving to /home/alarms.cfg */
+static bool alarm_ringing;
+static uint32_t alarm_until;      /* k_uptime deadline of the ringing alarm */
+static uint32_t alarm_fired_min = 0xFFFFFFFFU; /* wall minute already fired */
+static uint8_t volume = 26; /* ~10% default: Commando at full blast is loud */
+static bool sound_on = true;
+static bool fs_ready;
+
+/* Active UI screen (the idle clock face is a separate mode: idle_mode) */
+enum ui_screen { SCR_MAIN = 0, SCR_SID, SCR_SENSORS, SCR_SETTINGS, SCR_ALARMS };
+static enum ui_screen ui_scr;
+static char sid_cur_name[24]; /* current /home/<name>.sid ("" = none yet) */
+static int sid_end_mode; /* at song end: 0 = next sub (default),
+			  * 1 = next tune, 2 = loop the subtune */
+static uint16_t sid_lengths[32]; /* <stem>.len values (s); 0 = unknown */
+static void sid_load_lengths(const char *name); /* defined with the UI below */
+static void sid_stil_load(const char *name); /* defined with the UI below */
+static void sid_remember_save(void); /* defined with the UI below */
+static void sid_scroll_restart(void); /* defined with the UI below */
+static int home_list(uint16_t start, uint8_t *dst, int size); /* below */
+static void home_write_dir(void); /* below */
+static int16_t ls_start = -1; /* pending /home listing request (page start) */
+
+/*
+ * /home LittleFS (external MX25R64). Mounted WITHOUT auto-format so a dirty
+ * or foreign filesystem is never wiped behind the user's back; the explicit
+ * "fsformat" debug
+ * command (0x0D) formats and mounts when a fresh filesystem is wanted.
+ * Served over BLE by MCUmgr fs_mgmt (smpmgr file ...).
+ */
+FS_LITTLEFS_DECLARE_DEFAULT_CONFIG(sidclock_lfs_data);
+static struct fs_mount_t sidclock_fs_mp = {
+	.type = FS_LITTLEFS,
+	.fs_data = &sidclock_lfs_data,
+	.storage_dev = (void *)FIXED_PARTITION_ID(storage_partition),
+	.mnt_point = "/home",
+	.flags = FS_MOUNT_FLAG_NO_FORMAT,
+};
+
+static void fs_storage_init(bool format)
+{
+	int rc;
+
+	if (fs_ready) {
+		LOG_INF("LittleFS already mounted");
+		return;
+	}
+
+	sidclock_fs_mp.flags = format ? 0 : FS_MOUNT_FLAG_NO_FORMAT;
+	rc = fs_mount(&sidclock_fs_mp);
+	if (rc < 0) {
+		LOG_WRN("LittleFS mount failed (%d)%s", rc,
+			format ? "" :
+			" - use the 'fsformat' debug command to recreate it");
+		return;
+	}
+	fs_ready = true;
+	LOG_INF("LittleFS mounted at /home");
+}
+static uint32_t last_touch_ms;
+static uint32_t countdown_second = 0xFFFFFFFFU;
+
+/* Battery / charger (AIN7, P1.12 = CHG, P1.13) */
+static const struct adc_dt_spec batt_adc =
+	ADC_DT_SPEC_GET(DT_PATH(zephyr_user));
+static const struct device *gpio1 = DEVICE_DT_GET(DT_NODELABEL(gpio1));
+static const struct device *als = DEVICE_DT_GET(DT_NODELABEL(als_if));
+static uint16_t battery_mv;
+static uint8_t battery_pct;
+static bool charger_on;
+static bool ext_power;
+static uint8_t chg_pin12;
+static uint8_t chg_pin13;
+static int32_t als_mlux;
+static bool als_ok;
+static uint16_t batt_right = BATT_X1; /* moves in idle (burn-in) */
+
+/* ------------------------------------------------------------------ */
+/* Graphics helpers (RGB565, big-endian on the wire)                   */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Software rotation.
+ *
+ * The panel stays in its native 368x448 portrait address space (MADCTL 0x00,
+ * exactly like the stock firmware - its MADCTL handling only produced
+ * mirrored/transposed images on this unit). Every window we send is
+ * transposed into the native space instead, so the UI can be laid out in a
+ * logical 448x368 landscape frame:
+ *
+ *   rot_270 == false: logical (u,v) -> physical px = v,        py = 447 - u
+ *   rot_270 == true : logical (u,v) -> physical px = 367 - v,  py = u
+ */
+static void write_rect(int x, int y, int w, int h, const uint8_t *buf)
+{
+	struct display_buffer_descriptor d = { 0 };
+	/* The normal UI is landscape; the idle face can be rotated to
+	 * portrait or the other landscape orientation (auto rotation). */
+	int rot = idle_mode ? idle_rot : (rot_270 ? 2 : 0);
+
+	if (rot == 1) {
+		/* portrait, identity: the source buffer is already in panel
+		 * layout */
+		d.buf_size = (size_t)w * h * 2U;
+		d.width = (uint16_t)w;
+		d.height = (uint16_t)h;
+		d.pitch = 0U;
+		display_write(disp, (uint16_t)x, (uint16_t)y, &d, buf);
+		return;
+	}
+
+	/* src is h rows x w cols, dst is transposed (RGB565) */
+	for (int du = 0; du < w; du++) {
+		for (int dv = 0; dv < h; dv++) {
+			const uint8_t *s = &buf[(dv * w + du) * 2];
+			uint8_t *t;
+
+			if (rot == 0) {
+				t = &rot_buf[((w - 1 - du) * h + dv) * 2];
+			} else if (rot == 2) {
+				t = &rot_buf[(du * h + (h - 1 - dv)) * 2];
+			} else { /* 3: portrait, 180 deg */
+				t = &rot_buf[((h - 1 - dv) * w +
+					      (w - 1 - du)) * 2];
+			}
+			t[0] = s[0];
+			t[1] = s[1];
+		}
+	}
+
+	if (rot == 0) {
+		d.buf_size = (size_t)h * w * 2U;
+		d.width = (uint16_t)h;
+		d.height = (uint16_t)w;
+		display_write(disp, (uint16_t)y, (uint16_t)(NAT_H - x - w),
+			      &d, rot_buf);
+	} else if (rot == 2) {
+		d.buf_size = (size_t)h * w * 2U;
+		d.width = (uint16_t)h;
+		d.height = (uint16_t)w;
+		display_write(disp, (uint16_t)(NAT_W - y - h), (uint16_t)x,
+			      &d, rot_buf);
+	} else {
+		d.buf_size = (size_t)w * h * 2U;
+		d.width = (uint16_t)w;
+		d.height = (uint16_t)h;
+		display_write(disp, (uint16_t)(NAT_W - x - w),
+			      (uint16_t)(NAT_H - y - h), &d, rot_buf);
+	}
+}
+
+static void fill_rect(int x, int y, int w, int h, uint16_t color)
+{
+	const int rows = 16;
+
+	for (int i = 0; i < w * rows; i++) {
+		band_buf[2 * i] = (uint8_t)(color >> 8);
+		band_buf[2 * i + 1] = (uint8_t)color;
+	}
+
+	for (int yy = 0; yy < h; yy += rows) {
+		int rh = MIN(rows, h - yy);
+
+		write_rect(x, y + yy, w, rh, band_buf);
+	}
+}
+
+static uint8_t glyph_bit(char c, int x, int y)
+{
+	if (c < 32 || c > 126) {
+		c = ' ';
+	}
+	const uint8_t *g = font1524[(uint8_t)c - 32];
+
+	return (g[x * 3 + (y >> 3)] >> (y & 7)) & 1U;
+}
+
+static void draw_text(int x, int y, const char *s, uint16_t fg, uint16_t bg)
+{
+	int n = (int)strlen(s);
+	int maxn = (SCR_W - x) / TEXT_CW;
+	int w, h;
+
+	if (n > maxn) {
+		n = maxn;
+	}
+	if (n <= 0) {
+		return;
+	}
+
+	w = n * TEXT_CW;
+	h = TEXT_CH;
+
+	/* native glyphs, drawn in 16-row bands (band_buf is 16 rows tall) */
+	for (int ry = 0; ry < h; ry += 16) {
+		int rh = MIN(16, h - ry);
+
+		for (int py = 0; py < rh; py++) {
+			int sy = ry + py;
+
+			for (int px = 0; px < w; px++) {
+				char c = s[px / FONT_W];
+				uint16_t col = glyph_bit(c, px % FONT_W, sy)
+						       ? fg : bg;
+
+				band_buf[(py * w + px) * 2] = (uint8_t)(col >> 8);
+				band_buf[(py * w + px) * 2 + 1] = (uint8_t)col;
+			}
+		}
+		write_rect(x, y + ry, w, rh, band_buf);
+	}
+}
+
+/* ------------------------------------------------------------------ */
+/* Text cache: skip drawing identical text and erase residue           */
+/* ------------------------------------------------------------------ */
+/*
+ * Every draw_text() call is one SPI window write straight to the panel.
+ * Redrawing unchanged text (battery block every 2 s, song time every
+ * second) makes the region visibly blink, so cache the last string per
+ * slot: identical text = no panel traffic at all, and a shortened string
+ * is padded with background so no separate "clear" pass is needed.
+ */
+enum {
+	TC_TIME = 0, TC_DATE, TC_VER, TC_BATT1, TC_BATT2, TC_BATT3,
+	TC_SID_TITLE, TC_SID_AUTHOR, TC_SID_SONG, TC_SID_FILE, TC_SID_CNT,
+	TC_SID_CMT, TC_ACCEL, TC_COUNT
+};
+
+static struct {
+	char s[40];
+	uint16_t x, y;
+	bool ok;
+} tcache[TC_COUNT];
+
+static void text_cache_reset(void)
+{
+	for (int i = 0; i < TC_COUNT; i++) {
+		tcache[i].ok = false;
+	}
+}
+
+static void draw_text_cached(int slot, int x, int y, const char *s,
+			     uint16_t fg, uint16_t bg)
+{
+	if (slot < 0 || slot >= TC_COUNT) {
+		draw_text(x, y, s, fg, bg);
+		return;
+	}
+	if (tcache[slot].ok && tcache[slot].x == (uint16_t)x &&
+	    tcache[slot].y == (uint16_t)y &&
+	    strcmp(tcache[slot].s, s) == 0) {
+		return; /* identical: leave the panel alone */
+	}
+	if (tcache[slot].ok) {
+		/* erase what the previous (possibly wider or shifted) string
+		 * covered and the new one does not */
+		int old_x = tcache[slot].x;
+		int old_w = (int)strlen(tcache[slot].s) * TEXT_CW;
+		int new_w = (int)strlen(s) * TEXT_CW;
+
+		if (old_x < x) {
+			fill_rect(old_x, y, x - old_x, TEXT_CH, bg);
+		}
+		if (old_x + old_w > x + new_w) {
+			fill_rect(x + new_w, y, old_x + old_w - (x + new_w),
+				  TEXT_CH, bg);
+		}
+	}
+	snprintf(tcache[slot].s, sizeof(tcache[slot].s), "%s", s);
+	tcache[slot].x = (uint16_t)x;
+	tcache[slot].y = (uint16_t)y;
+	tcache[slot].ok = true;
+	draw_text(x, y, s, fg, bg);
+}
+
+/* ------------------------------------------------------------------ */
+/* Landscape UI: tiles, buttons, sliders, rotation, sleep              */
+/* ------------------------------------------------------------------ */
+
+static bool hit(int x, int y, int x0, int y0, int w, int h)
+{
+	return x >= x0 && x < x0 + w && y >= y0 && y < y0 + h;
+}
+
+static void draw_button(int x, int y, int w, int h, const char *label,
+			bool active)
+{
+	/* "active" (toggled/pushed) buttons are inverted: light grey like the
+	 * slider track with dark text - green+white was unreadable. */
+	uint16_t bg = active ? COL_TRACK : COL_BTN;
+	uint16_t fg = active ? COL_BG : COL_WHITE;
+
+	fill_rect(x, y, w, h, bg);
+	fill_rect(x, y, w, 1, COL_BORDER);
+	fill_rect(x, y + h - 1, w, 1, COL_BORDER);
+	fill_rect(x, y, 1, h, COL_BORDER);
+	fill_rect(x + w - 1, y, 1, h, COL_BORDER);
+	draw_text(x + (w - (int)strlen(label) * TEXT_CW) / 2,
+		  y + (h - TEXT_CH) / 2, label, fg, bg);
+}
+
+/* Navigation tile: light slate with a centred one- or two-line label. */
+static void draw_tile(int x, int y, const char *l1, const char *l2, bool active)
+{
+	uint16_t bg = active ? COL_TRACK : COL_BTN;
+	uint16_t fg = active ? COL_BG : COL_WHITE;
+	int yy;
+
+	fill_rect(x, y, TILE_W, TILE_H, bg);
+	fill_rect(x, y, TILE_W, 1, COL_BORDER);
+	fill_rect(x, y + TILE_H - 1, TILE_W, 1, COL_BORDER);
+	fill_rect(x, y, 1, TILE_H, COL_BORDER);
+	fill_rect(x + TILE_W - 1, y, 1, TILE_H, COL_BORDER);
+
+	if (l2 != NULL) {
+		yy = y + (TILE_H - (2 * TEXT_CH + 8)) / 2;
+		draw_text(x + (TILE_W - (int)strlen(l1) * TEXT_CW) / 2, yy, l1,
+			  fg, bg);
+		draw_text(x + (TILE_W - (int)strlen(l2) * TEXT_CW) / 2,
+			  yy + TEXT_CH + 8, l2, fg, bg);
+	} else {
+		yy = y + (TILE_H - TEXT_CH) / 2;
+		draw_text(x + (TILE_W - (int)strlen(l1) * TEXT_CW) / 2, yy, l1,
+			  fg, bg);
+	}
+}
+
+/* ------------------------------------------------------------------ */
+/* Wall time: defaults to uptime starting 00:00 on 1 Jan 2000;         */
+/* settable over BLE through the standard Current Time Service (CTS)   */
+/* ------------------------------------------------------------------ */
+
+static const char *const month_names[12] = {
+	"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+	"Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+};
+
+static struct k_spinlock time_lock;
+static uint32_t epoch_set = 946684800U; /* 2000-01-01 00:00:00 UTC */
+static uint32_t uptime_set;             /* k_uptime_get_32() of the set */
+
+static uint32_t epoch_now(void)
+{
+	k_spinlock_key_t key = k_spin_lock(&time_lock);
+	uint32_t base = epoch_set;
+	uint32_t at = uptime_set;
+
+	k_spin_unlock(&time_lock, key);
+
+	return base + ((k_uptime_get_32() - at) / 1000U);
+}
+
+/* Days since 1970-01-01 from a civil date (Howard Hinnant's algorithm). */
+static int64_t days_from_civil(int y, unsigned m, unsigned d)
+{
+	int64_t era;
+	unsigned yoe, doy, doe;
+
+	y -= (m <= 2U);
+	era = (y >= 0 ? y : y - 399) / 400;
+	yoe = (unsigned)(y - era * 400);
+	doy = (153U * (m > 2U ? m - 3U : m + 9U) + 2U) / 5U + d - 1U;
+	doe = yoe * 365U + yoe / 4U - yoe / 100U + doy;
+
+	return era * 146097 + (int64_t)doe - 719468;
+}
+
+static void epoch_to_date(uint32_t epoch, int *year, int *month, int *day)
+{
+	uint32_t days = epoch / 86400U;
+	int64_t z = (int64_t)days + 719468;
+	int64_t era = z / 146097;
+	uint32_t doe = (uint32_t)(z - era * 146097);
+	uint32_t yoe = (doe - doe / 1460U + doe / 36524U - doe / 146096U) / 365U;
+	int64_t y = (int64_t)yoe + era * 400;
+	uint32_t doy = doe - (365U * yoe + yoe / 4U - yoe / 100U);
+	uint32_t mp = (5U * doy + 2U) / 153U;
+	uint32_t dd = doy - (153U * mp + 2U) / 5U + 1U;
+	uint32_t mm = (mp < 10U) ? mp + 3U : mp - 9U;
+
+	*day = (int)dd;
+	*month = (int)mm;
+	*year = (int)(y + (mm <= 2U));
+}
+
+static void time_cfg_save(void); /* defined below */
+
+static void time_set_from_host(uint16_t year, uint8_t mon, uint8_t day,
+			       uint8_t hh, uint8_t mm, uint8_t ss)
+{
+	uint32_t secs = (uint32_t)(days_from_civil(year, mon, day) * 86400 +
+				   hh * 3600 + mm * 60 + ss);
+	k_spinlock_key_t key = k_spin_lock(&time_lock);
+
+	epoch_set = secs;
+	uptime_set = k_uptime_get_32();
+	k_spin_unlock(&time_lock, key);
+
+	time_cfg_save(); /* survive reboots (no RTC on the board) */
+	LOG_INF("time set: %04u-%02u-%02u %02u:%02u:%02u", year, mon, day, hh,
+		mm, ss);
+}
+
+/*
+ * Wall-clock persistence: /home/time.cfg holds "epoch uptime_s". The
+ * k_uptime base survives warm resets on this port (the GRTC keeps
+ * counting), so at boot the wall time is restored as saved_epoch + the
+ * elapsed uptime. After a full power cycle the base is lost and the clock
+ * simply restarts from the saved epoch (no RTC on the board).
+ */
+static void time_cfg_save(void)
+{
+	char buf[48];
+	struct fs_file_t f;
+	k_spinlock_key_t key;
+	uint32_t e, u;
+	int n;
+
+	if (!fs_ready) {
+		return;
+	}
+	key = k_spin_lock(&time_lock);
+	e = epoch_set;
+	u = k_uptime_get_32();
+	k_spin_unlock(&time_lock, key);
+
+	n = snprintf(buf, sizeof(buf), "%u %u\n", e, u / 1000U);
+	fs_file_t_init(&f);
+	if (fs_open(&f, "/home/time.cfg",
+		    FS_O_WRITE | FS_O_CREATE | FS_O_TRUNC) == 0) {
+		(void)fs_write(&f, buf, (size_t)n);
+		fs_close(&f);
+	}
+}
+
+static void time_cfg_load(void)
+{
+	char buf[48];
+	struct fs_file_t f;
+	ssize_t rd;
+	char *p;
+	uint32_t v[2];
+	uint32_t now, saved_ms, base;
+
+	if (!fs_ready) {
+		return;
+	}
+	fs_file_t_init(&f);
+	if (fs_open(&f, "/home/time.cfg", FS_O_READ) < 0) {
+		return;
+	}
+	rd = fs_read(&f, buf, sizeof(buf) - 1U);
+	fs_close(&f);
+	if (rd <= 0) {
+		return;
+	}
+	buf[rd] = '\0';
+
+	p = buf;
+	for (int i = 0; i < 2; i++) {
+		v[i] = 0;
+		while (*p == ' ' || *p == '\n' || *p == '\r' || *p == '\t') {
+			p++;
+		}
+		if (*p < '0' || *p > '9') {
+			return;
+		}
+		while (*p >= '0' && *p <= '9') {
+			v[i] = v[i] * 10U + (uint32_t)(*p++ - '0');
+		}
+	}
+	if (v[0] == 0U) {
+		return;
+	}
+
+	now = k_uptime_get_32();
+	saved_ms = v[1] * 1000U;
+	base = v[0];
+	/* Only add the elapsed time when the uptime counter moved forward
+	 * (warm reset). If it is smaller, the board had a cold boot and the
+	 * elapsed time is unknown - keep the saved epoch, never invent time.
+	 * The periodic 30 min saves keep this window small. */
+	if (now >= saved_ms) {
+		base += (now - saved_ms) / 1000U;
+	}
+
+	k_spinlock_key_t key = k_spin_lock(&time_lock);
+
+	epoch_set = base;
+	uptime_set = now;
+	k_spin_unlock(&time_lock, key);
+	LOG_INF("time restored: epoch %u uptime %u ms", base, now);
+}
+
+/*
+ * 24-hour clock. Before the host sets the time this runs from uptime,
+ * starting 00:00 on 1 Jan 2000: no RTC, so wall time only lasts until
+ * the next power cycle unless the host re-sends it.
+ */
+static void clock_string(char *buf, size_t len)
+{
+	uint32_t mins = (epoch_now() / 60U) % (24U * 60U);
+
+	snprintf(buf, len, "%02u:%02u", (unsigned)(mins / 60U),
+		 (unsigned)(mins % 60U));
+}
+
+/* ------------------------------------------------------------------ */
+/* BLE GATT: standard Battery Service + Current Time Service (write)   */
+/* ------------------------------------------------------------------ */
+
+static uint8_t ble_batt_level;
+
+static void batt_ccc_changed(const struct bt_gatt_attr *attr, uint16_t value)
+{
+	ARG_UNUSED(attr);
+	ARG_UNUSED(value);
+}
+
+static ssize_t ble_batt_read(struct bt_conn *conn,
+			     const struct bt_gatt_attr *attr, void *buf,
+			     uint16_t len, uint16_t offset)
+{
+	return bt_gatt_attr_read(conn, attr, buf, len, offset, &ble_batt_level,
+				 sizeof(ble_batt_level));
+}
+
+BT_GATT_SERVICE_DEFINE(bas_svc,
+	BT_GATT_PRIMARY_SERVICE(BT_UUID_DECLARE_16(0x180F)),
+	BT_GATT_CHARACTERISTIC(BT_UUID_DECLARE_16(0x2A19),
+			       BT_GATT_CHRC_READ | BT_GATT_CHRC_NOTIFY,
+			       BT_GATT_PERM_READ, ble_batt_read, NULL, NULL),
+	BT_GATT_CCC(batt_ccc_changed, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE),
+);
+
+static uint8_t cts_value[10];
+
+static void cts_fill(void)
+{
+	uint32_t now = epoch_now();
+	uint32_t days = now / 86400U;
+	uint32_t rem = now % 86400U;
+	int y, m, d;
+
+	epoch_to_date(now, &y, &m, &d);
+
+	sys_put_le16((uint16_t)y, &cts_value[0]);
+	cts_value[2] = (uint8_t)m;
+	cts_value[3] = (uint8_t)d;
+	cts_value[4] = (uint8_t)(rem / 3600U);
+	cts_value[5] = (uint8_t)((rem / 60U) % 60U);
+	cts_value[6] = (uint8_t)(rem % 60U);
+	/* 1 = Monday .. 7 = Sunday; Unix day 0 was a Thursday */
+	cts_value[7] = (uint8_t)(((days + 3U) % 7U) + 1U);
+	cts_value[8] = 0U; /* fractions of a second (256ths) */
+	cts_value[9] = 0U; /* adjust reason: manual time update */
+}
+
+static ssize_t ble_cts_read(struct bt_conn *conn,
+			    const struct bt_gatt_attr *attr, void *buf,
+			    uint16_t len, uint16_t offset)
+{
+	cts_fill();
+
+	return bt_gatt_attr_read(conn, attr, buf, len, offset, cts_value,
+				 sizeof(cts_value));
+}
+
+static ssize_t ble_cts_write(struct bt_conn *conn,
+			     const struct bt_gatt_attr *attr, const void *buf,
+			     uint16_t len, uint16_t offset, uint8_t flags)
+{
+	const uint8_t *p = buf;
+	uint16_t year;
+	uint8_t mon, day, hh, mm, ss;
+
+	if (offset != 0U || len != 10U) {
+		return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+	}
+
+	year = sys_get_le16(p);
+	mon = p[2];
+	day = p[3];
+	hh = p[4];
+	mm = p[5];
+	ss = p[6];
+
+	if (year < 1970U || mon < 1U || mon > 12U || day < 1U || day > 31U ||
+	    hh > 23U || mm > 59U || ss > 59U) {
+		return BT_GATT_ERR(BT_ATT_ERR_VALUE_NOT_ALLOWED);
+	}
+
+	time_set_from_host(year, mon, day, hh, mm, ss);
+
+	return len;
+}
+
+BT_GATT_SERVICE_DEFINE(cts_svc,
+	BT_GATT_PRIMARY_SERVICE(BT_UUID_DECLARE_16(0x1805)),
+	BT_GATT_CHARACTERISTIC(BT_UUID_DECLARE_16(0x2A2B),
+			       BT_GATT_CHRC_READ | BT_GATT_CHRC_WRITE |
+				       BT_GATT_CHRC_WRITE_WITHOUT_RESP,
+			       BT_GATT_PERM_READ | BT_GATT_PERM_WRITE,
+			       ble_cts_read, ble_cts_write, NULL),
+);
+
+/* Ambient light: standard Illuminance characteristic (0.01 lx units) */
+static uint8_t ble_lux_value[3]; /* uint24, little-endian */
+
+static ssize_t ble_lux_read(struct bt_conn *conn,
+			    const struct bt_gatt_attr *attr, void *buf,
+			    uint16_t len, uint16_t offset)
+{
+	int32_t cl = als_ok ? als_mlux / 10 : 0; /* 0.01 lx units */
+
+	if (cl < 0) {
+		cl = 0;
+	} else if (cl > 0xFFFFFF) {
+		cl = 0xFFFFFF;
+	}
+	ble_lux_value[0] = (uint8_t)(cl & 0xFF);
+	ble_lux_value[1] = (uint8_t)((cl >> 8) & 0xFF);
+	ble_lux_value[2] = (uint8_t)((cl >> 16) & 0xFF);
+
+	return bt_gatt_attr_read(conn, attr, buf, len, offset, ble_lux_value,
+				 sizeof(ble_lux_value));
+}
+
+BT_GATT_SERVICE_DEFINE(ess_svc,
+	BT_GATT_PRIMARY_SERVICE(BT_UUID_DECLARE_16(0x181A)),
+	/* 0x2AFB = Illuminance (unit: lux, uint24, 0.01 lx resolution).
+	 * 0x2A77 would be Irradiance (W/m2) - nRF Connect is right. */
+	BT_GATT_CHARACTERISTIC(BT_UUID_DECLARE_16(0x2AFB),
+			       BT_GATT_CHRC_READ, BT_GATT_PERM_READ,
+			       ble_lux_read, NULL, NULL),
+);
+
+/*
+ * Debug service (custom UUID): reads the status snapshot; writes trigger
+ * sounds (0x01 click, 0x02 beep, 0x03 sound on/off, 0x50 1 s tone) and
+ * other developer commands (see docs/ble-services.md).
+ */
+#define SIDCLOCK_DBG_SVC_UUID                                                  \
+	BT_UUID_DECLARE_128(BT_UUID_128_ENCODE(0x73696463, 0x6c6f, 0x4b01,     \
+					       0x9c1d, 0x77ce3f41a5c0))
+#define SIDCLOCK_DBG_CHR_UUID                                                  \
+	BT_UUID_DECLARE_128(BT_UUID_128_ENCODE(0x73696463, 0x6c6f, 0x4b02,     \
+					       0x9c1d, 0x77ce3f41a5c0))
+
+/* [0..19] audio status/format/timing, [20..33] I2S registers, [34..95] diag */
+static uint8_t ble_dbg[96];
+
+static ssize_t ble_dbg_read(struct bt_conn *conn,
+			    const struct bt_gatt_attr *attr, void *buf,
+			    uint16_t len, uint16_t offset)
+{
+	memcpy(ble_dbg, audio_debug(), 20U);
+	audio_read_hw(ble_dbg + 20, 14U);
+	audio_diag(ble_dbg + 34, sizeof(ble_dbg) - 34U);
+	sid_player_info(ble_dbg + 72, sizeof(ble_dbg) - 72U);
+
+	/* pending /home listing (command 0x13): replace the diag block with
+	 * "name\n" entries; [95] = next page index or 0xFF when done */
+	if (ls_start >= 0) {
+		int next = home_list((uint16_t)ls_start, ble_dbg + 34, 61);
+
+		ble_dbg[95] = (next < 0 || next > 254) ? 0xFFU : (uint8_t)next;
+		if (ls_start == 0) {
+			/* keep the fallback dir.txt index fresh */
+			home_write_dir();
+		}
+		ls_start = -1;
+	}
+
+	return bt_gatt_attr_read(conn, attr, buf, len, offset, ble_dbg,
+				 sizeof(ble_dbg));
+}
+
+static ssize_t ble_dbg_write(struct bt_conn *conn,
+			     const struct bt_gatt_attr *attr, const void *buf,
+			     uint16_t len, uint16_t offset, uint8_t flags)
+{
+	const uint8_t *p = buf;
+
+	if (offset != 0U ||
+	    !(len == 1U ||
+	      (len == 2U && p[0] == 0x0EU) ||
+	      (len == 2U && p[0] == 0x12U) ||
+	      (len == 3U && p[0] == 0x13U) ||
+	      (len >= 2U && len <= 21U && p[0] == 0x11U) ||
+	      (len == 5U && (p[0] == 0x09U || p[0] == 0x0AU ||
+			     p[0] == 0x0BU || p[0] == 0x10U)))) {
+		return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+	}
+
+	switch (p[0]) {
+	case 0x0B:
+		if (len != 5U) {
+			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+		}
+		audio_tone_hold((uint32_t)p[1] | ((uint32_t)p[2] << 8) |
+				((uint32_t)p[3] << 16) |
+				((uint32_t)p[4] << 24), 0U);
+		break;
+	case 0x0C:
+		audio_tone_release();
+		break;
+	case 0x09:
+		if (len != 5U) {
+			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+		}
+		audio_set_rate((uint32_t)p[1] | ((uint32_t)p[2] << 8) |
+			       ((uint32_t)p[3] << 16) | ((uint32_t)p[4] << 24));
+		break;
+	case 0x0A:
+		if (len != 5U) {
+			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+		}
+		audio_set_tone((uint32_t)p[1] | ((uint32_t)p[2] << 8) |
+			       ((uint32_t)p[3] << 16) | ((uint32_t)p[4] << 24));
+		break;
+	case 0x01:
+		audio_click();
+		break;
+	case 0x02:
+		audio_beep();
+		break;
+	case 0x03:
+		sound_on = !sound_on;
+		audio_set_enabled(sound_on);
+		break;
+	case 0x0D:
+		fs_storage_init(true); /* DESTRUCTIVE: formats /home if needed */
+		break;
+	case 0x0E: {
+		char path[40];
+
+		if (len != 2U) {
+			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+		}
+		snprintf(sid_cur_name, sizeof(sid_cur_name), "%u.sid",
+			 p[1] % 10U);
+		snprintf(path, sizeof(path), "/home/%s", sid_cur_name);
+		if (sid_player_load(path) == 0) {
+			sid_load_lengths(sid_cur_name);
+			sid_stil_load(sid_cur_name);
+			sid_remember_save();
+			sid_player_play_default();
+			audio_sid_start();
+		}
+		break;
+	}
+	case 0x11: {
+		char name[24], path[40];
+
+		if (len < 2U || len > 21U) {
+			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+		}
+		memcpy(name, p + 1, len - 1U);
+		name[len - 1U] = '\0';
+		snprintf(path, sizeof(path), "/home/%s", name);
+		if (sid_player_load(path) == 0) {
+			snprintf(sid_cur_name, sizeof(sid_cur_name), "%s",
+				 name);
+			sid_load_lengths(sid_cur_name);
+			sid_stil_load(sid_cur_name);
+			sid_remember_save();
+			sid_player_play_default();
+			audio_sid_start();
+		} else {
+			return BT_GATT_ERR(BT_ATT_ERR_VALUE_NOT_ALLOWED);
+		}
+		break;
+	}
+	case 0x12:
+		if (len != 2U) {
+			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+		}
+		sid_player_set_model(p[1] % 3U);
+		break;
+	case 0x13:
+		if (len != 3U) {
+			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+		}
+		ls_start = (int16_t)((uint16_t)p[1] | ((uint16_t)p[2] << 8));
+		break;
+	case 0x0F:
+		sid_player_stop();
+		audio_sid_stop();
+		break;
+	case 0x10:
+		if (len != 5U) {
+			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+		}
+		audio_set_mck_raw((uint32_t)p[1] | ((uint32_t)p[2] << 8) |
+				  ((uint32_t)p[3] << 16) |
+				  ((uint32_t)p[4] << 24));
+		break;
+	case 0x07:
+		audio_rate_next();
+		break;
+	case 0x08:
+		audio_tone_next();
+		break;
+	case 0x50:
+		audio_long_tone();
+		break;
+	default:
+		return BT_GATT_ERR(BT_ATT_ERR_VALUE_NOT_ALLOWED);
+	}
+
+	return len;
+}
+
+BT_GATT_SERVICE_DEFINE(dbg_svc,
+	BT_GATT_PRIMARY_SERVICE(SIDCLOCK_DBG_SVC_UUID),
+	BT_GATT_CHARACTERISTIC(SIDCLOCK_DBG_CHR_UUID,
+			       BT_GATT_CHRC_READ | BT_GATT_CHRC_WRITE,
+			       BT_GATT_PERM_READ | BT_GATT_PERM_WRITE,
+			       ble_dbg_read, ble_dbg_write, NULL),
+);
+
+/*
+ * Big 7-segment clock drawn as filled rectangles (no font scaling), moved
+ * to a random spot every minute to avoid AMOLED burn-in.
+ */
+/*
+ * 7-segment clock, vector drawn: all geometry derives from a base design
+ * (digit 52x92, 10 px bars, 10 px gaps, colon 18 -> total 256 wide) scaled
+ * so the clock spans CLOCK_W_PCT_LAND/PORT percent of the active idle
+ * frame width. Segments are bars with 45-degree corner chamfers (old
+ * calculator look); every 16-row band is composed in band_buf and pushed
+ * with a single write_rect.
+ */
+#define CLOCK_W_PCT_LAND 75 /* clock width, percent of the frame width */
+#define CLOCK_W_PCT_PORT 75
+#define CLOCK_CHAMFER_PCT 40 /* corner cut, percent of the bar thickness */
+
+/* Ink width of the base design ("HH:MM" = 4 digits + colon + 4 gaps; the
+ * colon's own gap sits inside). Scaling by this (not the smaller layout
+ * box) keeps the last digit from being clipped by the band write. */
+#define CLOCK_BASE_W 266
+
+static int clock_total_w(int fw)
+{
+	return fw * ((idle_rot & 1) ? CLOCK_W_PCT_PORT : CLOCK_W_PCT_LAND) /
+	       100;
+}
+
+/* scaled base value (scale is in 1/1000 units) */
+static int sc(int v, int sm)
+{
+	return v * sm / 1000;
+}
+
+/* Fill the rows of a chamfered bar that fall inside the band starting at
+ * clock row `by` (bar coords are relative to the clock block). */
+static void chamfer_rect_band(uint8_t *buf, int bw, int by, int rows,
+			      int sx, int sy, int sw, int sh, int c)
+{
+	int r0 = MAX(sy, by);
+	int r1 = MIN(sy + sh, by + rows);
+
+	for (int r = r0; r < r1; r++) {
+		int inset = 0;
+		int x0, x1;
+
+		if (r - sy < c) {
+			inset = c - (r - sy);
+		} else if (sy + sh - 1 - r < c) {
+			inset = c - (sy + sh - 1 - r);
+		}
+		x0 = sx + inset;
+		x1 = sx + sw - 1 - inset;
+		if (x0 < 0) {
+			x0 = 0;
+		}
+		if (x1 >= bw) {
+			x1 = bw - 1;
+		}
+		for (int px = x0; px <= x1; px++) {
+			size_t o = ((size_t)(r - by) * (size_t)bw +
+				    (size_t)px) *
+				   2U;
+
+			buf[o] = 0xFF;
+			buf[o + 1] = 0xFF;
+		}
+	}
+}
+
+static void draw_clock_at(int x, int y)
+{
+	static const uint8_t segs[10] = {
+		0x3F, 0x06, 0x5B, 0x4F, 0x66,
+		0x6D, 0x7D, 0x07, 0x7F, 0x6F,
+	};
+	char clk[8];
+	char date[16];
+	int year, month, day, w;
+	int fw = idle_fw();
+	int total_w = clock_total_w(fw);
+	int sm = total_w * 1000 / CLOCK_BASE_W;
+	int t = sc(SEG_T, sm); /* bar thickness */
+	int c = t * CLOCK_CHAMFER_PCT / 100;
+	int dh = sc(SEG_H, sm);
+	int dw = sc(SEG_W, sm);
+	int dgap = sc(SEG_GAP, sm);
+	int cw = sc(SEG_COLON_W, sm);
+
+	if (c < 1) {
+		c = 1;
+	}
+
+	clock_string(clk, sizeof(clk));
+
+	for (int by = 0; by < dh; by += 16) {
+		int rows = MIN(16, dh - by);
+		int cx = 0;
+
+		memset(band_buf, 0, (size_t)total_w * (size_t)rows * 2U);
+
+		for (int i = 0; clk[i] != '\0'; i++) {
+			if (clk[i] == ':') {
+				int dotx = cx + (cw - t) / 2;
+
+				chamfer_rect_band(band_buf, total_w, by, rows,
+						  dotx, dh / 2 - 2 * t, t, t,
+						  c);
+				chamfer_rect_band(band_buf, total_w, by, rows,
+						  dotx, dh / 2 + t, t, t, c);
+				cx += cw + dgap;
+				continue;
+			}
+			{
+				uint8_t m = segs[clk[i] - '0'];
+				int ym = dh / 2;
+				/* gap between the upper and lower verticals:
+				 * a quarter bar per side (keeps digits without
+				 * the middle segment like 0/1 from looking
+				 * split while 8/9/5 stay seamless) */
+				int mh = MAX(1, t / 4);
+
+				if (m & 0x01) {
+					chamfer_rect_band(band_buf, total_w, by,
+							  rows, cx + t, 0,
+							  dw - 2 * t, t, c);
+				}
+				if (m & 0x02) {
+					chamfer_rect_band(band_buf, total_w, by,
+							  rows, cx + dw - t, t,
+							  t, dh / 2 - t - mh, c);
+				}
+				if (m & 0x04) {
+					chamfer_rect_band(band_buf, total_w, by,
+							  rows, cx + dw - t,
+							  dh / 2 + mh, t,
+							  dh / 2 - t - mh, c);
+				}
+				if (m & 0x08) {
+					chamfer_rect_band(band_buf, total_w, by,
+							  rows, cx + t,
+							  dh - t, dw - 2 * t,
+							  t, c);
+				}
+				if (m & 0x10) {
+					chamfer_rect_band(band_buf, total_w, by,
+							  rows, cx, dh / 2 + mh, t,
+							  dh / 2 - t - mh, c);
+				}
+				if (m & 0x20) {
+					chamfer_rect_band(band_buf, total_w, by,
+							  rows, cx, t, t,
+							  dh / 2 - t - mh, c);
+				}
+				if (m & 0x40) {
+					chamfer_rect_band(band_buf, total_w, by,
+							  rows, cx + t,
+							  ym - t / 2,
+							  dw - 2 * t, t, c);
+				}
+				cx += dw + dgap;
+			}
+		}
+		write_rect(x, y + by, total_w, rows, band_buf);
+	}
+
+	/* date centred under the digits, moving with the clock */
+	epoch_to_date(epoch_now(), &year, &month, &day);
+	snprintf(date, sizeof(date), "%d %s %d", day, month_names[month - 1],
+		 year);
+	w = (int)strlen(date) * TEXT_CW;
+	draw_text(x + (total_w - w) / 2, y + dh + CLOCK_DATE_GAP, date,
+		  COL_WHITE, COL_BG);
+}
+
+/*
+ * Screen-jitter PRNG (xorshift32). Deliberately NOT sys_rand32_get(): the
+ * only entropy device on this board is the BT HCI RNG, so the first call
+ * makes the host send an HCI LE Rand command; if that response is late the
+ * BT assert (CONFIG_BT_ASSERT) halts the system - blank screen, dead touch,
+ * dead BLE. The positions only need to look scattered, so a local generator
+ * seeded from the cycle counter is plenty.
+ */
+static uint32_t jitter_state;
+
+static uint32_t jitter_next(void)
+{
+	uint32_t x = jitter_state;
+
+	if (x == 0U) {
+		x = k_cycle_get_32() ^ 0x9e3779b9U;
+	}
+	x ^= x << 13;
+	x ^= x >> 17;
+	x ^= x << 5;
+	jitter_state = x;
+
+	return x;
+}
+
+/* True while the idle face should show the clock alone (night profile):
+ * the battery/lux block is hidden and the clock may use the whole frame. */
+static bool idle_night(void)
+{
+	if (!idle_mode) {
+		return false;
+	}
+	return bri_auto ? (auto_step == 0U) : (brightness <= BRI_NIGHT);
+}
+
+static bool idle_night_last; /* last drawn idle face variant */
+
+static void draw_clock_random(void)
+{
+	int fw = idle_fw();
+	int fh = idle_fh();
+	int night = idle_night();
+	int tw = clock_total_w(fw);
+	int sm = tw * 1000 / CLOCK_BASE_W;
+	int dh = sc(SEG_H, sm);
+	int block_h = dh + CLOCK_DATE_GAP + TEXT_CH;
+	int y0 = night ? 2 : (CLOCK_AREA_Y + 2);
+	int x = 12 + (int)(jitter_next() % (unsigned)(fw - tw - 24));
+	int y = y0 + (int)(jitter_next() %
+			   (unsigned)(fh - y0 - block_h - 8));
+
+	/* clear the area the clock can use (the whole frame in night mode,
+	 * below the battery strip otherwise) */
+	if (night) {
+		fill_rect(0, 0, fw, fh, COL_BG);
+	} else {
+		fill_rect(0, CLOCK_AREA_Y, fw, fh - CLOCK_AREA_Y, COL_BG);
+	}
+	draw_clock_at(x, y);
+}
+
+/* Sliders: the value is drawn inside the track (the small labels on the
+ * left were removed; the settings status line too). */
+static void draw_slider_bar_at(int x, int y, int w, uint32_t val,
+			       uint32_t max_val, const char *text)
+{
+	const uint32_t track = (uint32_t)w - 6U;
+	int fill = (int)((track * val) / max_val);
+	int tw = (int)strlen(text) * TEXT_CW;
+	int tx = x + (w - tw) / 2;
+
+	fill_rect(x - 2, y - 2, w + 4, SLD_H + 4, COL_BORDER);
+	fill_rect(x, y, w, SLD_H, COL_TRACK);
+	fill_rect(x + 2, y + 2, fill, SLD_H - 4, COL_GREEN);
+	fill_rect(x + 2 + fill, y + 2, 2, SLD_H - 4, COL_WHITE);
+	/* value on a small dark pill for contrast over fill and track */
+	fill_rect(tx - 3, y + 1, tw + 6, SLD_H - 2, COL_BG);
+	draw_text(tx, y + 1, text, COL_WHITE, COL_BG);
+}
+
+static void draw_slider_bar(int y, uint32_t val, uint32_t max_val,
+			    const char *text)
+{
+	draw_slider_bar_at(SLD_X, y, SLD_W, val, max_val, text);
+}
+
+/* Brightness slider (continuous) */
+static void draw_slider_brightness(void)
+{
+	char t[16];
+
+	snprintf(t, sizeof(t), "BRI %u%%", brightness * 100U / 255U);
+	draw_slider_bar(SLD_BRI_Y, brightness, 255U, t);
+}
+
+/* Volume slider (software volume of the synthesised tones) */
+static void draw_slider_volume(void)
+{
+	char t[16];
+
+	snprintf(t, sizeof(t), "VOL %u%%", volume * 100U / 255U);
+	draw_slider_bar(SLD_VOL_Y, volume, 255U, t);
+}
+
+/* Settings: lux level and brightness of the profile being edited. */
+static void draw_slider_lux(void)
+{
+	char t[16];
+	uint16_t v = bri_lux[bri_sel];
+
+	snprintf(t, sizeof(t), "LUX %u.%02u", v / 1000U, (v % 1000U) / 10U);
+	draw_slider_bar(SET_SLD_LUX_Y, v, 10000U, t);
+}
+
+static void draw_slider_set_bri(void)
+{
+	char t[16];
+
+	snprintf(t, sizeof(t), "BRI %u%%", bri_lvl[bri_sel] * 100U / 255U);
+	draw_slider_bar(SET_SLD_BRI_Y, bri_lvl[bri_sel], 255U, t);
+}
+
+/* Idle timeout: 15 s steps, 15 s .. 5 min (same -/+ style as alarms). */
+static void draw_slider_idle(void)
+{
+	char t[16];
+
+	snprintf(t, sizeof(t), "IDLE %u:%02u", idle_timeout_s / 60U,
+		 idle_timeout_s % 60U);
+	draw_button(ALM_ARR_X0, SET_SLD_IDLE_Y, ALM_ARR_W, SLD_H, "-", false);
+	draw_slider_bar_at(ALM_SLD_X, SET_SLD_IDLE_Y, ALM_SLD_W,
+			   (uint32_t)(idle_timeout_s / 15U - 1U), 19U, t);
+	draw_button(ALM_ARR_X1, SET_SLD_IDLE_Y, ALM_ARR_W, SLD_H, "+", false);
+}
+
+/* Grey bar at the bottom edge: shrinks as the idle timeout approaches. */
+static void draw_countdown(uint32_t elapsed_ms)
+{
+	uint32_t total = (uint32_t)idle_timeout_s * 1000U;
+	uint32_t remain = (elapsed_ms >= total) ? 0U : (total - elapsed_ms);
+	int w = (int)(((uint32_t)(CNT_X1 - CNT_X0) * remain) / total);
+
+	fill_rect(CNT_X0, CNT_Y, CNT_X1 - CNT_X0, 3, COL_BG);
+	if (w > 0) {
+		fill_rect(CNT_X0, CNT_Y, w, 3, COL_BORDER);
+	}
+}
+
+static void draw_accel_bars(const int mg[3]);
+static void show_accel(void);
+
+static void draw_battery(void);
+static void draw_clock_random(void);
+static void enter_idle(void);
+static void exit_idle(void);
+static void accel_resume(void);
+static void accel_suspend(void);
+static int accel_ui_rot(void);
+static void batt_move_random(void);
+static bool alarm_any_armed(void);
+static void alarm_service(void);
+static void alarm_capture_ringtone(void);
+static void alm_cfg_save(void);
+static void alm_cfg_load(void);
+
+/* --- header shared by all screens ---------------------------------- */
+
+static void date_string(char *buf, size_t len)
+{
+	static const char *const wd[7] = {
+		"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"
+	};
+	uint32_t epoch = epoch_now();
+	uint32_t days = epoch / 86400U;
+	int y, m, d;
+
+	epoch_to_date(epoch, &y, &m, &d);
+	snprintf(buf, len, "%s %02d %s", wd[(days + 6U) % 7U], d,
+		 month_names[m - 1]);
+}
+
+/* Time + date lines only: cheap redraw when the minute changes. */
+static void redraw_clock(void)
+{
+	char line[32];
+
+	/* only the first line needs to clear the rounded corner */
+	clock_string(line, sizeof(line));
+	draw_text_cached(TC_TIME, 23, 4, line, COL_WHITE, COL_BG);
+	date_string(line, sizeof(line));
+	draw_text_cached(TC_DATE, 8, 28, line, COL_WHITE, COL_BG);
+}
+
+static void draw_header(void)
+{
+	redraw_clock();
+	draw_text_cached(TC_VER, 8, 52, "v" SIDCLOCK_VERSION, COL_CYAN, COL_BG);
+	draw_battery();
+}
+
+/* --- screens -------------------------------------------------------- */
+
+static void draw_main_screen(void)
+{
+	draw_header();
+
+	draw_tile(TILE_SID_X, TILE_Y, "SID", "PLAYER",
+		  sid_player_is_playing() && !sid_player_is_paused());
+	draw_tile(TILE_ALM_X, TILE_Y, "ALARMS", NULL, alarm_any_armed());
+	draw_tile(TILE_SENS_X, TILE_Y, "SENSOR", NULL, false);
+	draw_tile(TILE_SET_X, TILE_Y, "SETUP", NULL, false);
+
+	draw_button(UB_X1, UB_Y1, UB_W, UB_H,
+		    auto_rot ? "AUTO ROT" : "ROT OFF", auto_rot);
+	draw_button(UB_X2, UB_Y1, UB_W, UB_H,
+		    sound_on ? "SND ON" : "SND OFF", sound_on);
+	draw_button(UB_X1, UB_Y2, UB_W, UB_H, "AUTO BRI", bri_auto);
+	draw_button(UB_X2, UB_Y2, UB_W, UB_H, "SLEEP", false);
+
+	draw_slider_volume();
+	draw_slider_brightness();
+}
+
+/* SID player screen: track info + transport, sliders and header. */
+static void sid_text(char *dst, size_t len, const char *src)
+{
+	snprintf(dst, len, "%.16s", src);
+}
+
+/* Song lengths for the loaded file: optional sidecar /home/<name>.len with
+ * space/comma-separated seconds per subtune (a single value applies to all
+ * subtunes). PSID itself carries no lengths, so without this file the
+ * player cannot know when a tune has "ended". */
+static void sid_load_lengths(const char *name)
+{
+	char path[32], buf[128];
+	struct fs_file_t f;
+	ssize_t rd;
+	char *p;
+	int i;
+	size_t l = strlen(name);
+
+	memset(sid_lengths, 0, sizeof(sid_lengths));
+	if (l <= 4U) {
+		return;
+	}
+	/* "<name>.sid" -> "/home/<name>.len" */
+	snprintf(path, sizeof(path), "/home/%.*s.len", (int)(l - 4U), name);
+	fs_file_t_init(&f);
+	if (fs_open(&f, path, FS_O_READ) < 0) {
+		return;
+	}
+	rd = fs_read(&f, buf, sizeof(buf) - 1U);
+	fs_close(&f);
+	if (rd <= 0) {
+		return;
+	}
+	buf[rd] = '\0';
+
+	p = buf;
+	for (i = 0; i < (int)ARRAY_SIZE(sid_lengths); i++) {
+		long v = 0;
+
+		while (*p != '\0' && (*p < '0' || *p > '9')) {
+			p++;
+		}
+		if (*p == '\0') {
+			break;
+		}
+		while (*p >= '0' && *p <= '9') {
+			v = v * 10 + (*p++ - '0');
+			if (v > 3600) {
+				v = 3600;
+			}
+		}
+		sid_lengths[i] = (uint16_t)v;
+	}
+	LOG_INF("sid lengths for %s: %us...", name, sid_lengths[0]);
+}
+
+/*
+ * STIL metadata sidecar <stem>.stil (built by tools/sid_add.py from HVSC's
+ * STIL.txt): one subsong name per line in subsong order, then an optional
+ * comment line. PSID itself has no per-subsong names.
+ */
+#define SID_STIL_MAX 1024
+static char sid_stil_buf[SID_STIL_MAX];
+static uint16_t sid_stil_off[32];
+static uint8_t sid_stil_names;
+static char *sid_stil_comment;
+
+static void sid_stil_load(const char *name)
+{
+	struct fs_file_t f;
+	char path[32];
+	size_t l = strlen(name);
+	ssize_t rd;
+	char *p;
+	int songs;
+
+	sid_stil_names = 0;
+	sid_stil_comment = NULL;
+	sid_scroll_restart(); /* restart scrolling */
+	if (l <= 4U) {
+		return;
+	}
+	snprintf(path, sizeof(path), "/home/%.*s.stil", (int)(l - 4U), name);
+	fs_file_t_init(&f);
+	if (fs_open(&f, path, FS_O_READ) < 0) {
+		return;
+	}
+	rd = fs_read(&f, sid_stil_buf, SID_STIL_MAX - 1U);
+	fs_close(&f);
+	if (rd <= 0) {
+		return;
+	}
+	sid_stil_buf[rd] = '\0';
+
+	songs = sid_player_songs();
+	if (songs > (int)ARRAY_SIZE(sid_stil_off)) {
+		songs = (int)ARRAY_SIZE(sid_stil_off);
+	}
+	p = sid_stil_buf;
+	for (int i = 0; i < songs; i++) {
+		char *nl = strchr(p, '\n');
+
+		sid_stil_off[sid_stil_names++] = (uint16_t)(p - sid_stil_buf);
+		if (nl == NULL) {
+			p = p + strlen(p);
+			break;
+		}
+		*nl = '\0';
+		p = nl + 1;
+	}
+	while (*p == '\n' || *p == '\r') {
+		p++;
+	}
+	if (*p != '\0') {
+		sid_stil_comment = p;
+	}
+	LOG_INF("stil %s: %u names, comment %s", name, sid_stil_names,
+		sid_stil_comment ? "yes" : "no");
+}
+
+static const char *sid_sub_name(int sub)
+{
+	if (sub < 0 || sub >= (int)sid_stil_names) {
+		return "";
+	}
+	return &sid_stil_buf[sid_stil_off[sub]];
+}
+
+/*
+ * Remember the last loaded tune across restarts: /home/sid.cfg holds the
+ * file name; at boot it is re-loaded (metadata visible, PLAY starts it)
+ * but intentionally NOT started.
+ */
+static void sid_remember_save(void)
+{
+	struct fs_file_t f;
+
+	if (!fs_ready || sid_cur_name[0] == '\0') {
+		return;
+	}
+	fs_file_t_init(&f);
+	if (fs_open(&f, "/home/sid.cfg",
+		    FS_O_WRITE | FS_O_CREATE | FS_O_TRUNC) == 0) {
+		(void)fs_write(&f, sid_cur_name, strlen(sid_cur_name));
+		fs_close(&f);
+	}
+}
+
+static void sid_remember_load(void)
+{
+	struct fs_file_t f;
+	char name[24];
+	char path[40];
+	ssize_t rd;
+
+	if (!fs_ready) {
+		return;
+	}
+	fs_file_t_init(&f);
+	if (fs_open(&f, "/home/sid.cfg", FS_O_READ) < 0) {
+		return;
+	}
+	rd = fs_read(&f, name, sizeof(name) - 1U);
+	fs_close(&f);
+	if (rd <= 0) {
+		return;
+	}
+	name[rd] = '\0';
+	while (rd > 0 && (name[rd - 1] == '\n' || name[rd - 1] == '\r' ||
+			  name[rd - 1] == ' ')) {
+		name[--rd] = '\0';
+	}
+	if (rd < 5 || strstr(name, ".sid") == NULL) {
+		return;
+	}
+	snprintf(path, sizeof(path), "/home/%s", name);
+	if (sid_player_load(path) != 0) {
+		return;
+	}
+	snprintf(sid_cur_name, sizeof(sid_cur_name), "%s", name);
+	sid_load_lengths(sid_cur_name);
+	sid_stil_load(sid_cur_name);
+	/* left stopped on purpose: PLAY starts it */
+	LOG_INF("last SID restored (stopped): %s", sid_cur_name);
+}
+
+static uint32_t sid_length_cur(void)
+{
+	int total = sid_player_songs();
+	int sub = sid_player_subtune();
+
+	if (sid_lengths[0] == 0U) {
+		return 0U; /* unknown: no auto advance */
+	}
+	if (total > 1 && sid_lengths[1] != 0U &&
+	    sub < (int)ARRAY_SIZE(sid_lengths)) {
+		return sid_lengths[sub]; /* per-subtune table */
+	}
+	return sid_lengths[0]; /* single value: all subtunes */
+}
+
+/* --- SID info block with marquee scrolling -------------------------- */
+
+/* Layout: line 1 = title + song x/y (right), line 2 = subsong name (from
+ * the STIL sidecar; the file name when STIL has none) + elapsed/length
+ * (right), line 3 = author + chip button, line 4 = STIL comment. Texts
+ * that do not fit their window scroll left one letter per second and
+ * back. */
+#define SID_TITLE_CHARS 24
+#define SID_SUB_CHARS 16
+#define SID_CMT_CHARS 28
+
+/* Marquee scrolling: the offset accumulates one second per second only
+ * while the SID screen is actually visible, so time spent on the idle
+ * face (or any other screen) pauses the scroll instead of silently
+ * running it on. `tail` adds extra travel so the last words stay
+ * readable (the comment keeps its last word at 1/3 from the window
+ * end). */
+static uint32_t sid_scroll_ms;   /* accumulated visible ms since restart */
+static uint32_t sid_scroll_last; /* k_uptime at the last accumulation */
+static bool sid_scroll_started;
+
+static void sid_scroll_restart(void)
+{
+	sid_scroll_ms = 0;
+	sid_scroll_last = k_uptime_get_32();
+	sid_scroll_started = true;
+}
+
+/* Called from the main loop: bank the time since the last call when the
+ * marquee is on show. */
+static void sid_scroll_advance(bool visible)
+{
+	uint32_t now = k_uptime_get_32();
+
+	if (!sid_scroll_started) {
+		sid_scroll_started = true;
+		sid_scroll_last = now;
+		return;
+	}
+	if (visible) {
+		sid_scroll_ms += now - sid_scroll_last;
+	}
+	sid_scroll_last = now;
+}
+
+static int sid_scroll_off(int n, int win, int tail)
+{
+	int maxo = n - win + tail;
+
+	if (maxo <= 0) {
+		return 0;
+	}
+	return (int)((sid_scroll_ms / 1000U) % (uint32_t)(maxo + 1));
+}
+
+/* Build a `win`-wide window of `s` starting at `off` (padded with spaces)
+ * and draw it via the given cache slot. */
+static void draw_marquee(int slot, int x, int y, const char *s, int win,
+			 int off, uint16_t fg)
+{
+	char buf[48];
+	int n = (int)strlen(s);
+
+	/* Clamp against the REAL string length: clamping to the buffer size
+	 * would pin every offset past buf[] to the same window and make the
+	 * marquee appear to stop there. The %.s precision below already
+	 * bounds how much snprintf copies, so buf[] cannot overflow. */
+	if (off > n) {
+		off = n;
+	}
+	snprintf(buf, sizeof(buf), "%-*.*s", win, win, s + off);
+	draw_text_cached(slot, x, y, buf, fg, COL_BG);
+}
+
+/* Text shown on the subsong line: the STIL subsong name when available,
+ * else the loaded file name. */
+static const char *sid_sub_text(void)
+{
+	const char *n = sid_sub_name(sid_player_subtune());
+
+	if (n[0] != '\0') {
+		return n;
+	}
+	return sid_cur_name[0] ? sid_cur_name : "-";
+}
+
+static void draw_sid_title_line(void)
+{
+	const char *t = sid_player_title();
+	const char *disp = t[0] ? t : "(no sid)";
+
+	draw_marquee(TC_SID_TITLE, 8, SID_LINE1_Y, disp, SID_TITLE_CHARS,
+		     sid_scroll_off((int)strlen(disp), SID_TITLE_CHARS, 0),
+		     COL_WHITE);
+}
+
+/* Song counter (x/y) on the right of the title line. */
+static void draw_sid_counter_line(void)
+{
+	char cnt[16];
+	int w;
+
+	if (sid_player_songs() <= 0) {
+		snprintf(cnt, sizeof(cnt), "-/-");
+	} else {
+		snprintf(cnt, sizeof(cnt), "%d/%d",
+			 sid_player_subtune() + 1, sid_player_songs());
+	}
+	w = (int)strlen(cnt) * TEXT_CW;
+	draw_text_cached(TC_SID_CNT, 440 - w, SID_LINE1_Y, cnt, COL_WHITE,
+			 COL_BG);
+}
+
+static void draw_sid_sub_line(void)
+{
+	const char *s = sid_sub_text();
+
+	draw_marquee(TC_SID_FILE, 8, SID_LINE2_Y, s, SID_SUB_CHARS,
+		     sid_scroll_off((int)strlen(s), SID_SUB_CHARS, 0),
+		     COL_CYAN);
+}
+
+/* Elapsed / length, right-aligned on the subsong line (words removed). */
+static void draw_sid_song_line(void)
+{
+	char line[24];
+	uint32_t el = sid_player_elapsed_s();
+	uint32_t len = sid_length_cur();
+	int w;
+
+	if (sid_player_songs() <= 0) {
+		line[0] = '\0';
+	} else if (len > 0U) {
+		snprintf(line, sizeof(line), "%u:%02u/%u:%02u", el / 60U,
+			 el % 60U, len / 60U, len % 60U);
+	} else {
+		snprintf(line, sizeof(line), "%u:%02u", el / 60U, el % 60U);
+	}
+	w = (int)strlen(line) * TEXT_CW;
+	draw_text_cached(TC_SID_SONG, 440 - w, SID_LINE2_Y, line, COL_WHITE,
+			 COL_BG);
+}
+
+/* STIL comment on the 4th line (scrolling when long; erases itself when
+ * the tune has no comment). */
+static void draw_sid_comment_line(void)
+{
+	const char *c = sid_stil_comment ? sid_stil_comment : "";
+
+	draw_marquee(TC_SID_CMT, 8, SID_LINE4_Y, c, SID_CMT_CHARS,
+		     sid_scroll_off((int)strlen(c), SID_CMT_CHARS,
+				    SID_CMT_CHARS / 3),
+		     COL_CYAN);
+}
+
+/* One marquee tick (called once a second while the SID screen is up): the
+ * offsets come from the clock, so the draw functions do the work. */
+static void sid_marquee_tick(void)
+{
+	if ((int)strlen(sid_player_title()) > SID_TITLE_CHARS) {
+		draw_sid_title_line();
+	}
+	if ((int)strlen(sid_sub_text()) > SID_SUB_CHARS) {
+		draw_sid_sub_line();
+	}
+	if (sid_stil_comment != NULL &&
+	    (int)strlen(sid_stil_comment) > SID_CMT_CHARS) {
+		draw_sid_comment_line();
+	}
+}
+
+static void draw_sid_info(void)
+{
+	char a[20];
+	bool cmt = sid_stil_comment != NULL && sid_stil_comment[0] != '\0';
+
+	/* clear the text area; the sliders (drawn right after on screen
+	 * redraws) then cover the tail of the previous comment line */
+	fill_rect(0, SID_LINE1_Y, SCR_W, cmt ? 96 : 92, COL_BG);
+	text_cache_reset();
+
+	draw_sid_title_line();
+	draw_sid_counter_line();
+	draw_sid_sub_line();
+	draw_sid_song_line();
+
+	sid_text(a, sizeof(a), sid_player_author());
+	draw_text_cached(TC_SID_AUTHOR, 8, SID_LINE3_Y, a, COL_CYAN, COL_BG);
+
+	{
+		char label[16];
+		int mode = sid_player_model_mode();
+
+		if (mode == 0) {
+			if (sid_player_songs() > 0) {
+				snprintf(label, sizeof(label), "AUTO(%d)",
+					 sid_player_chip());
+			} else {
+				strcpy(label, "AUTO");
+			}
+		} else {
+			snprintf(label, sizeof(label), "FORCE %d",
+				 mode == 1 ? 6581 : 8580);
+		}
+		draw_button(SID_CHIP_X, SID_CHIP_Y, SID_CHIP_W, SID_CHIP_H,
+			    label, mode != 0);
+	}
+
+	if (cmt) {
+		draw_sid_comment_line();
+	}
+}
+
+/* SID screen sliders: their position moves up when the STIL comment line
+ * is absent, to fill the freed space evenly. */
+static int sid_sld_vol_y = SLD_VOL_Y;
+static int sid_sld_bri_y = SLD_BRI_Y;
+
+static void sid_draw_volume(void)
+{
+	char t[16];
+
+	snprintf(t, sizeof(t), "VOL %u%%", volume * 100U / 255U);
+	draw_slider_bar(sid_sld_vol_y, volume, 255U, t);
+}
+
+static void sid_draw_bri(void)
+{
+	char t[16];
+
+	snprintf(t, sizeof(t), "BRI %u%%", brightness * 100U / 255U);
+	draw_slider_bar(sid_sld_bri_y, brightness, 255U, t);
+}
+
+static void draw_sid_buttons(void)
+{
+	static const char *const end_labels[3] = {
+		"NEXT SUB", "NEXT TUNE", "LOOP"
+	};
+	bool playing = sid_player_is_playing();
+	bool is_paused = sid_player_is_paused();
+
+	draw_button(SID_TUNEL_X, SID_ROW1_Y, SID_TUNEL_W, SID_ROW1_H, "TUNE<",
+		    false);
+	draw_button(SID_PLAY_X, SID_ROW1_Y, SID_PLAY_W, SID_ROW1_H,
+		    !playing ? "PLAY" : is_paused ? "RESUME" : "PAUSE",
+		    playing && !is_paused);
+	draw_button(SID_STOP_X, SID_ROW1_Y, SID_STOP_W, SID_ROW1_H, "STOP",
+		    false);
+	draw_button(SID_TUNER_X, SID_ROW1_Y, SID_TUNER_W, SID_ROW1_H, "TUNE>",
+		    false);
+	draw_button(SID_SUBL_X, SID_ROW2_Y, SID_SUB_W, SID_SUB_H, "SUB<", false);
+	draw_button(SID_END_X, SID_ROW2_Y, SID_SUB_W, SID_SUB_H,
+		    end_labels[sid_end_mode], false);
+	draw_button(SID_SUBR_X, SID_ROW2_Y, SID_SUB_W, SID_SUB_H, "SUB>", false);
+}
+
+static void draw_sid_screen(void)
+{
+	static int sid_layout_drawn = -1;
+	bool cmt = sid_stil_comment != NULL && sid_stil_comment[0] != '\0';
+	int layout = cmt ? 1 : 0;
+
+	/* erase the previous slider position when the layout changes (the
+	 * sliders cover the band 268..358 completely in either variant) */
+	if (layout != sid_layout_drawn) {
+		if (sid_layout_drawn >= 0) {
+			fill_rect(0, 268, SCR_W, 90, COL_BG);
+			text_cache_reset();
+		}
+		sid_layout_drawn = layout;
+	}
+
+	/* the sliders move up when the STIL comment line is absent; both
+	 * variants leave clear space above the timeout bar */
+	sid_sld_vol_y = cmt ? 290 : 274;
+	sid_sld_bri_y = cmt ? 326 : 314;
+
+	draw_header();
+	draw_button(HOME_X, HOME_Y, HOME_W, HOME_H, "HOME", false);
+	draw_sid_buttons();
+	draw_sid_info();
+	sid_draw_volume();
+	sid_draw_bri();
+}
+
+static void draw_sensors_screen(void)
+{
+	draw_header();
+	draw_button(HOME_X, HOME_Y, HOME_W, HOME_H, "HOME", false);
+	draw_text(8, 84, "ACCELEROMETER", COL_CYAN, COL_BG);
+	show_accel(); /* live value line + bars */
+}
+
+static void draw_settings_screen(void)
+{
+	draw_header();
+	draw_button(HOME_X, HOME_Y, HOME_W, HOME_H, "HOME", false);
+
+	{
+		static const char *const prof[3] = {
+			"NIGHT", "INDOOR", "OUTDOOR"
+		};
+
+		draw_button(SET_NIGHT_X, SET_ROW1_Y, SET_BTN_W, SET_BTN_H,
+			    prof[0], bri_sel == 0);
+		draw_button(SET_INDOOR_X, SET_ROW1_Y, SET_BTN_W, SET_BTN_H,
+			    prof[1], bri_sel == 1);
+		draw_button(SET_OUTDOOR_X, SET_ROW1_Y, SET_BTN_W, SET_BTN_H,
+			    prof[2], bri_sel == 2);
+	}
+
+	draw_slider_lux();
+	draw_slider_set_bri();
+	draw_slider_idle();
+	draw_button(SET_SAVE_X, SET_SAVE_Y, SET_SAVE_W, SET_SAVE_H,
+		    "SAVE STATE", false);
+}
+
+/* --- alarms screen -------------------------------------------------- */
+
+static bool alarm_any_armed(void)
+{
+	for (int i = 0; i < 5; i++) {
+		if (alarms[i].mode != 0) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static void draw_alarms_screen(void)
+{
+	static const char *const dn[7] = {
+		"Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"
+	};
+	struct alarm_cfg *a = &alarms[alm_sel];
+	char t[36];
+
+	draw_header();
+	draw_button(HOME_X, HOME_Y, HOME_W, HOME_H, "HOME", false);
+
+	/* mode + ringtone */
+	draw_button(ALM_MODE_X, ALM_MODE_Y, ALM_MODE_W, ALM_MODE_H,
+		    a->mode == 1 ? "ONCE" : a->mode == 2 ? "REPEAT" : "OFF",
+		    a->mode != 0);
+	if (a->title[0] != '\0') {
+		snprintf(t, sizeof(t), "%.16s  %u", a->title, a->sub + 1);
+	} else if (a->sid[0] != '\0') {
+		snprintf(t, sizeof(t), "%.16s  %u", a->sid, a->sub + 1);
+	} else {
+		strcpy(t, "SET SID");
+	}
+	draw_button(ALM_RING_X, ALM_MODE_Y, ALM_RING_W, ALM_MODE_H, t,
+		    a->sid[0] != '\0');
+
+	/* repeat days, only meaningful in repeat mode */
+	if (a->mode == 2) {
+		for (int i = 0; i < 7; i++) {
+			draw_button(ALM_DAY_X0 + i * ALM_DAY_DX, ALM_DAY_Y,
+				    ALM_DAY_W, ALM_DAY_H, dn[i],
+				    (a->days >> i) & 1U);
+		}
+	}
+
+	/* time + playback length (hour/minute have -/+ step buttons) */
+	snprintf(t, sizeof(t), "HOUR %02u", a->hour);
+	draw_button(ALM_ARR_X0, ALM_SLD_HOUR_Y, ALM_ARR_W, SLD_H, "-", false);
+	draw_slider_bar_at(ALM_SLD_X, ALM_SLD_HOUR_Y, ALM_SLD_W, a->hour, 23U,
+			   t);
+	draw_button(ALM_ARR_X1, ALM_SLD_HOUR_Y, ALM_ARR_W, SLD_H, "+", false);
+
+	snprintf(t, sizeof(t), "MIN %02u", a->min);
+	draw_button(ALM_ARR_X0, ALM_SLD_MIN_Y, ALM_ARR_W, SLD_H, "-", false);
+	draw_slider_bar_at(ALM_SLD_X, ALM_SLD_MIN_Y, ALM_SLD_W, a->min, 59U,
+			   t);
+	draw_button(ALM_ARR_X1, ALM_SLD_MIN_Y, ALM_ARR_W, SLD_H, "+", false);
+
+	snprintf(t, sizeof(t), "LEN %u:%02u", a->len_sec / 60U,
+		 a->len_sec % 60U);
+	draw_button(ALM_ARR_X0, ALM_SLD_LEN_Y, ALM_ARR_W, SLD_H, "-", false);
+	draw_slider_bar_at(ALM_SLD_X, ALM_SLD_LEN_Y, ALM_SLD_W,
+			   (uint32_t)(a->len_sec / 15U - 1U), 19U, t);
+	draw_button(ALM_ARR_X1, ALM_SLD_LEN_Y, ALM_ARR_W, SLD_H, "+", false);
+
+	/* the five alarm tiles: number when off, time when armed */
+	for (int i = 0; i < 5; i++) {
+		struct alarm_cfg *b = &alarms[i];
+
+		if (b->mode != 0) {
+			snprintf(t, sizeof(t), "%02u:%02u", b->hour, b->min);
+		} else {
+			snprintf(t, sizeof(t), "%d", i + 1);
+		}
+		draw_button(ALM_TILE_X0 + i * ALM_TILE_DX, ALM_TILE_Y,
+			    ALM_TILE_W, ALM_TILE_H, t, i == alm_sel);
+	}
+}
+
+/* Capture the currently playing/paused tune (file + subsong) as the
+ * ringtone of the selected alarm. */
+static void alarm_capture_ringtone(void)
+{
+	struct alarm_cfg *a = &alarms[alm_sel];
+
+	if (!sid_player_is_playing() || sid_cur_name[0] == '\0') {
+		return; /* only a loaded, playing or paused tune can be set */
+	}
+	snprintf(a->sid, sizeof(a->sid), "%s", sid_cur_name);
+	snprintf(a->title, sizeof(a->title), "%.16s", sid_player_title());
+	a->sub = (uint8_t)sid_player_subtune();
+	alm_cfg_dirty = true;
+	draw_alarms_screen();
+	LOG_INF("alarm %d ringtone: %s sub %u", alm_sel + 1, a->sid,
+		a->sub + 1);
+}
+
+/*
+ * Idle-time alarm service: fire matching alarms (idle face up, nothing
+ * playing), stop the ringtone when its length expires or the screen is
+ * touched (the touch handler calls alarm_stop()).
+ */
+static void alarm_stop(void)
+{
+	if (alarm_ringing) {
+		sid_player_stop();
+		audio_sid_stop();
+		alarm_ringing = false;
+		LOG_INF("alarm stopped");
+	}
+}
+
+static void alarm_service(void)
+{
+	uint32_t epoch = epoch_now();
+	uint32_t minute = epoch / 60U;
+	uint32_t mins = minute % (24U * 60U);
+	uint8_t hh = (uint8_t)(mins / 60U);
+	uint8_t mm = (uint8_t)(mins % 60U);
+	uint32_t wd_mon = (epoch / 86400U + 5U) % 7U; /* 0 = Monday */
+
+	if (alarm_ringing) {
+		if ((int32_t)(k_uptime_get_32() - alarm_until) >= 0) {
+			alarm_stop();
+			LOG_INF("alarm playback finished");
+		}
+		return;
+	}
+	if (sid_player_is_playing() && !sid_player_is_paused()) {
+		return; /* actively playing music: never interrupt */
+	}
+	/* a paused tune is silent and does NOT block the alarm (it gets
+	 * replaced by the ringtone) */
+
+	for (int i = 0; i < 5; i++) {
+		struct alarm_cfg *a = &alarms[i];
+
+		if (a->mode == 0 || a->hour != hh || a->min != mm ||
+		    minute == alarm_fired_min) {
+			continue;
+		}
+		if (a->mode == 2 && !((a->days >> wd_mon) & 1U)) {
+			continue;
+		}
+		if (a->sid[0] == '\0') {
+			continue; /* no ringtone set: stay armed, do nothing */
+		}
+		{
+			char path[40];
+
+			snprintf(path, sizeof(path), "/home/%s", a->sid);
+			if (sid_player_load(path) != 0) {
+				continue; /* ringtone file missing: stay armed */
+			}
+			alarm_fired_min = minute;
+			if (a->mode == 1) {
+				a->mode = 0; /* one-shot */
+				alm_cfg_dirty = true;
+			}
+			if (a->sub < (uint8_t)sid_player_songs()) {
+				sid_player_play(a->sub);
+			} else {
+				sid_player_play_default();
+			}
+			audio_sid_start();
+			alarm_ringing = true;
+			alarm_until = k_uptime_get_32() +
+				      (uint32_t)a->len_sec * 1000U;
+			LOG_INF("alarm %d: %s sub %u, %u s", i + 1, a->sid,
+				a->sub + 1, a->len_sec);
+			return;
+		}
+	}
+}
+
+/* Alarm persistence: one line per alarm,
+ * "mode hour min len days sub name title". */
+static void alm_cfg_save(void)
+{
+	static char buf[400];
+	struct fs_file_t f;
+	int n = 0;
+
+	if (!fs_ready) {
+		return;
+	}
+	for (int i = 0; i < 5; i++) {
+		struct alarm_cfg *a = &alarms[i];
+
+		n += snprintf(buf + n, sizeof(buf) - (size_t)n,
+			      "%u %u %u %u %u %u %s %s\n", a->mode, a->hour,
+			      a->min, a->len_sec, a->days, a->sub,
+			      a->sid[0] ? a->sid : "-",
+			      a->title[0] ? a->title : "-");
+		if (n >= (int)sizeof(buf) - 1) {
+			break;
+		}
+	}
+	fs_file_t_init(&f);
+	if (fs_open(&f, "/home/alarms.cfg",
+		    FS_O_WRITE | FS_O_CREATE | FS_O_TRUNC) == 0) {
+		(void)fs_write(&f, buf, (size_t)n);
+		fs_close(&f);
+	}
+}
+
+static void alm_cfg_load(void)
+{
+	static char buf[400];
+	struct fs_file_t f;
+	ssize_t rd;
+	char *p;
+
+	if (!fs_ready) {
+		return;
+	}
+	fs_file_t_init(&f);
+	if (fs_open(&f, "/home/alarms.cfg", FS_O_READ) < 0) {
+		return;
+	}
+	rd = fs_read(&f, buf, sizeof(buf) - 1U);
+	fs_close(&f);
+	if (rd <= 0) {
+		return;
+	}
+	buf[rd] = '\0';
+
+	p = buf;
+	for (int i = 0; i < 5; i++) {
+		struct alarm_cfg *a = &alarms[i];
+		unsigned v[6];
+		char name[24] = "", title[20] = "";
+
+		/* six numbers */
+		for (int k = 0; k < 6; k++) {
+			v[k] = 0;
+			while (*p == ' ' || *p == '\t') {
+				p++;
+			}
+			if (*p < '0' || *p > '9') {
+				return; /* incomplete: keep the defaults */
+			}
+			while (*p >= '0' && *p <= '9') {
+				v[k] = v[k] * 10U + (unsigned)(*p++ - '0');
+				if (v[k] > 10000U) {
+					v[k] = 10000U;
+				}
+			}
+		}
+		/* ringtone file name (single token, "-" = none) */
+		while (*p == ' ') {
+			p++;
+		}
+		for (int k = 0; k < 23 && *p > ' ' && *p != '\0'; k++) {
+			name[k] = *p++;
+			name[k + 1] = '\0';
+		}
+		/* display title = rest of the line */
+		while (*p == ' ') {
+			p++;
+		}
+		for (int k = 0; k < 19 && *p != '\n' && *p != '\0'; k++) {
+			title[k] = *p++;
+			title[k + 1] = '\0';
+		}
+		while (*p != '\n' && *p != '\0') {
+			p++;
+		}
+		if (*p == '\n') {
+			p++;
+		}
+
+		a->mode = (uint8_t)(v[0] % 3U);
+		a->hour = (uint8_t)(v[1] % 24U);
+		a->min = (uint8_t)(v[2] % 60U);
+		/* pre-0.10 files stored whole minutes (1..5); now seconds in
+		 * 15 s steps (15..300) */
+		if (v[3] < IDLE_TIMEOUT_MIN_S) {
+			v[3] *= 60U;
+		}
+		v[3] = CLAMP(v[3], (unsigned)IDLE_TIMEOUT_MIN_S,
+			     (unsigned)IDLE_TIMEOUT_MAX_S);
+		a->len_sec = (uint16_t)(v[3] / 15U * 15U);
+		a->days = (uint8_t)(v[4] & 0x7FU);
+		a->sub = (uint8_t)(v[5] & 0x1FU);
+		if (strcmp(name, "-") != 0) {
+			snprintf(a->sid, sizeof(a->sid), "%s", name);
+		}
+		if (strcmp(title, "-") != 0) {
+			snprintf(a->title, sizeof(a->title), "%s", title);
+		}
+		LOG_INF("alarm %d: mode %u %02u:%02u len %us days 0x%02X [%s]",
+			i + 1, a->mode, a->hour, a->min, a->len_sec, a->days,
+			a->sid);
+	}
+}
+
+static void draw_ui(void)
+{
+	fill_rect(0, 0, SCR_W, SCR_H, COL_BG);
+	text_cache_reset();
+
+	switch (ui_scr) {
+	case SCR_SID:
+		draw_sid_screen();
+		break;
+	case SCR_SENSORS:
+		draw_sensors_screen();
+		break;
+	case SCR_SETTINGS:
+		draw_settings_screen();
+		break;
+	case SCR_ALARMS:
+		draw_alarms_screen();
+		break;
+	default:
+		draw_main_screen();
+		break;
+	}
+
+	countdown_second = 0xFFFFFFFFU; /* force a countdown redraw */
+	draw_countdown(0);
+}
+
+/* --- SID transport actions ----------------------------------------- */
+
+/* Rewrite /home/dir.txt with "name size" lines: hosts with only smpmgr
+ * (MCUmgr fs_mgmt has no listing operation) can download it as an index. */
+static void home_write_dir(void)
+{
+	struct fs_dir_t dirp;
+	static struct fs_dirent ent;
+	struct fs_file_t f;
+	char buf[512];
+	int used = 0;
+
+	if (!fs_ready) {
+		return;
+	}
+	fs_dir_t_init(&dirp);
+	if (fs_opendir(&dirp, "/home") != 0) {
+		return;
+	}
+	while (fs_readdir(&dirp, &ent) == 0 && ent.name[0] != '\0') {
+		int n;
+
+		if (ent.type != FS_DIR_ENTRY_FILE ||
+		    strcmp(ent.name, "dir.txt") == 0) {
+			continue;
+		}
+		n = snprintf(buf + used, sizeof(buf) - (size_t)used, "%s %u\n",
+			     ent.name, (unsigned)ent.size);
+		if (n < 0 || used + n >= (int)sizeof(buf) - 1) {
+			break;
+		}
+		used += n;
+	}
+	fs_closedir(&dirp);
+
+	fs_file_t_init(&f);
+	if (fs_open(&f, "/home/dir.txt",
+		    FS_O_WRITE | FS_O_CREATE | FS_O_TRUNC) == 0) {
+		(void)fs_write(&f, buf, (size_t)used);
+		fs_close(&f);
+	}
+}
+
+/* Build one page of the /home listing into dst as "name\n" entries (never
+ * splitting a name; the caller keeps one spare byte for the next index).
+ * Returns the next entry index to continue from, or -1 when done. */
+static int home_list(uint16_t start, uint8_t *dst, int size)
+{
+	struct fs_dir_t dirp;
+	static struct fs_dirent ent;
+	int idx = 0;
+	int used = 0;
+
+	fs_dir_t_init(&dirp);
+	if (fs_opendir(&dirp, "/home") != 0) {
+		dst[0] = '\0';
+		return -1;
+	}
+	while (fs_readdir(&dirp, &ent) == 0 && ent.name[0] != '\0') {
+		size_t l;
+
+		if (ent.type != FS_DIR_ENTRY_FILE) {
+			continue;
+		}
+		if (idx++ < (int)start) {
+			continue;
+		}
+		l = strlen(ent.name);
+		if (used + (int)l + 1 > size - 1) {
+			/* doesn't fit: this entry goes to the next page */
+			fs_closedir(&dirp);
+			dst[used] = '\0';
+			return idx - 1;
+		}
+		memcpy(dst + used, ent.name, l);
+		dst[used + l] = '\n';
+		used += (int)l + 1;
+	}
+	fs_closedir(&dirp);
+	dst[used] = '\0';
+	return -1;
+}
+
+/* Alphabetically next (dir > 0) or previous .sid in /home, wrapping around.
+ * Only the current name is kept as state; the directory is rescanned on
+ * every step, so newly uploaded tunes show up immediately. */
+static bool sid_find_next(int dir, char *out, size_t len)
+{
+	struct fs_dir_t dirp;
+	static struct fs_dirent ent;
+	char after[24] = { 0 }, first[24] = { 0 }, last[24] = { 0 };
+	bool have = false;
+
+	fs_dir_t_init(&dirp);
+	if (fs_opendir(&dirp, "/home") != 0) {
+		return false;
+	}
+	while (fs_readdir(&dirp, &ent) == 0 && ent.name[0] != '\0') {
+		size_t l = strlen(ent.name);
+
+		if (ent.type != FS_DIR_ENTRY_FILE || l < 5U || l > 23U) {
+			continue;
+		}
+		if (!(ent.name[l - 4U] == '.' &&
+		      (ent.name[l - 3U] == 's' || ent.name[l - 3U] == 'S') &&
+		      (ent.name[l - 2U] == 'i' || ent.name[l - 2U] == 'I') &&
+		      (ent.name[l - 1U] == 'd' || ent.name[l - 1U] == 'D'))) {
+			continue;
+		}
+		if (first[0] == '\0' || strcmp(ent.name, first) < 0) {
+			strncpy(first, ent.name, sizeof(first) - 1U);
+		}
+		if (last[0] == '\0' || strcmp(ent.name, last) > 0) {
+			strncpy(last, ent.name, sizeof(last) - 1U);
+		}
+		if (sid_cur_name[0] != '\0') {
+			int c = strcmp(ent.name, sid_cur_name);
+
+			if (dir > 0 ? (c <= 0) : (c >= 0)) {
+				continue;
+			}
+		}
+		if (!have || (dir > 0 ? (strcmp(ent.name, after) < 0)
+				      : (strcmp(ent.name, after) > 0))) {
+			strncpy(after, ent.name, sizeof(after) - 1U);
+			have = true;
+		}
+	}
+	fs_closedir(&dirp);
+
+	if (!have) {
+		strncpy(after, dir > 0 ? first : last, sizeof(after) - 1U);
+	}
+	if (after[0] == '\0') {
+		return false;
+	}
+	snprintf(out, len, "%s", after);
+	return true;
+}
+
+static void sid_step(int dir)
+{
+	char path[40], name[24];
+
+	if (!fs_ready) {
+		return;
+	}
+	if (!sid_find_next(dir, name, sizeof(name))) {
+		LOG_WRN("no .sid files in /home");
+		return;
+	}
+	/* advance the cursor even if this particular file fails to load */
+	snprintf(sid_cur_name, sizeof(sid_cur_name), "%s", name);
+	snprintf(path, sizeof(path), "/home/%s", name);
+	if (sid_player_load(path) == 0) {
+		sid_load_lengths(name);
+		sid_stil_load(name);
+		sid_remember_save();
+		sid_player_play_default();
+		audio_sid_start();
+	} else {
+		LOG_WRN("sid load failed: %s", path);
+	}
+}
+
+static void sid_toggle_play(void)
+{
+	if (!sid_player_is_playing()) {
+		if (sid_player_songs() <= 0) {
+			sid_step(1); /* nothing loaded yet: find the first tune */
+			return;
+		}
+		sid_player_play(sid_player_subtune()); /* start/restart */
+		audio_sid_start();
+	} else if (sid_player_is_paused()) {
+		sid_player_resume();
+		audio_sid_start(); /* the stream may have suspended */
+	} else {
+		sid_player_pause(); /* silence; the amp suspends after 30 s */
+	}
+}
+
+static void sid_sub_step(int dir)
+{
+	int total = sid_player_songs();
+	int sub;
+
+	if (total <= 0) {
+		sid_step(1);
+		return;
+	}
+	sub = (sid_player_subtune() + dir) % total;
+	if (sub < 0) {
+		sub += total;
+	}
+	sid_player_play(sub);
+	audio_sid_start();
+}
+
+/* Advance when the current (sub)song passed its known length (from the
+ * optional /home/N.len sidecar). */
+static void sid_check_end(void)
+{
+	uint32_t len = sid_length_cur();
+
+	if (alarm_ringing) {
+		return; /* never advance while an alarm ringtone plays */
+	}
+	if (len == 0U || !sid_player_is_playing() || sid_player_is_paused() ||
+	    sid_player_elapsed_s() < len) {
+		return;
+	}
+
+	if (sid_end_mode == 2) {
+		sid_player_play(sid_player_subtune()); /* loop the subtune */
+	} else if (sid_end_mode == 1) {
+		sid_step(1); /* next tune */
+	} else if (sid_player_subtune() + 1 < sid_player_songs()) {
+		sid_sub_step(1); /* next subtune */
+	} else {
+		sid_step(1); /* last subtune: continue with the next tune */
+	}
+}
+
+/* The BLE debug commands can start/stop tunes behind the UI's back; poll
+ * the state and repaint the affected screen when something changed. */
+static void sid_ui_sync(void)
+{
+	static char last[160];
+	static uint32_t last_elapsed = 0xFFFFFFFFU;
+	char now[160];
+	uint32_t el = sid_player_elapsed_s();
+
+	snprintf(now, sizeof(now), "%d|%d|%d|%d|%d|%s|%s|%s",
+		 sid_player_is_playing(), sid_player_is_paused(),
+		 sid_player_subtune(), sid_player_songs(), sid_end_mode,
+		 sid_player_title(), sid_player_author(), sid_cur_name);
+	if (strcmp(now, last) != 0) {
+		strncpy(last, now, sizeof(last) - 1);
+		last[sizeof(last) - 1] = '\0';
+		last_elapsed = el;
+		sid_scroll_restart();
+		if (ui_scr == SCR_MAIN) {
+			draw_tile(TILE_SID_X, TILE_Y, "SID", "PLAYER",
+				  sid_player_is_playing() &&
+					  !sid_player_is_paused());
+			draw_tile(TILE_ALM_X, TILE_Y, "ALARMS", NULL,
+				  alarm_any_armed());
+		} else if (ui_scr == SCR_SID) {
+			/* full re-layout: the comment line decides where
+			 * the sliders sit */
+			draw_sid_screen();
+		}
+	} else if (ui_scr == SCR_SID && el != last_elapsed) {
+		last_elapsed = el;
+		draw_sid_song_line(); /* only the time line: no title blinking */
+	}
+
+	/* long titles scroll one letter per second; the text cache skips
+	 * windows that did not change, so this is cheap */
+	if (ui_scr == SCR_SID) {
+		sid_marquee_tick();
+	}
+}
+
+/* Idle face: the clock alone in night profile, clock + battery otherwise;
+ * both moved for burn-in. */
+static void draw_idle_face(void)
+{
+	fill_rect(0, 0, idle_fw(), idle_fh(), COL_BG); /* hide everything */
+	text_cache_reset();
+	idle_night_last = idle_night();
+	if (!idle_night_last) {
+		batt_move_random();
+		draw_battery();
+	}
+	draw_clock_random();
+}
+
+/*
+ * Inverse of write_rect()'s transpose: the FT3168 reports in the native
+ * 368x448 address space, the UI works in the logical 448x368 frame.
+ */
+static void map_touch(uint16_t tx, uint16_t ty, uint16_t *lx, uint16_t *ly)
+{
+	if (rot_270) {
+		*lx = ty;
+		*ly = (uint16_t)(NAT_W - 1 - tx);
+	} else {
+		*lx = (uint16_t)(NAT_H - 1 - ty);
+		*ly = tx;
+	}
+}
+
+/* ------------------------------------------------------------------ */
+/* Live clock: only redraw the HH:MM text when the minute changes      */
+/* ------------------------------------------------------------------ */
+
+static uint32_t clock_last_min = 0xFFFFFFFFU;
+
+static bool clock_tick(void)
+{
+	uint32_t mins = (epoch_now() / 60U) % (24U * 60U);
+
+	if (mins == clock_last_min) {
+		return false;
+	}
+	clock_last_min = mins;
+	return true;
+}
+
+/* Apply a brightness value; "fade" ramps to it in a few steps so automatic
+ * changes are not a hard flash. */
+static void bri_apply(uint8_t value, bool fade)
+{
+	if (fade && value != brightness) {
+		uint8_t from = brightness;
+
+		for (int i = 1; i <= 8; i++) {
+			(void)display_set_brightness(
+				disp, (uint8_t)(from + (value - from) * i / 8));
+			k_sleep(K_MSEC(15));
+		}
+	}
+	brightness = value;
+	(void)display_set_brightness(disp, value);
+	if (!idle_mode) {
+		if (ui_scr == SCR_MAIN) {
+			draw_slider_brightness();
+		} else if (ui_scr == SCR_SID) {
+			sid_draw_bri();
+		}
+	}
+}
+
+/*
+ * Manual brightness change: take over from the automatic mode (tap AUTO to
+ * hand control back).
+ */
+static void set_brightness(uint8_t value)
+{
+	if (value != bri_manual) {
+		bri_manual = value; /* remembered for when AUTO goes off */
+		bri_cfg_dirty = true;
+	}
+	if (bri_auto) {
+		bri_auto = false;
+		if (ui_scr == SCR_MAIN) {
+			draw_button(UB_X1, UB_Y2, UB_W, UB_H, "AUTO BRI",
+				    false);
+		}
+		LOG_INF("auto brightness off (manual slider)");
+	}
+	bri_apply(value, false);
+}
+
+/* Volume slider: software gain for the synthesised tones. */
+static void set_volume(uint8_t value)
+{
+	volume = value;
+	audio_set_volume(value);
+	if (ui_scr == SCR_MAIN) {
+		draw_slider_volume();
+	} else if (ui_scr == SCR_SID) {
+		sid_draw_volume();
+	}
+	LOG_INF("volume %u", value);
+}
+
+/*
+ * Pick the ambient profile from the measured light, using the editable
+ * levels. Upward transitions need the full threshold; downward ones lag
+ * (outdoor->indoor at bri_lux[2], indoor->night at 75% of bri_lux[0]) so
+ * the display's own light leaking into the ALS cannot make the loop
+ * oscillate.
+ */
+static void brightness_auto_apply(void)
+{
+	uint8_t step = auto_step;
+	int32_t n = (int32_t)bri_lux[0];
+	int32_t d = (int32_t)bri_lux[1];
+	int32_t hyst = (int32_t)bri_lux[2];
+
+	if (!als_ok) {
+		return;
+	}
+
+	if (step == 0U) {
+		if (als_mlux > n) {
+			step = 1U;
+		}
+	} else if (step == 2U) {
+		if (als_mlux < hyst) {
+			step = 1U;
+		}
+	} else {
+		if (als_mlux > d) {
+			step = 2U;
+		} else if (als_mlux < n * 3 / 4) {
+			step = 0U;
+		}
+	}
+
+	if (step != auto_step || brightness != bri_lvl[step]) {
+		auto_step = step;
+		LOG_INF("auto bri: %d mlx -> profile %u (bri %u)", (int)als_mlux,
+			step, bri_lvl[step]);
+		bri_apply(bri_lvl[step], true);
+	}
+}
+
+/* Ambient profile persistence: "lux0 lux1 lux2 bri0 bri1 bri2". */
+static void bri_cfg_save(void)
+{
+	char buf[64];
+	struct fs_file_t f;
+	int n;
+
+	if (!fs_ready) {
+		return;
+	}
+	n = snprintf(buf, sizeof(buf), "%u %u %u %u %u %u %u %u\n",
+		     bri_lux[0], bri_lux[1], bri_lux[2],
+		     bri_lvl[0], bri_lvl[1], bri_lvl[2], bri_manual,
+		     idle_timeout_s);
+	fs_file_t_init(&f);
+	if (fs_open(&f, "/home/bright.cfg",
+		    FS_O_WRITE | FS_O_CREATE | FS_O_TRUNC) == 0) {
+		(void)fs_write(&f, buf, (size_t)n);
+		fs_close(&f);
+	}
+}
+
+static void bri_cfg_load(void)
+{
+	struct fs_file_t f;
+	char buf[64];
+	ssize_t rd;
+	unsigned v[8];
+	char *p;
+	int got = 0;
+
+	if (!fs_ready) {
+		return;
+	}
+	fs_file_t_init(&f);
+	if (fs_open(&f, "/home/bright.cfg", FS_O_READ) < 0) {
+		return;
+	}
+	rd = fs_read(&f, buf, sizeof(buf) - 1U);
+	fs_close(&f);
+	if (rd <= 0) {
+		return;
+	}
+	buf[rd] = '\0';
+
+	p = buf;
+	for (int i = 0; i < 8; i++) {
+		while (*p == ' ' || *p == '\n' || *p == '\r' || *p == '\t') {
+			p++;
+		}
+		if (*p < '0' || *p > '9') {
+			break;
+		}
+		v[i] = 0;
+		while (*p >= '0' && *p <= '9') {
+			v[i] = v[i] * 10U + (unsigned)(*p++ - '0');
+			if (v[i] > 10000U) {
+				v[i] = 10000U;
+			}
+		}
+		got++;
+	}
+	if (got < 6) {
+		return; /* incomplete: keep the defaults */
+	}
+	bri_lux[0] = (uint16_t)v[0];
+	bri_lux[1] = (uint16_t)v[1];
+	bri_lux[2] = (uint16_t)v[2];
+	bri_lvl[0] = (uint8_t)v[3];
+	bri_lvl[1] = (uint8_t)v[4];
+	bri_lvl[2] = (uint8_t)v[5];
+	if (got >= 7) {
+		bri_manual = (uint8_t)v[6];
+	}
+	if (got >= 8) {
+		unsigned s = CLAMP(v[7], (unsigned)IDLE_TIMEOUT_MIN_S,
+				   (unsigned)IDLE_TIMEOUT_MAX_S);
+
+		idle_timeout_s = (uint16_t)(s / 15U * 15U);
+	}
+	LOG_INF("brightness profiles: lux %u/%u/%u bri %u/%u/%u manual %u idle %us",
+		bri_lux[0], bri_lux[1], bri_lux[2], bri_lvl[0], bri_lvl[1],
+		bri_lvl[2], bri_manual, idle_timeout_s);
+}
+
+/* SAVE STATE: rebuild dir.txt and flush the clock, brightness profiles,
+ * alarms and the last tune to /home in one go. */
+static void save_all_state(void)
+{
+	home_write_dir();
+	time_cfg_save();
+	bri_cfg_dirty = false;
+	alm_cfg_dirty = false;
+	bri_cfg_save();
+	alm_cfg_save();
+	sid_remember_save();
+	LOG_INF("state saved (dir.txt time brightness alarms sid)");
+}
+
+/* LiPo discharge curve (mV -> percent), clamped. */
+static uint8_t mv_to_percent(uint16_t mv)
+{
+	static const uint16_t lim_mv[] = {
+		3400, 3500, 3600, 3650, 3700, 3750,
+		3800, 3900, 4000, 4100, 4200,
+	};
+	static const uint8_t lim_pct[] = {
+		0, 5, 15, 25, 40, 50, 60, 70, 80, 90, 100,
+	};
+
+	if (mv <= lim_mv[0]) {
+		return 0;
+	}
+	for (int i = 1; i < (int)ARRAY_SIZE(lim_mv); i++) {
+		if (mv <= lim_mv[i]) {
+			int span_mv = lim_mv[i] - lim_mv[i - 1];
+			int span_pct = lim_pct[i] - lim_pct[i - 1];
+
+			return (uint8_t)(lim_pct[i - 1] +
+					 (mv - lim_mv[i - 1]) * span_pct / span_mv);
+		}
+	}
+	return 100;
+}
+
+static void draw_battery(void)
+{
+	char l1[24], l2[8], l3[24];
+	int w;
+
+	if (idle_mode && idle_night()) {
+		return; /* night face: clock only, no status block */
+	}
+
+	if (idle_mode) {
+		/* idle face: the block moves along the upper edge, so clear
+		 * the strip and redraw the (cached) lines fresh */
+		fill_rect(0, BATT_Y0, SCR_W, 76, COL_BG);
+		text_cache_reset();
+	}
+
+	snprintf(l1, sizeof(l1), "%u%% %u.%02uV", battery_pct,
+		 battery_mv / 1000U, (battery_mv % 1000U) / 10U);
+	w = (int)strlen(l1) * TEXT_CW;
+	draw_text_cached(TC_BATT1, batt_right - w, BATT_Y0, l1, COL_WHITE,
+			 COL_BG);
+
+	if (charger_on) {
+		strcpy(l2, battery_pct >= 99U ? "FULL" : "CHG");
+	} else if (ext_power) {
+		strcpy(l2, "AC");
+	} else {
+		l2[0] = '\0';
+	}
+	w = (int)strlen(l2) * TEXT_CW;
+	draw_text_cached(TC_BATT2, batt_right - w, BATT_Y0 + 24, l2,
+			 charger_on ? COL_GREEN : COL_CYAN, COL_BG);
+
+	if (!als_ok) {
+		strcpy(l3, "lux -");
+	} else {
+		int cl = als_mlux / 10; /* 0.01 lx units */
+
+		if (cl < 10000) {
+			snprintf(l3, sizeof(l3), "lux %d.%02d", cl / 100,
+				 cl % 100);
+		} else {
+			snprintf(l3, sizeof(l3), "lux %d", cl / 100);
+		}
+	}
+	w = (int)strlen(l3) * TEXT_CW;
+	draw_text_cached(TC_BATT3, batt_right - w, BATT_Y0 + 48, l3,
+			 COL_WHITE, COL_BG);
+}
+
+/* Random horizontal position along the upper edge (burn-in), clear of the
+ * rounded corners and inside the active idle frame. */
+static void batt_move_random(void)
+{
+	int span = idle_fw() - 190 - 15;
+
+	if (span < 40) {
+		span = 40;
+	}
+	batt_right = (uint16_t)(190U + (jitter_next() % (unsigned)span));
+}
+
+static int battery_init(void)
+{
+	if (!adc_is_ready_dt(&batt_adc)) {
+		LOG_ERR("battery ADC not ready");
+		return -ENODEV;
+	}
+	if (adc_channel_setup_dt(&batt_adc) != 0) {
+		LOG_ERR("battery ADC channel setup failed");
+		return -EIO;
+	}
+	(void)gpio_pin_configure(gpio1, 12, GPIO_INPUT | GPIO_PULL_UP);
+	(void)gpio_pin_configure(gpio1, 13, GPIO_INPUT | GPIO_PULL_UP);
+	als_ok = device_is_ready(als);
+	LOG_INF("battery monitor ready (AIN7), als ready=%d", als_ok);
+	return 0;
+}
+
+static void battery_poll(void)
+{
+	uint16_t raw = 0;
+	int32_t sum = 0;
+	int n = 0;
+	struct adc_sequence seq = {
+		.channels = BIT(batt_adc.channel_id),
+		.buffer = &raw,
+		.buffer_size = sizeof(raw),
+		.resolution = batt_adc.resolution,
+		.oversampling = batt_adc.oversampling,
+	};
+	uint8_t old_pct = battery_pct;
+	uint16_t old_mv = battery_mv;
+	bool old_chg = charger_on;
+
+	if (!adc_is_ready_dt(&batt_adc)) {
+		return;
+	}
+
+	for (int i = 0; i < 16; i++) {
+		if (adc_read_dt(&batt_adc, &seq) == 0) {
+			sum += raw;
+			n++;
+		}
+	}
+	if (n == 0) {
+		return;
+	}
+
+	/* Battery scaling: average raw * 4.7643 (10-bit, gain 2/3, int. ref) */
+	battery_mv = (uint16_t)((sum / n) * 4764 / 1000);
+	battery_pct = mv_to_percent(battery_mv);
+
+	chg_pin12 = (uint8_t)(gpio_pin_get_raw(gpio1, 12) != 0);
+	chg_pin13 = (uint8_t)(gpio_pin_get_raw(gpio1, 13) != 0);
+
+	/* Charger status pins are open-drain/active low: high = idle. */
+	charger_on = (chg_pin12 == 0U) || (chg_pin13 == 0U);
+	ext_power = (chg_pin13 == 0U) && (chg_pin12 != 0U);
+
+	if (als_ok) {
+		struct sensor_value sv;
+
+		if (sensor_sample_fetch(als) == 0 &&
+		    sensor_channel_get(als, SENSOR_CHAN_LIGHT, &sv) == 0) {
+			als_mlux = (int32_t)sensor_value_to_milli(&sv);
+		}
+	}
+
+	if (battery_pct != old_pct || charger_on != old_chg ||
+	    (battery_mv / 50) != (old_mv / 50)) {
+		LOG_INF("battery raw=%d mV=%u pct=%u chg=%d ext=%d lux_mlx=%d",
+			(int)(sum / n), battery_mv, battery_pct,
+			charger_on, ext_power, (int)als_mlux);
+	}
+
+	if (ble_batt_level != battery_pct) {
+		ble_batt_level = battery_pct;
+		(void)bt_gatt_notify(NULL, &bas_svc.attrs[1],
+				     &ble_batt_level, sizeof(ble_batt_level));
+	}
+
+	if (bri_auto) {
+		brightness_auto_apply();
+	}
+
+	draw_battery();
+}
+
+static void toggle_auto_rot(void)
+{
+	auto_rot = !auto_rot;
+	draw_button(UB_X1, UB_Y1, UB_W, UB_H,
+		    auto_rot ? "AUTO ROT" : "ROT OFF", auto_rot);
+	LOG_INF("auto rotation %s", auto_rot ? "on" : "off");
+}
+
+/* The ambient profiles were tuned with the 800 ms conversion time; pin it
+ * at boot (the OPT4001 starts at 100 ms, the OPT300x defaults to 800). */
+static void als_ct_init(void)
+{
+	int ret = opt400x_set_conversion_time(als, 11U); /* 800 ms */
+
+	LOG_INF("als conversion time set to 800 ms (ret %d)", ret);
+}
+
+static void toggle_bri_auto(void)
+{
+	bri_auto = !bri_auto;
+	draw_button(UB_X1, UB_Y2, UB_W, UB_H, "AUTO BRI", bri_auto);
+	LOG_INF("auto brightness %s", bri_auto ? "on" : "off");
+	if (bri_auto) {
+		brightness_auto_apply();
+	} else {
+		/* restore the last manual choice */
+		bri_apply(bri_manual, false);
+		LOG_INF("brightness back to manual %u", bri_manual);
+	}
+}
+
+/* Sound enable: gates the synthesized sounds and the SID output. */
+static void toggle_sound(void)
+{
+	sound_on = !sound_on;
+	audio_set_enabled(sound_on);
+	draw_button(UB_X2, UB_Y1, UB_W, UB_H,
+		    sound_on ? "SND ON" : "SND OFF", sound_on);
+	LOG_INF("sound %s", sound_on ? "on" : "off");
+}
+
+/* SLEEP: idle mode with the panel dark. No clock is drawn and no lux /
+ * orientation checks run; the SID player and the (armed) alarms keep
+ * working. A touch wakes straight to the UI; an alarm brings up the idle
+ * face. */
+static void enter_sleep(void)
+{
+	idle_mode = true;
+	idle_blank = true;
+	sleep_armed = false;
+	idle_rot = rot_270 ? 2 : 0;
+	k_sem_reset(&touch_sem);
+	accel_suspend();
+	(void)gc9307_panel_state(disp, 0); /* display off + sleep in */
+	display_on = false;
+	LOG_INF("sleep: dark idle (touch wakes, alarms armed)");
+}
+
+static void wake_display(void)
+{
+	/* State 1 = full reset + re-init; panel modes are reset too. */
+	(void)gc9307_panel_state(disp, 1);
+	(void)display_set_brightness(disp, brightness);
+	idle_mode = false;
+	idle_blank = false;
+	accel_resume();
+	display_on = true;
+	last_touch_ms = k_uptime_get_32();
+	draw_ui();
+	LOG_INF("display wake");
+}
+
+/* ------------------------------------------------------------------ */
+/* I2C diagnostics                                                     */
+/* ------------------------------------------------------------------ */
+
+/* The nRF TWIM driver recovers a stuck bus on transfer timeouts; do it
+ * explicitly at startup too (a slave can hold SDA low after an MCU-only
+ * reset, which turns every transfer into a ~500 ms timeout). */
+static void i2c_bus_recover(void)
+{
+	int rc;
+
+	if (!device_is_ready(touch_i2c.bus)) {
+		return;
+	}
+	rc = i2c_recover_bus(touch_i2c.bus);
+	LOG_INF("i2c bus recover: %d", rc);
+}
+
+static void i2c_scan(void)
+{
+	LOG_INF("I2C30 scan:");
+
+	for (uint8_t a = 0x08; a < 0x78; a++) {
+		if (i2c_write(touch_i2c.bus, NULL, 0, a) == 0) {
+			LOG_INF("  device at 0x%02X", a);
+		}
+	}
+}
+
+/* ------------------------------------------------------------------ */
+/* FT3168 touch (polled, reset + init sequence)                     */
+/* ------------------------------------------------------------------ */
+
+static int tch_rd(uint8_t reg, uint8_t *buf, size_t len)
+{
+	return i2c_write_read_dt(&touch_i2c, &reg, 1, buf, len);
+}
+
+static int tch_wr(uint8_t reg, uint8_t val)
+{
+	uint8_t b[2] = { reg, val };
+
+	return i2c_write_dt(&touch_i2c, b, sizeof(b));
+}
+
+static int touch_init(void)
+{
+	if (!device_is_ready(touch_i2c.bus)) {
+		LOG_ERR("touch I2C not ready");
+		return -ENODEV;
+	}
+
+	gpio_pin_configure_dt(&touch_rst, GPIO_OUTPUT_ACTIVE);
+	gpio_pin_set_dt(&touch_rst, 1); /* assert (active low) */
+	k_sleep(K_MSEC(20));
+	gpio_pin_set_dt(&touch_rst, 0); /* release */
+	k_sleep(K_MSEC(30));
+
+	(void)tch_wr(0x87, 0x28);
+	k_sleep(K_MSEC(5));
+	(void)tch_wr(0x87, 0x17);
+	(void)tch_wr(0xB0, 0x01);
+
+	uint8_t a0 = 0, a3 = 0, a6 = 0, a8 = 0;
+
+	(void)tch_rd(0xA0, &a0, 1);
+	(void)tch_rd(0xA3, &a3, 1);
+	(void)tch_rd(0xA6, &a6, 1);
+	(void)tch_rd(0xA8, &a8, 1);
+	LOG_INF("touch: A0=%02X A3=%02X vendor=%02X fw=%02X", a0, a3, a6, a8);
+
+	/* P1.09: FT3168 interrupt (active high edge) - wakes the CPU from
+	 * idle mode without polling. */
+	if (gpio_is_ready_dt(&touch_irq)) {
+		gpio_pin_configure_dt(&touch_irq, GPIO_INPUT);
+		gpio_init_callback(&touch_irq_cb, touch_irq_handler,
+				   BIT(touch_irq.pin));
+		gpio_add_callback(touch_irq.port, &touch_irq_cb);
+		gpio_pin_interrupt_configure_dt(&touch_irq,
+						GPIO_INT_EDGE_TO_ACTIVE);
+	}
+
+	return 0;
+}
+
+/* Single status-register read: is a finger down? (no coordinate read) */
+static bool tch_touched(void)
+{
+	uint8_t st;
+
+	return (tch_rd(0x02, &st, 1) == 0) && ((st & 0x0F) != 0);
+}
+
+static void touch_poll(void)
+{
+	uint8_t st, xy[4];
+	uint16_t tx, ty, x = 0, y = 0;
+
+	if (tch_rd(0x02, &st, 1) < 0 || (st & 0x0F) == 0) {
+		touch_was_down = false;
+		return;
+	}
+	last_touch_ms = k_uptime_get_32();
+	if (tch_rd(0x03, xy, 4) < 0) {
+		return;
+	}
+
+	tx = ((xy[0] & 0x0F) << 8) | xy[1];
+	ty = ((xy[2] & 0x0F) << 8) | xy[3];
+	uint8_t ev = xy[0] >> 6;
+
+	if (ev == 1) { /* lift up */
+		touch_was_down = false;
+		return;
+	}
+	if (ev != 0 && ev != 2) { /* only down / contact */
+		return;
+	}
+
+	if (!display_on) {
+		/* Any touch wakes the panel; swallow this touch. */
+		touch_was_down = true;
+		wake_display();
+		return;
+	}
+
+	map_touch(tx, ty, &x, &y);
+
+	bool first = !touch_was_down;
+
+	if (first) {
+		touch_was_down = true;
+		LOG_INF("touch raw %u,%u -> ui %u,%u (screen %d)", tx, ty, x, y,
+			(int)ui_scr);
+	}
+
+	/* Tap actions per screen (first touch-down only). */
+	switch (ui_scr) {
+	case SCR_MAIN:
+		if (first && hit(x, y, TILE_SID_X, TILE_Y, TILE_W, TILE_H)) {
+			ui_scr = SCR_SID;
+			draw_ui();
+			return;
+		}
+		if (first && hit(x, y, TILE_SENS_X, TILE_Y, TILE_W, TILE_H)) {
+			ui_scr = SCR_SENSORS;
+			draw_ui();
+			return;
+		}
+		if (first && hit(x, y, TILE_ALM_X, TILE_Y, TILE_W, TILE_H)) {
+			ui_scr = SCR_ALARMS;
+			draw_ui();
+			return;
+		}
+		if (first && hit(x, y, TILE_SET_X, TILE_Y, TILE_W, TILE_H)) {
+			ui_scr = SCR_SETTINGS;
+			draw_ui();
+			return;
+		}
+		if (first && hit(x, y, UB_X1, UB_Y1, UB_W, UB_H)) {
+			toggle_auto_rot();
+			return;
+		}
+		if (first && hit(x, y, UB_X2, UB_Y1, UB_W, UB_H)) {
+			toggle_sound(); /* plays its own click */
+			return;
+		}
+		if (first && hit(x, y, UB_X1, UB_Y2, UB_W, UB_H)) {
+			toggle_bri_auto();
+			return;
+		}
+		if (first && hit(x, y, UB_X2, UB_Y2, UB_W, UB_H)) {
+			enter_sleep();
+			return;
+		}
+		break;
+	case SCR_SID:
+		if (first && hit(x, y, HOME_X, HOME_Y, HOME_W, HOME_H)) {
+			ui_scr = SCR_MAIN;
+			draw_ui();
+			return;
+		}
+		if (first &&
+		    hit(x, y, SID_CHIP_X, SID_CHIP_Y, SID_CHIP_W, SID_CHIP_H)) {
+			sid_player_set_model((sid_player_model_mode() + 1) % 3);
+			draw_sid_screen();
+			return;
+		}
+		if (first &&
+		    hit(x, y, SID_TUNEL_X, SID_ROW1_Y, SID_TUNEL_W, SID_ROW1_H)) {
+			sid_step(-1);
+			return;
+		}
+		if (first &&
+		    hit(x, y, SID_PLAY_X, SID_ROW1_Y, SID_PLAY_W, SID_ROW1_H)) {
+			sid_toggle_play();
+			return;
+		}
+		if (first &&
+		    hit(x, y, SID_STOP_X, SID_ROW1_Y, SID_STOP_W, SID_ROW1_H)) {
+			sid_player_stop();
+			audio_sid_stop();
+			sid_ui_sync(); /* repaint info + buttons immediately */
+			return;
+		}
+		if (first &&
+		    hit(x, y, SID_TUNER_X, SID_ROW1_Y, SID_TUNER_W, SID_ROW1_H)) {
+			sid_step(1);
+			return;
+		}
+		if (first &&
+		    hit(x, y, SID_SUBL_X, SID_ROW2_Y, SID_SUB_W, SID_SUB_H)) {
+			sid_sub_step(-1);
+			return;
+		}
+		if (first &&
+		    hit(x, y, SID_END_X, SID_ROW2_Y, SID_SUB_W, SID_SUB_H)) {
+			sid_end_mode = (sid_end_mode + 1) % 3;
+			draw_sid_buttons();
+			return;
+		}
+		if (first &&
+		    hit(x, y, SID_SUBR_X, SID_ROW2_Y, SID_SUB_W, SID_SUB_H)) {
+			sid_sub_step(1);
+			return;
+		}
+		break;
+	case SCR_SENSORS:
+		if (first && hit(x, y, HOME_X, HOME_Y, HOME_W, HOME_H)) {
+			ui_scr = SCR_MAIN;
+			draw_ui();
+			return;
+		}
+		break;
+	case SCR_SETTINGS:
+		if (first && hit(x, y, HOME_X, HOME_Y, HOME_W, HOME_H)) {
+			ui_scr = SCR_MAIN;
+			draw_ui();
+			return;
+		}
+		if (first &&
+		    hit(x, y, SET_NIGHT_X, SET_ROW1_Y, SET_BTN_W, SET_BTN_H)) {
+			bri_sel = 0;
+			draw_settings_screen();
+			return;
+		}
+		if (first &&
+		    hit(x, y, SET_INDOOR_X, SET_ROW1_Y, SET_BTN_W, SET_BTN_H)) {
+			bri_sel = 1;
+			draw_settings_screen();
+			return;
+		}
+		if (first &&
+		    hit(x, y, SET_OUTDOOR_X, SET_ROW1_Y, SET_BTN_W, SET_BTN_H)) {
+			bri_sel = 2;
+			draw_settings_screen();
+			return;
+		}
+		if (first && hit(x, y, SET_SAVE_X, SET_SAVE_Y, SET_SAVE_W,
+				SET_SAVE_H)) {
+			save_all_state(); /* dir.txt + time + configs */
+			return;
+		}
+		if (first && hit(x, y, ALM_ARR_X0, SET_SLD_IDLE_Y, ALM_ARR_W,
+				SLD_H)) {
+			if (idle_timeout_s > IDLE_TIMEOUT_MIN_S) {
+				idle_timeout_s -= 15U;
+				bri_cfg_dirty = true;
+				draw_slider_idle();
+			}
+			return;
+		}
+		if (first && hit(x, y, ALM_ARR_X1, SET_SLD_IDLE_Y, ALM_ARR_W,
+				SLD_H)) {
+			if (idle_timeout_s < IDLE_TIMEOUT_MAX_S) {
+				idle_timeout_s += 15U;
+				bri_cfg_dirty = true;
+				draw_slider_idle();
+			}
+			return;
+		}
+		break;
+	case SCR_ALARMS:
+		if (first && hit(x, y, HOME_X, HOME_Y, HOME_W, HOME_H)) {
+			ui_scr = SCR_MAIN;
+			draw_ui();
+			return;
+		}
+		if (first && hit(x, y, ALM_MODE_X, ALM_MODE_Y, ALM_MODE_W,
+				ALM_MODE_H)) {
+			alarms[alm_sel].mode =
+				(uint8_t)((alarms[alm_sel].mode + 1U) % 3U);
+			alm_cfg_dirty = true;
+			draw_alarms_screen();
+			return;
+		}
+		if (first && hit(x, y, ALM_RING_X, ALM_MODE_Y, ALM_RING_W,
+				ALM_MODE_H)) {
+			alarm_capture_ringtone();
+			return;
+		}
+		if (alarms[alm_sel].mode == 2) {
+			for (int i = 0; i < 7; i++) {
+				if (first &&
+				    hit(x, y, ALM_DAY_X0 + i * ALM_DAY_DX,
+					ALM_DAY_Y, ALM_DAY_W, ALM_DAY_H)) {
+					alarms[alm_sel].days ^=
+						(uint8_t)(1U << i);
+					alm_cfg_dirty = true;
+					draw_alarms_screen();
+					return;
+				}
+			}
+		}
+		for (int i = 0; i < 5; i++) {
+			if (first &&
+			    hit(x, y, ALM_TILE_X0 + i * ALM_TILE_DX,
+				ALM_TILE_Y, ALM_TILE_W, ALM_TILE_H)) {
+				alm_sel = i;
+				draw_alarms_screen();
+				return;
+			}
+		}
+		/* -/+ step buttons of the hour, minute and length sliders */
+		if (first && hit(x, y, ALM_ARR_X0, ALM_SLD_HOUR_Y, ALM_ARR_W,
+				SLD_H)) {
+			alarms[alm_sel].hour = (uint8_t)((alarms[alm_sel].hour +
+							  23U) % 24U);
+			alm_cfg_dirty = true;
+			draw_alarms_screen();
+			return;
+		}
+		if (first && hit(x, y, ALM_ARR_X1, ALM_SLD_HOUR_Y, ALM_ARR_W,
+				SLD_H)) {
+			alarms[alm_sel].hour = (uint8_t)((alarms[alm_sel].hour +
+							  1U) % 24U);
+			alm_cfg_dirty = true;
+			draw_alarms_screen();
+			return;
+		}
+		if (first && hit(x, y, ALM_ARR_X0, ALM_SLD_MIN_Y, ALM_ARR_W,
+				SLD_H)) {
+			alarms[alm_sel].min = (uint8_t)((alarms[alm_sel].min +
+							 59U) % 60U);
+			alm_cfg_dirty = true;
+			draw_alarms_screen();
+			return;
+		}
+		if (first && hit(x, y, ALM_ARR_X1, ALM_SLD_MIN_Y, ALM_ARR_W,
+				SLD_H)) {
+			alarms[alm_sel].min = (uint8_t)((alarms[alm_sel].min +
+							 1U) % 60U);
+			alm_cfg_dirty = true;
+			draw_alarms_screen();
+			return;
+		}
+		if (first && hit(x, y, ALM_ARR_X0, ALM_SLD_LEN_Y, ALM_ARR_W,
+				SLD_H)) {
+			if (alarms[alm_sel].len_sec > IDLE_TIMEOUT_MIN_S) {
+				alarms[alm_sel].len_sec =
+					(uint16_t)(alarms[alm_sel].len_sec -
+						   15U);
+				alm_cfg_dirty = true;
+				draw_alarms_screen();
+			}
+			return;
+		}
+		if (first && hit(x, y, ALM_ARR_X1, ALM_SLD_LEN_Y, ALM_ARR_W,
+				SLD_H)) {
+			if (alarms[alm_sel].len_sec < IDLE_TIMEOUT_MAX_S) {
+				alarms[alm_sel].len_sec =
+					(uint16_t)(alarms[alm_sel].len_sec +
+						   15U);
+				alm_cfg_dirty = true;
+				draw_alarms_screen();
+			}
+			return;
+		}
+		break;
+	}
+
+	/* Volume/brightness sliders: main uses the fixed slots, the SID
+	 * screen moves its sliders with the metadata block. Press and drag. */
+	if (ui_scr == SCR_MAIN || ui_scr == SCR_SID) {
+		int y0 = (ui_scr == SCR_SID) ? sid_sld_vol_y : SLD_VOL_Y;
+
+		if (y >= y0 - 8 && y < y0 + SLD_H + 8 &&
+		    x >= SLD_X - 8 && x < SLD_X + SLD_W + 8) {
+			int v = ((int)x - SLD_X) * 255 / (SLD_W - 1);
+
+			v = CLAMP(v, 0, 255);
+			if ((uint8_t)v != volume) {
+				set_volume((uint8_t)v);
+			}
+			return;
+		}
+		y0 = (ui_scr == SCR_SID) ? sid_sld_bri_y : SLD_BRI_Y;
+		if (y >= y0 - 8 && y < y0 + SLD_H + 8 &&
+		    x >= SLD_X - 8 && x < SLD_X + SLD_W + 8) {
+			int v = ((int)x - SLD_X) * 255 / (SLD_W - 1);
+
+			v = CLAMP(v, 0, 255);
+			if ((uint8_t)v != brightness) {
+				set_brightness((uint8_t)v);
+			}
+			return;
+		}
+	}
+
+	/* Settings sliders: LUX + brightness of the edited profile, then the
+	 * display frame rate (all press and drag). */
+	if (ui_scr == SCR_SETTINGS &&
+	    y >= SET_SLD_LUX_Y - 8 && y < SET_SLD_LUX_Y + SLD_H + 8 &&
+	    x >= SLD_X - 8 && x < SLD_X + SLD_W + 8) {
+		int v = ((int)x - SLD_X) * 10000 / (SLD_W - 1);
+
+		v = CLAMP(v, 0, 10000);
+		v = (v + 25) / 50 * 50; /* 0.05 lx steps */
+		if ((uint16_t)v != bri_lux[bri_sel]) {
+			bri_lux[bri_sel] = (uint16_t)v;
+			bri_cfg_dirty = true;
+			draw_slider_lux();
+		}
+		return;
+	}
+	if (ui_scr == SCR_SETTINGS &&
+	    y >= SET_SLD_BRI_Y - 8 && y < SET_SLD_BRI_Y + SLD_H + 8 &&
+	    x >= SLD_X - 8 && x < SLD_X + SLD_W + 8) {
+		int v = ((int)x - SLD_X) * 255 / (SLD_W - 1);
+		uint8_t nv;
+
+		v = CLAMP(v, 0, 255);
+		nv = (uint8_t)v;
+		if (nv != bri_lvl[bri_sel]) {
+			bri_lvl[bri_sel] = nv;
+			bri_cfg_dirty = true;
+			draw_slider_set_bri();
+			/* live feedback when editing the active profile */
+			if (bri_auto && bri_sel == auto_step) {
+				bri_apply(nv, false);
+			}
+		}
+		return;
+	}
+	if (ui_scr == SCR_SETTINGS &&
+	    y >= SET_SLD_IDLE_Y - 8 && y < SET_SLD_IDLE_Y + SLD_H + 8 &&
+	    x >= ALM_SLD_X - 4 && x < ALM_SLD_X + ALM_SLD_W + 4) {
+		int lv = ((int)x - ALM_SLD_X) * 19 / (ALM_SLD_W - 1);
+		uint16_t s = (uint16_t)((lv + 1) * 15);
+
+		if (lv < 0) {
+			s = IDLE_TIMEOUT_MIN_S;
+		}
+		if (s > IDLE_TIMEOUT_MAX_S) {
+			s = IDLE_TIMEOUT_MAX_S;
+		}
+		if (s != idle_timeout_s) {
+			idle_timeout_s = s;
+			bri_cfg_dirty = true;
+			draw_slider_idle();
+		}
+		return;
+	}
+
+	/* Alarms screen sliders: hour, minute and playback length (the hour
+	 * and minute rows have -/+ buttons handled above). */
+	if (ui_scr == SCR_ALARMS) {
+		struct alarm_cfg *a = &alarms[alm_sel];
+		int v;
+
+		if (y >= ALM_SLD_HOUR_Y - 8 && y < ALM_SLD_HOUR_Y + SLD_H + 8 &&
+		    x >= ALM_SLD_X - 4 && x < ALM_SLD_X + ALM_SLD_W + 4) {
+			v = ((int)x - ALM_SLD_X) * 23 / (ALM_SLD_W - 1);
+			v = CLAMP(v, 0, 23);
+			if ((uint8_t)v != a->hour) {
+				a->hour = (uint8_t)v;
+				alm_cfg_dirty = true;
+				draw_alarms_screen();
+			}
+			return;
+		}
+		if (y >= ALM_SLD_MIN_Y - 8 && y < ALM_SLD_MIN_Y + SLD_H + 8 &&
+		    x >= ALM_SLD_X - 4 && x < ALM_SLD_X + ALM_SLD_W + 4) {
+			v = ((int)x - ALM_SLD_X) * 59 / (ALM_SLD_W - 1);
+			v = CLAMP(v, 0, 59);
+			if ((uint8_t)v != a->min) {
+				a->min = (uint8_t)v;
+				alm_cfg_dirty = true;
+				draw_alarms_screen();
+			}
+			return;
+		}
+		if (y >= ALM_SLD_LEN_Y - 8 && y < ALM_SLD_LEN_Y + SLD_H + 8 &&
+		    x >= ALM_SLD_X - 4 && x < ALM_SLD_X + ALM_SLD_W + 4) {
+			v = ((int)x - ALM_SLD_X) * 19 / (ALM_SLD_W - 1) + 1;
+			v = CLAMP(v, 1, 20);
+			v *= 15;
+			if ((uint16_t)v != a->len_sec) {
+				a->len_sec = (uint16_t)v;
+				alm_cfg_dirty = true;
+				draw_alarms_screen();
+			}
+			return;
+		}
+	}
+}
+
+/* ------------------------------------------------------------------ */
+/* LIS2DH accelerometer                                                */
+/* ------------------------------------------------------------------ */
+
+static int abs_i(int v)
+{
+	return v < 0 ? -v : v;
+}
+
+/* Direct-poll fallback: standard LIS2DH setup, 100 Hz, BDU, +-2g, HR */
+static int accel_direct_init(void)
+{
+	uint8_t who = 0;
+	int ret;
+
+	ret = i2c_reg_read_byte(touch_i2c.bus, ACC_ADDR, ACC_WHO_AM_I, &who);
+	LOG_INF("accel probe 0x%02X: ret=%d WHO_AM_I=0x%02X", ACC_ADDR, ret, who);
+
+	if (ret < 0 || who != 0x33) {
+		return -ENODEV;
+	}
+
+	(void)i2c_reg_write_byte(touch_i2c.bus, ACC_ADDR, ACC_CTRL_REG1, 0x00);
+	(void)i2c_reg_write_byte(touch_i2c.bus, ACC_ADDR, ACC_CTRL_REG4, 0x08);
+	(void)i2c_reg_write_byte(touch_i2c.bus, ACC_ADDR, ACC_CTRL_REG1, 0x57);
+	return 0;
+}
+
+static void accel_direct_read(int mg[3])
+{
+	uint8_t b[6];
+	uint8_t r = ACC_OUT_X_L | 0x80;
+
+	if (i2c_write_read(touch_i2c.bus, ACC_ADDR, &r, 1, b, 6) < 0) {
+		mg[0] = mg[1] = mg[2] = 0;
+		return;
+	}
+
+	for (int i = 0; i < 3; i++) {
+		int16_t raw = (int16_t)((b[i * 2 + 1] << 8) | b[i * 2]);
+
+		mg[i] = raw >> 4; /* HR mode, +-2g: 1 mg/LSB */
+	}
+}
+
+/* Accelerometer power save for idle mode: CTRL_REG1 = 0 (power down). */
+static void accel_suspend(void)
+{
+	(void)i2c_reg_write_byte(touch_i2c.bus, ACC_ADDR, ACC_CTRL_REG1, 0x00);
+}
+
+static void accel_resume(void)
+{
+	if (accel_direct) {
+		(void)accel_direct_init();
+	} else {
+		(void)i2c_reg_write_byte(touch_i2c.bus, ACC_ADDR,
+					ACC_CTRL_REG1, 0x57);
+	}
+}
+
+/*
+ * Idle mode: accelerometer powered down, display updates only the clock and
+ * the battery/lux block once a minute. Any touch (FT3168 INT or the 1 s
+ * fallback poll) returns to the full UI.
+ */
+/*
+ * Idle face auto-rotation: read the display-plane tilt (one fresh sample)
+ * and pick the idle orientation. The accelerometer is otherwise powered
+ * down in idle, so the caller resumes it for this (~20 ms once a minute)
+ * and suspends it again right after.
+ *
+ * The accel is only trusted when gravity clearly lies in the display plane
+ * (|x| or |y| > 350 mg); when the device lies flat the current face is kept.
+ * The quadrant -> rotation table is the only hardware-dependent part
+ * (device mounting) and is easy to permute if a rotation comes out 90 deg
+ * off.
+ */
+static int accel_orientation(void)
+{
+	/* quadrants: 0 = +X, 1 = -X, 2 = +Y, 3 = -Y */
+	static const uint8_t quad2rot[4] = { 1, 3, 2, 0 };
+	int mg[3] = { 0, 0, 0 };
+	int q;
+
+	accel_resume();
+	k_sleep(K_MSEC(20)); /* let one sample settle */
+
+	if (!accel_direct) {
+		struct sensor_value x, y;
+
+		if (sensor_sample_fetch(accel) != 0 ||
+		    sensor_channel_get(accel, SENSOR_CHAN_ACCEL_X, &x) != 0 ||
+		    sensor_channel_get(accel, SENSOR_CHAN_ACCEL_Y, &y) != 0) {
+			return -1;
+		}
+		mg[0] = x.val1 * 1000 + x.val2 / 1000;
+		mg[1] = y.val1 * 1000 + y.val2 / 1000;
+	} else {
+		accel_direct_read(mg);
+	}
+
+	if (abs_i(mg[0]) < 350 && abs_i(mg[1]) < 350) {
+		return -1; /* lying flat: keep the current face */
+	}
+	q = (abs_i(mg[0]) >= abs_i(mg[1])) ? (mg[0] > 0 ? 0 : 1)
+					   : (mg[1] > 0 ? 2 : 3);
+	idle_quad = (uint8_t)q;
+	return quad2rot[q];
+}
+
+/* Normal-UI auto rotation (AUTO ROT): pick the landscape mapping (90/270)
+ * that matches the orientation. Portrait holds and a flat device keep the
+ * current mapping; the full four-way rotation above is idle-only. */
+static int accel_ui_rot(void)
+{
+	int mg[3] = { 0, 0, 0 };
+
+	if (!accel_direct) {
+		struct sensor_value x, y;
+
+		if (sensor_sample_fetch(accel) != 0 ||
+		    sensor_channel_get(accel, SENSOR_CHAN_ACCEL_X, &x) != 0 ||
+		    sensor_channel_get(accel, SENSOR_CHAN_ACCEL_Y, &y) != 0) {
+			return -1;
+		}
+		mg[0] = x.val1 * 1000 + x.val2 / 1000;
+		mg[1] = y.val1 * 1000 + y.val2 / 1000;
+	} else {
+		accel_direct_read(mg);
+	}
+
+	if (abs_i(mg[0]) < 350 && abs_i(mg[1]) < 350) {
+		return -1; /* flat: keep the current mapping */
+	}
+	if (abs_i(mg[1]) <= abs_i(mg[0])) {
+		return -1; /* held upright: the UI stays landscape */
+	}
+	return (mg[1] > 0) ? 2 : 0;
+}
+
+static void enter_idle(void)
+{
+	int rot = -1;
+
+	if (auto_rot) {
+		rot = accel_orientation();
+	}
+	idle_mode = true;
+	idle_blank = false;
+	if (bri_auto) {
+		brightness_auto_apply();
+	}
+	/* flat, unreadable or ROT OFF: keep the landscape mapping */
+	idle_rot = (rot >= 0) ? rot : (rot_270 ? 2 : 0);
+	accel_suspend();
+	audio_dbg_byte(18, (uint8_t)idle_rot);
+	audio_dbg_byte(19, idle_quad);
+	/*
+	 * The face is drawn right below at a fresh random position. Line the
+	 * minute counter up with the current minute so the next move happens
+	 * exactly at the next minute boundary - forcing 0xFFFFFFFF made the
+	 * clock jump again within a second of entering idle.
+	 */
+	clock_last_min = (epoch_now() / 60U) % (24U * 60U);
+	k_sem_reset(&touch_sem);
+	draw_idle_face();
+	LOG_INF("idle mode on (rot %d, quad %u)", idle_rot, idle_quad);
+}
+
+static void exit_idle(void)
+{
+	idle_mode = false;
+	batt_right = BATT_X1;
+	accel_resume();
+	touch_was_down = true; /* swallow the waking touch */
+	touch_irq_flag = false;
+	last_touch_ms = k_uptime_get_32();
+	draw_ui();
+	LOG_INF("idle mode off");
+}
+
+/* One bar per axis: coloured from the centre line to the current value.
+ * X = green, Y = blue, Z = red, so the reduced-color idle mode is easy to
+ * spot.
+ */
+static const uint16_t accel_bar_colors[3] = {
+	COL_GREEN, COL_BLUE, COL_RED,
+};
+
+static void draw_accel_bar(int row, int mg, uint16_t color)
+{
+	const int half = BAR_W / 2;
+	int len = (mg < 0) ? -mg : mg;
+	int y = BAR_Y0 + row * BAR_DY;
+
+	len = len * half / ACCEL_MAX_MG;
+	if (len > half) {
+		len = half;
+	}
+
+	fill_rect(BAR_X, y, BAR_W, BAR_H, COL_TRACK);
+	fill_rect(BAR_CX, y, 1, BAR_H, COL_BORDER);
+	if (len > 0) {
+		fill_rect((mg >= 0) ? BAR_CX : BAR_CX - len, y, len, BAR_H,
+			  color);
+	}
+}
+
+static void draw_accel_bars(const int mg[3])
+{
+	for (int i = 0; i < 3; i++) {
+		draw_accel_bar(i, mg[i], accel_bar_colors[i]);
+	}
+}
+
+static void show_accel(void)
+{
+	char line[56];
+	int mg[3] = { 0, 0, 0 };
+
+	if (!accel_direct) {
+		struct sensor_value x, y, z;
+
+		if (sensor_sample_fetch(accel) == 0 &&
+		    sensor_channel_get(accel, SENSOR_CHAN_ACCEL_X, &x) == 0 &&
+		    sensor_channel_get(accel, SENSOR_CHAN_ACCEL_Y, &y) == 0 &&
+		    sensor_channel_get(accel, SENSOR_CHAN_ACCEL_Z, &z) == 0) {
+			mg[0] = x.val1 * 1000 + x.val2 / 1000;
+			mg[1] = y.val1 * 1000 + y.val2 / 1000;
+			mg[2] = z.val1 * 1000 + z.val2 / 1000;
+			snprintf(line, sizeof(line),
+				 "m/s2 X%+d.%02d Y%+d.%02d Z%+d.%02d",
+				 x.val1, abs_i(x.val2) / 10000,
+				 y.val1, abs_i(y.val2) / 10000,
+				 z.val1, abs_i(z.val2) / 10000);
+			draw_text_cached(TC_ACCEL, 8, 108, line, COL_CYAN, COL_BG);
+			draw_accel_bars(mg);
+			return;
+		}
+
+		/* upstream driver cannot read -> try the direct poller */
+		if (accel_direct_init() != 0) {
+			return;
+		}
+		accel_direct = true;
+	}
+
+	accel_direct_read(mg);
+
+	snprintf(line, sizeof(line), "g X%+d.%03d Y%+d.%03d Z%+d.%03d",
+		 mg[0] / 1000, abs_i(mg[0]) % 1000,
+		 mg[1] / 1000, abs_i(mg[1]) % 1000,
+		 mg[2] / 1000, abs_i(mg[2]) % 1000);
+
+	draw_text_cached(TC_ACCEL, 8, 108, line, COL_CYAN, COL_BG);
+	draw_accel_bars(mg);
+}
+
+/* ------------------------------------------------------------------ */
+/* Bluetooth advertising (SMP/mcumgr service is registered by Zephyr)  */
+/* ------------------------------------------------------------------ */
+
+static const struct bt_data ad[] = {
+	BT_DATA_BYTES(BT_DATA_FLAGS, (BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR)),
+	BT_DATA(BT_DATA_NAME_COMPLETE, CONFIG_BT_DEVICE_NAME,
+		sizeof(CONFIG_BT_DEVICE_NAME) - 1),
+};
+
+/* Advertising restart is deferred: inside the disconnect callback the HCI
+ * command buffer may still be in use (-ENOMEM). */
+static struct k_work_delayable adv_work;
+static void adv_work_handler(struct k_work *work);
+
+static void bt_setup(void)
+{
+	int err;
+
+	k_work_init_delayable(&adv_work, adv_work_handler);
+
+	err = bt_enable(NULL);
+
+	if (err) {
+		LOG_ERR("bt_enable: %d", err);
+		return;
+	}
+
+	err = bt_le_adv_start(BT_LE_ADV_CONN_FAST_1, ad, ARRAY_SIZE(ad), NULL, 0);
+	if (err) {
+		LOG_ERR("advertising start failed: %d", err);
+	} else {
+		LOG_INF("BLE advertising as \"%s\"", CONFIG_BT_DEVICE_NAME);
+	}
+}
+
+/* Re-advertise when a central disconnects; otherwise advertising stays off. */
+/* Boost the link for OTA when a central connects: max data length,
+ * 2M PHY and a 15 ms connection interval. */
+static void bt_connected(struct bt_conn *conn, uint8_t err)
+{
+	if (err) {
+		LOG_ERR("BLE connect failed (%u)", err);
+		return;
+	}
+
+	LOG_INF("BLE connected (MTU %u)", bt_gatt_get_mtu(conn));
+
+	(void)bt_conn_le_data_len_update(conn, BT_LE_DATA_LEN_PARAM_MAX);
+	(void)bt_conn_le_phy_update(conn, BT_CONN_LE_PHY_PARAM_2M);
+	(void)bt_conn_le_param_update(conn, BT_LE_CONN_PARAM(12, 12, 0, 400));
+}
+
+static void bt_le_param_updated(struct bt_conn *conn, uint16_t interval,
+				uint16_t latency, uint16_t timeout)
+{
+	ARG_UNUSED(conn);
+	LOG_INF("LE conn: interval %u.%02u ms, latency %u, timeout %u ms",
+		((uint32_t)interval * 125) / 100,
+		(uint32_t)((interval * 125) % 100), latency, timeout * 10);
+}
+
+static void bt_le_data_len_updated(struct bt_conn *conn,
+				   struct bt_conn_le_data_len_info *info)
+{
+	ARG_UNUSED(conn);
+	LOG_INF("LE data len: tx %u rx %u", info->tx_max_len, info->rx_max_len);
+}
+
+static void bt_le_phy_updated(struct bt_conn *conn, struct bt_conn_le_phy_info *info)
+{
+	ARG_UNUSED(conn);
+	LOG_INF("LE PHY: tx %u rx %u", info->tx_phy, info->rx_phy);
+}
+
+static void adv_work_handler(struct k_work *work)
+{
+	int err = bt_le_adv_start(BT_LE_ADV_CONN_FAST_1, ad, ARRAY_SIZE(ad), NULL, 0);
+
+	if (err) {
+		LOG_WRN("re-advertising failed: %d, retrying", err);
+		k_work_reschedule(&adv_work, K_MSEC(500));
+	} else {
+		LOG_INF("BLE advertising restarted");
+	}
+}
+
+static void bt_disconnected(struct bt_conn *conn, uint8_t reason)
+{
+	ARG_UNUSED(conn);
+	LOG_INF("BLE disconnected (reason %u)", reason);
+	k_work_reschedule(&adv_work, K_MSEC(200));
+}
+
+BT_CONN_CB_DEFINE(conn_callbacks) = {
+	.connected = bt_connected,
+	.disconnected = bt_disconnected,
+	.le_param_updated = bt_le_param_updated,
+	.le_data_len_updated = bt_le_data_len_updated,
+	.le_phy_updated = bt_le_phy_updated,
+};
+
+/* ------------------------------------------------------------------ */
+
+int main(void)
+{
+	disp = DEVICE_DT_GET(DT_CHOSEN(zephyr_display));
+	if (!device_is_ready(disp)) {
+		LOG_ERR("display not ready");
+		return 0;
+	}
+
+	/* Landscape UI: the panel stays in its native portrait address space
+	 * and every window is transposed (software rotation, like the stock
+	 * firmware). */
+	(void)gc9307_set_rotation(disp, GC9307_ROT_0);
+	(void)display_set_brightness(disp, brightness);
+	als_ct_init();
+	draw_ui();
+	LOG_INF("display ready (rot %s, bri %u)", rot_270 ? "270" : "90",
+		brightness);
+
+	/*
+	 * Confirm as early as possible so an OTA test swap cannot revert.
+	 * On an image flashed directly over SWD this returns BOOT_EBADVECT (4)
+	 * because no bootloader swap has initialized the trailer yet; that is
+	 * expected and harmless (there is no pending swap to confirm). After
+	 * any MCUboot swap the trailer is valid and this succeeds.
+	 */
+#if defined(CONFIG_MCUBOOT_IMG_MANAGER)
+	if (!boot_is_img_confirmed()) {
+		int rc = boot_write_img_confirmed();
+
+		LOG_INF("image confirm: %d", rc);
+	}
+#endif
+
+	i2c_bus_recover();
+	touch_init();
+	i2c_scan();
+
+	/* show both slot geometries + current trailer state once at boot */
+	trailer_dump(FIXED_PARTITION_ID(slot0_partition), "slot0");
+	trailer_dump(FIXED_PARTITION_ID(slot1_partition), "slot1");
+
+	accel = DEVICE_DT_GET(DT_NODELABEL(lis2dh));
+	LOG_INF("accel device ready: %d", device_is_ready(accel));
+	if (!device_is_ready(accel)) {
+		accel_direct_init();
+		accel_direct = true;
+	}
+
+	bt_setup();
+
+	(void)battery_init();
+	battery_poll();
+
+	if (audio_init() == 0) {
+		audio_set_volume(volume);
+		audio_set_enabled(sound_on);
+	}
+
+	fs_storage_init(false); /* mount /home (no format); see the BLE docs */
+	home_write_dir(); /* keep the directory index file current */
+	bri_cfg_load();   /* restore the ambient brightness profiles */
+	for (int i = 0; i < 5; i++) {
+		alarms[i].hour = 7;
+		alarms[i].len_sec = 300;
+		alarms[i].days = 0x7F;
+	}
+	alm_cfg_load();   /* restore the alarms (overrides the defaults) */
+	time_cfg_load();  /* restore the wall clock across warm resets */
+	sid_remember_load(); /* reload the last tune (stopped, metadata on) */
+
+	uint32_t t_acc = 0;
+	uint32_t t_dump = 0;
+	uint32_t t_batt = 0;
+	uint32_t t_sidui = 0;
+	uint32_t t_bricfg = 0;
+	uint32_t t_timecfg = 0;
+	uint32_t t_idlechk = 0;
+	uint32_t t_autorot = 0;
+
+	while (1) {
+		/* the SID marquee only advances while its screen is on
+		 * show (idle face, other screens and the dark panel pause
+		 * it instead of silently running it on) */
+		sid_scroll_advance(display_on && !idle_mode &&
+				   ui_scr == SCR_SID);
+
+		if (!display_on) {
+			if (idle_mode && idle_blank) {
+				/*
+				 * SLEEP: idle with the panel dark. Alarms
+				 * and the SID player stay alive; the clock
+				 * is not drawn and no lux/orientation
+				 * checks run. A touch wakes straight to
+				 * the UI; a firing alarm brings up the
+				 * idle face.
+				 */
+				(void)k_sem_take(&touch_sem, K_MSEC(1000));
+				touch_irq_flag = false;
+				if (!tch_touched()) {
+					sleep_armed = true; /* released */
+				} else if (sleep_armed) {
+					alarm_stop();
+					wake_display();
+					continue;
+				}
+				alarm_service(); /* fire due alarms */
+				if (alarm_ringing) {
+					idle_blank = false;
+					(void)gc9307_panel_state(disp, 1);
+					(void)display_set_brightness(
+						disp, brightness);
+					display_on = true;
+					battery_poll(); /* lux + AUTO bri */
+					clock_last_min =
+						(epoch_now() / 60U) %
+						(24U * 60U);
+					draw_idle_face();
+					LOG_INF("sleep: alarm -> idle face");
+				} else {
+					sid_check_end(); /* SIDs advance */
+				}
+				continue;
+			}
+			/* fallback: dark panel outside idle */
+			(void)k_sem_take(&touch_sem, K_MSEC(5000));
+			touch_irq_flag = false;
+			if (tch_touched()) {
+				alarm_stop();
+				wake_display();
+			}
+			continue;
+		}
+
+		if (idle_mode) {
+			/*
+			 * The FT3168 INT gives the semaphore and wakes the
+			 * thread immediately; 1 s timeout is the fallback.
+			 * A status read confirms a real finger so spurious
+			 * edges cannot exit idle.
+			 */
+			(void)k_sem_take(&touch_sem, K_MSEC(1000));
+			touch_irq_flag = false;
+			if (tch_touched()) {
+				alarm_stop(); /* touch silences a ringing alarm */
+				exit_idle();
+				continue;
+			}
+			alarm_service(); /* fire due alarms (idle only) */
+
+			/* lux + orientation check every 15 s (the accel is
+			 * awake ~20 ms per check - negligible energy).
+			 * Unsigned modular delta: the uptime base is large
+			 * (GRTC keeps counting across warm resets), so a
+			 * signed cast would never fire. */
+			if (k_uptime_get_32() - t_idlechk >= 15000U) {
+				int rot = -1;
+
+				t_idlechk = k_uptime_get_32();
+				if (auto_rot) {
+					rot = accel_orientation();
+				}
+				accel_suspend();
+				battery_poll(); /* lux + ambient profile */
+				if ((rot >= 0 && rot != idle_rot) ||
+				    idle_night() != idle_night_last) {
+					/* device turned or light profile
+					 * changed: re-lay the whole face */
+					if (rot >= 0) {
+						idle_rot = rot;
+						LOG_INF("idle face rot %d (quad %u)",
+							idle_rot, idle_quad);
+					}
+					audio_dbg_byte(18,
+						       (uint8_t)idle_rot);
+					audio_dbg_byte(19, idle_quad);
+					draw_idle_face();
+				}
+			}
+			if (clock_tick()) {
+				audio_dbg_byte(18, (uint8_t)idle_rot);
+				audio_dbg_byte(19, idle_quad);
+				batt_move_random();
+				if (!idle_night()) {
+					draw_battery();
+				}
+				draw_clock_random();
+			}
+			sid_check_end(); /* auto-advance keeps running idle */
+			continue;
+		}
+
+		touch_poll();
+
+		/* keep the header clock/date current */
+		if (clock_tick()) {
+			redraw_clock();
+		}
+
+		/* auto idle after the configured timeout; countdown bar */
+		uint32_t elapsed = k_uptime_get_32() - last_touch_ms;
+
+		if (elapsed >= (uint32_t)idle_timeout_s * 1000U) {
+			enter_idle();
+			t_idlechk = k_uptime_get_32(); /* first poll 15 s in */
+			continue;
+		}
+		if ((k_uptime_get_32() / 1000U) != countdown_second) {
+			countdown_second = k_uptime_get_32() / 1000U;
+			draw_countdown(elapsed);
+		}
+
+		if (k_uptime_get_32() - t_acc > 200U) {
+			t_acc = k_uptime_get_32();
+			if (ui_scr == SCR_SENSORS) {
+				show_accel();
+			}
+		}
+
+		/* AUTO ROT: follow the orientation between the two landscape
+		 * mappings, also in the normal UI */
+		if (auto_rot && (k_uptime_get_32() - t_autorot > 2000U)) {
+			int r;
+
+			t_autorot = k_uptime_get_32();
+			r = accel_ui_rot();
+			if ((r == 0 && rot_270) || (r == 2 && !rot_270)) {
+				rot_270 = (r == 2);
+				LOG_INF("auto rot -> %s (quad %u)",
+					rot_270 ? "270" : "90", idle_quad);
+				draw_ui();
+			}
+		}
+
+		/* persist edited ambient profiles / alarms (throttled) */
+		if ((bri_cfg_dirty || alm_cfg_dirty) &&
+		    (k_uptime_get_32() - t_bricfg > 3000U)) {
+			t_bricfg = k_uptime_get_32();
+			if (bri_cfg_dirty) {
+				bri_cfg_dirty = false;
+				bri_cfg_save();
+			}
+			if (alm_cfg_dirty) {
+				alm_cfg_dirty = false;
+				alm_cfg_save();
+			}
+		}
+
+		/* keep the persisted wall clock fresh (every 30 min) */
+		if (k_uptime_get_32() - t_timecfg > 1800000U) {
+			t_timecfg = k_uptime_get_32();
+			time_cfg_save();
+		}
+
+		/* repaint the SID screens if playback changed elsewhere
+		 * (e.g. the BLE debug commands) */
+		if (k_uptime_get_32() - t_sidui > 300U) {
+			t_sidui = k_uptime_get_32();
+			sid_check_end();
+			sid_ui_sync();
+		}
+
+		if (k_uptime_get_32() - t_batt > 2000U) {
+			t_batt = k_uptime_get_32();
+			battery_poll();
+		}
+
+		/* periodic view of what the bootloader ought to see */
+		if (k_uptime_get_32() - t_dump > 5000U) {
+			t_dump = k_uptime_get_32();
+			trailer_dump(FIXED_PARTITION_ID(slot0_partition), "slot0");
+			trailer_dump(FIXED_PARTITION_ID(slot1_partition), "slot1");
+		}
+
+		k_sleep(K_MSEC(100));
+	}
+
+	return 0;
+}

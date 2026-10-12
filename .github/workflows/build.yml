@@ -1,0 +1,44 @@
+name: build
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  firmware:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Cache pinned SDK
+        uses: actions/cache@v4
+        with:
+          path: .sdk
+          key: sidclock-sdk-${{ hashFiles('bootloader/fetch-sdk.sh') }}
+
+      - name: Fetch pinned SDK
+        run: bootloader/fetch-sdk.sh
+
+      - name: Python build requirements
+        run: python3 -m pip install --user -r tools/requirements-build.txt
+
+      - name: Build bootloader
+        run: bootloader/build.sh
+
+      - name: Build application
+        run: app/build.sh
+
+      - name: Public-tree check
+        run: 
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sidclock-firmware
+          path: |
+            bootloader/build/zephyr/zephyr.hex
+            bootloader/build/zephyr/zephyr.bin
+            app/build/zephyr/zephyr.signed.bin

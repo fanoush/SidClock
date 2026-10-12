@@ -1,0 +1,4 @@
+description: TI OPT3007/OPT4001 ambient light sensor
+compatible: "sidclock,opt4001"
+
+include: [sensor-device.yaml, i2c-device.yaml]

@@ -1,0 +1,108 @@
+/*
+ * sidclock-mcuboot.overlay
+ *
+ * Device-tree overlay for the SidClock bootloader on the Saphe T device
+ * (nRF54L15). Partition layout:
+ *
+ *   internal RRAM
+ *     0x000000 - 0x00E000   mcuboot       (boot_partition)
+ *     0x00E000 - 0x15F000   image-0       (slot0, primary)
+ *        0x00E000 - 0x00E800   MCUboot image header (0x800)
+ *        0x00E800 - 0x159000   application code (linked at 0xE800)
+ *
+ *   external SPI NOR (MX25R64-class, 4 MiB configured)
+ *     0x000000 - 0x151000   image-1       (slot1, secondary/OTA)
+ *     0x151000 - 0x400000   storage       (LittleFS /home)
+ *
+ * Pins (SPIM00): SCK P2.01, MOSI P2.02, MISO P2.04, CS flash P1.08,
+ * CS display P2.05, flash RESET# P2.00, flash WP# P2.03.
+ */
+
+#include <zephyr/dt-bindings/gpio/gpio.h>
+#include <zephyr/dt-bindings/pinctrl/nrf-pinctrl.h>
+
+/* ---------------- internal RRAM partitions ---------------- */
+&cpuapp_rram {
+	partitions {
+		/* remove the nRF54L15-DK default partitions */
+		/delete-node/ partition@0;        /* mcuboot  64K   */
+		/delete-node/ partition@10000;    /* image-0  324K  */
+		/delete-node/ partition@61000;    /* image-0-ns     */
+		/delete-node/ partition@b2000;    /* image-1        */
+		/delete-node/ partition@103000;   /* image-1-ns     */
+		/delete-node/ partition@15c000;   /* storage        */
+
+		boot_partition: partition@0 {
+			label = "mcuboot";
+			reg = <0x0 0xE000>;
+		};
+
+		slot0_partition: partition@E000 {
+			label = "image-0";
+			reg = <0xE000 0x151000>;
+		};
+	};
+};
+
+/* ---------------- SPIM00 pin configuration ---------------- */
+&pinctrl {
+	sidclock_spi00_default: sidclock_spi00_default {
+		group1 {
+			psels = <NRF_PSEL(SPIM_SCK,  2, 1)>,
+				<NRF_PSEL(SPIM_MOSI, 2, 2)>,
+				<NRF_PSEL(SPIM_MISO, 2, 4)>;
+			nordic,drive-mode = <NRF_DRIVE_E0E1>;
+		};
+	};
+
+	sidclock_spi00_sleep: sidclock_spi00_sleep {
+		group1 {
+			psels = <NRF_PSEL(SPIM_SCK,  2, 1)>,
+				<NRF_PSEL(SPIM_MOSI, 2, 2)>,
+				<NRF_PSEL(SPIM_MISO, 2, 4)>;
+			low-power-enable;
+		};
+	};
+};
+
+&spi00 {
+	status = "okay";
+	pinctrl-0 = <&sidclock_spi00_default>;
+	pinctrl-1 = <&sidclock_spi00_sleep>;
+	pinctrl-names = "default", "sleep";
+
+	/* index 0: flash CS (P1.08), index 1: display CS (P2.05) */
+	cs-gpios = <&gpio1 8 GPIO_ACTIVE_LOW>,
+		   <&gpio2 5 GPIO_ACTIVE_LOW>;
+
+	/* The nRF54L15-DK onboard flash node is kept (label mx25r64) but
+	 * re-configured for the SidClock wiring. SFDP is read at runtime
+	 * (CONFIG_SPI_NOR_SFDP_RUNTIME=y); the device on this board is
+	 * MX25R64-class with 4 MiB available for the layout.
+	 */
+	mx25r64: mx25r6435f@0 {
+		compatible = "jedec,spi-nor";
+		status = "okay";
+		reg = <0>;
+		spi-max-frequency = <32000000>;
+		size = <0x2000000>; /* 4 MiB, in bits */
+		reset-gpios = <&gpio2 0 GPIO_ACTIVE_LOW>;
+		wp-gpios = <&gpio2 3 GPIO_ACTIVE_LOW>;
+
+		partitions {
+			compatible = "fixed-partitions";
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			slot1_partition: partition@0 {
+				label = "image-1";
+				reg = <0x0 0x151000>;
+			};
+
+			storage_partition: partition@151000 {
+				label = "storage";
+				reg = <0x151000 0x2AF000>;
+			};
+		};
+	};
+};

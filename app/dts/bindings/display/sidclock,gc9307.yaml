@@ -1,0 +1,15 @@
+description: GC9307 / SH8601 AMOLED panel (368x448), QSPI-style framing over SPI
+compatible: "sidclock,gc9307"
+
+include: [spi-device.yaml]
+
+properties:
+  reset-gpios:
+    type: phandle-array
+    required: true
+  width:
+    type: int
+    required: true
+  height:
+    type: int
+    required: true

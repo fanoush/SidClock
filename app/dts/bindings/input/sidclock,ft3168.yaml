@@ -1,0 +1,12 @@
+description: FocalTech FT3168 touch controller (I2C)
+compatible: "sidclock,ft3168"
+
+include: [i2c-device.yaml]
+
+properties:
+  reset-gpios:
+    type: phandle-array
+    required: true
+  irq-gpios:
+    type: phandle-array
+    required: false
