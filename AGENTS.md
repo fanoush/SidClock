@@ -95,7 +95,10 @@ Do not break these without discussing it in the PR/commit:
 - **Persistence** formats are documented in `docs/architecture.md`; keep
   them backwards compatible (they live in LittleFS across updates).
 - **Uptime deltas** must be unsigned modular (`k_uptime_get_32() - t0`) -
-  the GRTC base is large and persists across warm resets.
+  the base is large and persists across warm resets. The wall clock does
+  **not** use `k_uptime` at all: `epoch_now()` runs on the raw GRTC counter
+  (`k_cycle_get_64()`, see `grtc_ms()`) with a guard that re-anchors on a
+  timebase reset/jump (`time_glitches`).
 - **LittleFS never auto-formats**; `fsformat` is the explicit destructive
   path.
 
@@ -103,6 +106,16 @@ Do not break these without discussing it in the PR/commit:
 
 - The uptime base is ~4e9 ms on current units; signed 32-bit comparisons
   against zero-initialized timestamps are wrong.
+- On this port `k_uptime_get()` is seeded through a 32-bit tick count, so
+  it steps by a whole 2^32-tick wrap (137,439 s) when the GRTC's absolute
+  tick count crosses a boundary - that threw the wall clock +2.3 days
+  overnight on 2026-10-13 and ate an alarm. The wall clock therefore uses
+  the raw GRTC counter (`grtc_ms()`), and `epoch_now()` keeps the last
+  trusted value when the counter moves backwards or jumps >2 min. Never
+  put `k_uptime_get()` back into wall-clock math.
+- Debug snapshot bytes [96..127] carry timekeeping telemetry (k_uptime,
+  raw GRTC counter, guard trips); `sidclock_ble.py status/monitor` print
+  it and `glitch reset|fwd` injects a fake glitch to exercise the guard.
 - The console UART shares the amplifier pins: keep `CONFIG_SERIAL=n` and
   `&uart20 { status = "disabled"; }`.
 - The panel needs a full re-init (`gc9307_panel_state(dev, 1)`) after

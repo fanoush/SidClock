@@ -25,6 +25,8 @@ Developer/debug commands (see docs/ble-services.md; behaviour may change):
   tonefreq  step/play a test tone frequency (Hz)
   tonestart/tonestop  steady tone on/off
   fsformat  DESTRUCTIVE: format the /home LittleFS partition
+  glitch    developer: inject a fake timebase glitch (reset | fwd) to
+            verify the clock guard absorbs it
 
 Uploading SID tunes (any name, played in file name order by the device):
   smpmgr --ble <addr> file upload <local.sid> /home/<name>.sid
@@ -105,10 +107,16 @@ async def cmd_status(addr):
         batt = await c.read_gatt_char(BATTERY_CHAR)
         ct = await c.read_gatt_char(CTS_CHAR)
         lux = await c.read_gatt_char(ILLUMINANCE_CHAR)
+        raw = await c.read_gatt_char(DBG_CHAR)
         print(f"battery: {batt[0]} %")
         print(f"time:    {time_str(ct)}")
         print(f"lux:     {lux_u24(lux):.2f} lx")
         print(f"host:    {time.strftime('%Y-%m-%d %H:%M:%S')} (local)")
+        guard = _time_guard(raw)
+        if guard:
+            up, grtc, glitch = guard
+            print(f"guard:   {glitch} glitches, uptime {up / 3600:.1f} h, "
+                  f"grtc {grtc / 3600:.1f} h")
 
 
 async def cmd_set_time(addr, tz=None):
@@ -127,20 +135,62 @@ async def cmd_set_time(addr, tz=None):
 
 async def cmd_monitor(addr):
     async with BleakClient(addr) as c:
-        print("polling battery + lux every 2 s - Ctrl-C to stop", flush=True)
+        print("polling battery + lux + clock guard every 2 s - Ctrl-C to stop",
+              flush=True)
         while True:
             batt = await c.read_gatt_char(BATTERY_CHAR)
             lux = await c.read_gatt_char(ILLUMINANCE_CHAR)
+            raw = await c.read_gatt_char(DBG_CHAR)
+            guard = _time_guard(raw)
+            extra = ""
+            if guard:
+                up, grtc, glitch = guard
+                extra = (f"   uptime {up / 3600:6.2f} h  "
+                         f"grtc {grtc / 3600:6.2f} h  guard {glitch}")
             print(
                 f"{time.strftime('%H:%M:%S')}  battery {batt[0]:3d} %   "
-                f"lux {lux_u24(lux):9.2f}",
+                f"lux {lux_u24(lux):9.2f}{extra}",
                 flush=True,
             )
             await asyncio.sleep(2)
 
 
+async def cmd_glitch(addr, mode=None):
+    """Developer test: fake a timebase glitch, verify the clock guard."""
+    code = {"reset": 0, "jump": 0, "fwd": 1, "forward": 1}.get(
+        (mode or "reset").lower())
+    if code is None:
+        raise SystemExit("glitch mode: reset | fwd")
+    async with BleakClient(addr) as c:
+        clock_before = await c.read_gatt_char(CTS_CHAR)
+        before = await c.read_gatt_char(DBG_CHAR)
+        await c.write_gatt_char(DBG_CHAR, bytes([0x14, code]), response=True)
+        await asyncio.sleep(1.5)  # the next clock sample trips the guard
+        clock_after = await c.read_gatt_char(CTS_CHAR)
+        after = await c.read_gatt_char(DBG_CHAR)
+    gb, ga = _u32(before, 112), _u32(after, 112)
+    print(f"glitch counter {gb} -> {ga}")
+    print(f"clock:  {time_str(clock_before)}")
+    print(f"     -> {time_str(clock_after)}")
+    if ga <= gb:
+        print("WARNING: guard did not trip (old firmware?)")
+    else:
+        print("guard absorbed the glitch")
+
+
 def _u32(raw, off):
     return int.from_bytes(bytes(raw[off:off + 4]), "little")
+
+
+def _u64(raw, off):
+    return int.from_bytes(bytes(raw[off:off + 8]), "little")
+
+
+def _time_guard(raw):
+    """(uptime_s, grtc_s, glitches) from the debug snapshot tail."""
+    if len(raw) < 128:
+        return None
+    return (_u64(raw, 96) / 1000.0, _u64(raw, 104) / 1e6, _u32(raw, 112))
 
 
 def _rate_of(raw):
@@ -329,7 +379,7 @@ def main():
             "status", "set-time", "monitor", "audio", "click", "beep",
             "tone", "mute", "rate", "tonefreq",
         "tonestart", "tonestop", "fsformat", "sid", "sidname", "chip",
-        "sidstop", "ls",
+        "sidstop", "ls", "glitch",
         ],
     )
     ap.add_argument(
@@ -362,10 +412,13 @@ def main():
         "chip": cmd_chip,
         "ls": cmd_ls,
         "sidstop": lambda a: cmd_tone(a, 0x0F),
+        "glitch": cmd_glitch,
     }[args.command]
     if args.command in ("sidname", "chip"):
         asyncio.run(fn(args.addr, args.value))
     elif args.command == "set-time":
+        asyncio.run(fn(args.addr, args.value))
+    elif args.command == "glitch":
         asyncio.run(fn(args.addr, args.value))
     elif args.command in ("rate", "tonefreq", "tonestart", "sid"):
         asyncio.run(fn(args.addr,

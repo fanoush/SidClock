@@ -727,17 +727,73 @@ static const char *const month_names[12] = {
 
 static struct k_spinlock time_lock;
 static uint32_t epoch_set = 946684800U; /* 2000-01-01 00:00:00 UTC */
-static uint32_t uptime_set;             /* k_uptime_get_32() of the set */
+static int64_t uptime_set;              /* grtc_ms() of the set */
+static uint32_t epoch_last;             /* last wall clock handed out */
+static int64_t uptime_last;             /* grtc_ms() of that reading */
+static bool time_guard_on;              /* epoch_last/uptime_last valid */
+static uint32_t time_glitches;          /* timebase discontinuities seen */
+
+/* Longest the app ever goes without sampling the clock (the dark-panel
+ * fallback polls touch every 5 s); more counter time than this between
+ * two readings is a timebase jump, not elapsed time. */
+#define TIME_MAX_STEP_MS 120000
+
+/* Wall-clock timebase: the raw GRTC system counter (64-bit, 1 MHz).
+ *
+ * Do NOT go back to k_uptime_get() here: on this port the kernel uptime
+ * is seeded through a 32-bit tick count, so it steps by a whole 2^32-tick
+ * wrap (137,439 s) whenever the GRTC's absolute tick count crosses such a
+ * boundary - seen as a bogus wall-clock jump and a missed alarm on
+ * 2026-10-13 (k_uptime 55,157 s vs raw GRTC 192,596 s on the unit). The
+ * raw counter is monotonic; only a real GRTC reset (bootloader or driver
+ * clear) can move it backwards. */
+static int64_t grtc_ms(void)
+{
+	return (int64_t)(k_cycle_get_64() / 1000U);
+}
+
+/* Must be called with time_lock held. Keep the last trusted wall clock
+ * across counter resets/jumps: re-anchoring beats inventing time. */
+static uint32_t epoch_now_locked(void)
+{
+	int64_t now = grtc_ms();
+	int64_t d = now - uptime_set;
+	int64_t step = now - uptime_last;
+	uint32_t e;
+
+	if (d < 0) {
+		/* Counter restarted under us: re-anchor it to the last
+		 * trusted wall clock, never add the wrapped delta. */
+		e = time_guard_on ? epoch_last : epoch_set;
+		epoch_set = e;
+		uptime_set = now;
+		time_glitches++;
+	} else if (time_guard_on &&
+		   (step < 0 || step > TIME_MAX_STEP_MS)) {
+		/* Counter jumped: freeze at the last trusted reading. */
+		e = epoch_last;
+		epoch_set = e;
+		uptime_set = now;
+		time_glitches++;
+	} else {
+		e = epoch_set + (uint32_t)(d / 1000);
+	}
+
+	epoch_last = e;
+	uptime_last = now;
+	time_guard_on = true;
+
+	return e;
+}
 
 static uint32_t epoch_now(void)
 {
 	k_spinlock_key_t key = k_spin_lock(&time_lock);
-	uint32_t base = epoch_set;
-	uint32_t at = uptime_set;
+	uint32_t e = epoch_now_locked();
 
 	k_spin_unlock(&time_lock, key);
 
-	return base + ((k_uptime_get_32() - at) / 1000U);
+	return e;
 }
 
 /* Days since 1970-01-01 from a civil date (Howard Hinnant's algorithm). */
@@ -783,7 +839,10 @@ static void time_set_from_host(uint16_t year, uint8_t mon, uint8_t day,
 	k_spinlock_key_t key = k_spin_lock(&time_lock);
 
 	epoch_set = secs;
-	uptime_set = k_uptime_get_32();
+	uptime_set = grtc_ms();
+	epoch_last = secs;
+	uptime_last = uptime_set;
+	time_guard_on = true;
 	k_spin_unlock(&time_lock, key);
 
 	time_cfg_save(); /* survive reboots (no RTC on the board) */
@@ -792,29 +851,33 @@ static void time_set_from_host(uint16_t year, uint8_t mon, uint8_t day,
 }
 
 /*
- * Wall-clock persistence: /home/time.cfg holds "epoch uptime_s". The
- * k_uptime base survives warm resets on this port (the GRTC keeps
- * counting), so at boot the wall time is restored as saved_epoch + the
- * elapsed uptime. After a full power cycle the base is lost and the clock
- * simply restarts from the saved epoch (no RTC on the board).
+ * Wall-clock persistence: /home/time.cfg holds "epoch counter_s uptime_s",
+ * sampled together by time_cfg_save() - the epoch is the actual wall clock
+ * (not the clock base), the counter is the GRTC timebase in seconds and
+ * the uptime field is only diagnostic (people got bitten by k_uptime). At
+ * boot the elapsed counter time is added back; if the counter moved
+ * backwards (cold boot / GRTC reset) the saved wall clock is kept as-is
+ * (no RTC on the board, never invent time). Two-field files from older
+ * builds are migrated on the next boot.
  */
 static void time_cfg_save(void)
 {
 	char buf[48];
 	struct fs_file_t f;
 	k_spinlock_key_t key;
-	uint32_t e, u;
+	uint32_t e, u, k;
 	int n;
 
 	if (!fs_ready) {
 		return;
 	}
 	key = k_spin_lock(&time_lock);
-	e = epoch_set;
-	u = k_uptime_get_32();
+	e = epoch_now_locked();
+	u = (uint32_t)(grtc_ms() / 1000);
+	k = (uint32_t)(k_uptime_get() / 1000);
 	k_spin_unlock(&time_lock, key);
 
-	n = snprintf(buf, sizeof(buf), "%u %u\n", e, u / 1000U);
+	n = snprintf(buf, sizeof(buf), "%u %u %u\n", e, u, k);
 	fs_file_t_init(&f);
 	if (fs_open(&f, "/home/time.cfg",
 		    FS_O_WRITE | FS_O_CREATE | FS_O_TRUNC) == 0) {
@@ -829,8 +892,10 @@ static void time_cfg_load(void)
 	struct fs_file_t f;
 	ssize_t rd;
 	char *p;
-	uint32_t v[2];
-	uint32_t now, saved_ms, base;
+	uint32_t v[3];
+	uint32_t base;
+	int ntok = 0;
+	int64_t now, saved_ms;
 
 	if (!fs_ready) {
 		return;
@@ -847,39 +912,58 @@ static void time_cfg_load(void)
 	buf[rd] = '\0';
 
 	p = buf;
-	for (int i = 0; i < 2; i++) {
+	for (int i = 0; i < 3; i++) {
 		v[i] = 0;
 		while (*p == ' ' || *p == '\n' || *p == '\r' || *p == '\t') {
 			p++;
 		}
 		if (*p < '0' || *p > '9') {
-			return;
+			break;
 		}
 		while (*p >= '0' && *p <= '9') {
 			v[i] = v[i] * 10U + (uint32_t)(*p++ - '0');
 		}
+		ntok++;
 	}
-	if (v[0] == 0U) {
+	if (ntok < 2 || v[0] == 0U) {
 		return;
 	}
 
-	now = k_uptime_get_32();
-	saved_ms = v[1] * 1000U;
 	base = v[0];
-	/* Only add the elapsed time when the uptime counter moved forward
-	 * (warm reset). If it is smaller, the board had a cold boot and the
-	 * elapsed time is unknown - keep the saved epoch, never invent time.
-	 * The periodic 30 min saves keep this window small. */
-	if (now >= saved_ms) {
-		base += (now - saved_ms) / 1000U;
+	if (ntok >= 3) {
+		/* Current format: epoch + GRTC seconds (+ k_uptime seconds,
+		 * diagnostics only). */
+		now = grtc_ms();
+		saved_ms = (int64_t)v[1] * 1000;
+		if (now >= saved_ms) {
+			base += (uint32_t)(now - saved_ms) / 1000U;
+		}
+	} else {
+		/* Pre-GRTC file: the seconds field came from the broken
+		 * k_uptime source. Add the elapsed time once (best effort)
+		 * and re-save in the current format below. */
+		now = k_uptime_get();
+		saved_ms = (int64_t)v[1] * 1000;
+		if (now >= saved_ms) {
+			base += (uint32_t)(now - saved_ms) / 1000U;
+		}
+		now = grtc_ms();
 	}
 
 	k_spinlock_key_t key = k_spin_lock(&time_lock);
 
 	epoch_set = base;
 	uptime_set = now;
+	epoch_last = base;
+	uptime_last = now;
+	time_guard_on = true;
 	k_spin_unlock(&time_lock, key);
-	LOG_INF("time restored: epoch %u uptime %u ms", base, now);
+	LOG_INF("time restored: epoch %u counter %u s", base,
+		(uint32_t)(now / 1000));
+
+	if (ntok < 3) {
+		time_cfg_save(); /* migrate the old k_uptime-based file */
+	}
 }
 
 /*
@@ -1037,8 +1121,32 @@ BT_GATT_SERVICE_DEFINE(ess_svc,
 	BT_UUID_DECLARE_128(BT_UUID_128_ENCODE(0x73696463, 0x6c6f, 0x4b02,     \
 					       0x9c1d, 0x77ce3f41a5c0))
 
-/* [0..19] audio status/format/timing, [20..33] I2S registers, [34..95] diag */
-static uint8_t ble_dbg[96];
+/* [0..19] audio status/format/timing, [20..33] I2S registers,
+ * [34..95] diag, [96..127] timekeeping telemetry (see ble_dbg_time()) */
+static uint8_t ble_dbg[128];
+
+/* Timekeeping telemetry: the wall-clock timebase (GRTC), the kernel uptime
+ * (which can step on this port) and the clock guard state - lets a host
+ * spot a timebase glitch and see which counter moved. */
+static void ble_dbg_time(uint8_t *p)
+{
+	k_spinlock_key_t key = k_spin_lock(&time_lock);
+	uint64_t up = (uint64_t)k_uptime_get();
+	uint64_t cyc = k_cycle_get_64();
+	uint32_t glitches = time_glitches;
+	uint32_t enow = epoch_now_locked();
+	uint32_t eset = epoch_set;
+	int64_t uset = uptime_set;
+
+	k_spin_unlock(&time_lock, key);
+
+	sys_put_le64(up, p);                            /* k_uptime ms */
+	sys_put_le64(cyc, p + 8);                       /* GRTC cycles */
+	sys_put_le32(glitches, p + 16);                 /* guard trips */
+	sys_put_le32(enow, p + 20);                     /* clock now */
+	sys_put_le32(eset, p + 24);                     /* clock base */
+	sys_put_le32((uint32_t)(uset / 1000), p + 28);  /* anchor seconds */
+}
 
 static ssize_t ble_dbg_read(struct bt_conn *conn,
 			    const struct bt_gatt_attr *attr, void *buf,
@@ -1062,6 +1170,8 @@ static ssize_t ble_dbg_read(struct bt_conn *conn,
 		ls_start = -1;
 	}
 
+	ble_dbg_time(ble_dbg + 96);
+
 	return bt_gatt_attr_read(conn, attr, buf, len, offset, ble_dbg,
 				 sizeof(ble_dbg));
 }
@@ -1076,6 +1186,7 @@ static ssize_t ble_dbg_write(struct bt_conn *conn,
 	    !(len == 1U ||
 	      (len == 2U && p[0] == 0x0EU) ||
 	      (len == 2U && p[0] == 0x12U) ||
+	      (len == 2U && p[0] == 0x14U) ||
 	      (len == 3U && p[0] == 0x13U) ||
 	      (len >= 2U && len <= 21U && p[0] == 0x11U) ||
 	      (len == 5U && (p[0] == 0x09U || p[0] == 0x0AU ||
@@ -1186,6 +1297,25 @@ static ssize_t ble_dbg_write(struct bt_conn *conn,
 				  ((uint32_t)p[3] << 16) |
 				  ((uint32_t)p[4] << 24));
 		break;
+	case 0x14: {
+		/* Developer test: fake a timebase glitch. 0 = counter reset
+		 * (anchor pushed ahead of the counter), 1 = forward jump.
+		 * The clock guard must absorb both: the snapshot glitch
+		 * counter increases and the wall clock must not move. */
+		k_spinlock_key_t key;
+
+		if (len != 2U) {
+			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+		}
+		key = k_spin_lock(&time_lock);
+		if (p[1] == 0U) {
+			uptime_set += 200000000; /* ~2.3 days ahead */
+		} else {
+			uptime_last -= 200000; /* 200 s forward step */
+		}
+		k_spin_unlock(&time_lock, key);
+		break;
+	}
 	case 0x07:
 		audio_rate_next();
 		break;
@@ -4210,6 +4340,9 @@ int main(void)
 				alarm_stop();
 				wake_display();
 			}
+			/* keep the clock guard baseline warm (no display
+			 * updates run in this state) */
+			(void)epoch_now();
 			continue;
 		}
 

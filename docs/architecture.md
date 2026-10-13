@@ -70,7 +70,7 @@ logical landscape frame. The idle face can use portrait rotations.
 |---|---|---|
 | `bright.cfg` | 8 numbers | 3 lux thresholds, 3 brightness levels, manual brightness, idle timeout seconds |
 | `alarms.cfg` | one line per alarm | `mode hour min len_sec days sub name title` |
-| `time.cfg` | 2 numbers | unix epoch + uptime at save (no RTC on the board) |
+| `time.cfg` | 3 numbers | wall clock epoch + GRTC counter + k_uptime at save (no RTC on the board) |
 | `sid.cfg` | text | last loaded tune name (restored on boot, no auto-play) |
 | `dir.txt` | `name size` lines | directory index for hosts that only have smpmgr |
 

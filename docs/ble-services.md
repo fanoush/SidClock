@@ -9,7 +9,7 @@ All interactions use standard services plus one custom debug service.
 | Battery `0x180F` | Battery Level `0x2A19` | read, notify | percent |
 | Current Time `0x1805` | Current Time `0x2A2B` | read, write | 10-byte little-endian; there is no RTC, the time is kept from uptime |
 | Environmental Sensing `0x181A` | Illuminance `0x2AFB` | read | uint24 little-endian, **0.01 lx** units |
-| Debug (custom) `73696463-6c6f-4b01-9c1d-77ce3f41a5c0` | `73696463-6c6f-4b02-9c1d-77ce3f41a5c0` | read, write | 96-byte status snapshot; commands below |
+| Debug (custom) `73696463-6c6f-4b01-9c1d-77ce3f41a5c0` | `73696463-6c6f-4b02-9c1d-77ce3f41a5c0` | read, write | 128-byte status snapshot; commands below |
 | GATT `0x1801` | Service Changed `0x2A05` | indicate | standard |
 
 The debug characteristic is a **developer interface**: its snapshot layout
@@ -37,12 +37,16 @@ arguments:
 | `11` + name | play `/home/<name>` (any file name) |
 | `12` + u8 `mode` | chip model: 0 = auto (PSID flag), 1 = 6581, 2 = 8580 (reloads the tune) |
 | `13` + u16 LE | request a `/home` listing page from that entry index; the next read returns `name\n` rows in bytes [34..94], byte [95] = next index or 0xFF |
+| `14` + u8 `mode` | developer test: inject a fake uptime glitch (`0` = counter reset, `1` = forward jump) to verify the clock guard |
 | `50` | 1 s test tone |
 
-The read snapshot (96 bytes) mixes audio state (sample rate, DMA buffer
+The read snapshot (128 bytes) mixes audio state (sample rate, DMA buffer
 health, enable registers), SID state (playing flag, song count, title,
-render timing) and UI diagnostics. Every read is passive: it must not
-disturb the running I2S bit clock.
+render timing) and UI diagnostics; bytes [96..127] carry timekeeping
+telemetry - `k_uptime_get()` ms, the raw GRTC cycle counter, the clock
+guard trip count and the current clock base - so a host can spot a broken
+uptime source (`tools/sidclock_ble.py status` prints it). Every read is
+passive: it must not disturb the running I2S bit clock.
 
 ## Host CLI
 

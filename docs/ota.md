@@ -68,6 +68,16 @@ or use any recent `smpmgr` from PyPI.
    (The image version comes from `app/build.sh`; bump `VERSION` there when
    releasing.)
 
+   Some smpmgr/mcumgr combinations report success without leaving the new
+   image marked for the next boot. If the version did not change, mark the
+   uploaded image explicitly and reset:
+
+   ```sh
+   smpmgr --ble <addr> image state-read     # note the slot-1 image hash
+   smpmgr --ble <addr> image state-write <hash>
+   smpmgr --ble <addr> os reset
+   ```
+
 ## Troubleshooting
 
 - `--ble <addr> not found`: BlueZ sometimes drops the device from cache
