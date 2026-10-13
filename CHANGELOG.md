@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.0.3
+
+Per-subsong STIL comments.
+
+**Features**
+
+- The SID screen's scrolling comment line now follows the current
+  subsong: when HVSC's STIL database has a note for that subsong (e.g.
+  Last Ninja's "EAT YER HEART OUT GALWAY!" on subsong 5) it is shown,
+  otherwise the tune-level comment is kept. Notes for tunes without a
+  tune-level comment (e.g. Last Ninja 3) show on the annotated subsongs.
+- The marquee keeps its scroll position while the displayed text stays
+  the same, so the tune-level comment keeps scrolling while stepping
+  through subsongs that fall back to it (a subsong's own note starts from
+  the beginning). The unchanged comment row is also left untouched on
+  such repaints instead of being cleared and redrawn in place.
+- Sidecars grew optional `@<subsong> <comment>` lines after the tune
+  comment (regenerate them with `tools/sid_add.py`); the firmware sidecar
+  buffer went from 1 KB to 3 KB to fit the largest HVSC entries. The tune
+  comment no longer carries its trailing newline.
+
 ## 1.0.2
 
 BLE access modes for when the clock is left unattended, plus main-screen

@@ -1847,13 +1847,16 @@ static void sid_load_lengths(const char *name)
 /*
  * STIL metadata sidecar <stem>.stil (built by tools/sid_add.py from HVSC's
  * STIL.txt): one subsong name per line in subsong order, then an optional
- * comment line. PSID itself has no per-subsong names.
+ * tune comment line, then optional "@<subsong> <comment>" lines with the
+ * per-subsong notes (HVSC's "(#N) COMMENT"). PSID itself has no names.
  */
-#define SID_STIL_MAX 1024
+#define SID_STIL_MAX 3072
 static char sid_stil_buf[SID_STIL_MAX];
-static uint16_t sid_stil_off[32];
+static uint16_t sid_stil_off[32];     /* subsong name offsets */
+static uint16_t sid_stil_sub_off[32]; /* per-subsong comment offsets, 0 none */
 static uint8_t sid_stil_names;
-static char *sid_stil_comment;
+static char *sid_stil_comment;        /* tune-level comment, may be NULL */
+static bool sid_stil_has_cmt;         /* any comment: tune or per-subsong */
 
 static void sid_stil_load(const char *name)
 {
@@ -1866,6 +1869,8 @@ static void sid_stil_load(const char *name)
 
 	sid_stil_names = 0;
 	sid_stil_comment = NULL;
+	sid_stil_has_cmt = false;
+	memset(sid_stil_sub_off, 0, sizeof(sid_stil_sub_off));
 	sid_scroll_restart(); /* restart scrolling */
 	if (l <= 4U) {
 		return;
@@ -1901,11 +1906,76 @@ static void sid_stil_load(const char *name)
 	while (*p == '\n' || *p == '\r') {
 		p++;
 	}
+	/* the tune-level comment, then "@<sub> <text>" per-subsong notes */
 	if (*p != '\0') {
-		sid_stil_comment = p;
+		char *nl = strchr(p, '\n');
+		char *next = (nl != NULL) ? nl + 1 : p + strlen(p);
+		size_t len;
+
+		if (nl != NULL) {
+			*nl = '\0';
+		}
+		len = strlen(p);
+		if (len > 0U && p[len - 1U] == '\r') {
+			p[len - 1U] = '\0';
+		}
+		if (*p != '\0') {
+			sid_stil_comment = p;
+			sid_stil_has_cmt = true;
+		}
+		p = next;
 	}
-	LOG_INF("stil %s: %u names, comment %s", name, sid_stil_names,
-		sid_stil_comment ? "yes" : "no");
+	while (*p != '\0') {
+		char *nl, *q;
+		int n = 0;
+
+		while (*p == '\n' || *p == '\r') {
+			p++;
+		}
+		if (*p == '\0') {
+			break;
+		}
+		nl = strchr(p, '\n');
+		q = p + 1;
+		if (*p == '@') {
+			while (*q >= '0' && *q <= '9') {
+				n = n * 10 + (*q - '0');
+				q++;
+			}
+		}
+		if (*p == '@' && n >= 1 &&
+		    n <= (int)ARRAY_SIZE(sid_stil_sub_off) && *q == ' ') {
+			char *c = q + 1;
+			size_t len = (nl != NULL) ? (size_t)(nl - c)
+						  : strlen(c);
+
+			while (len > 0U && c[len - 1U] == '\r') {
+				len--;
+			}
+			if (len > 0U) {
+				c[len] = '\0';
+				sid_stil_sub_off[n - 1] =
+					(uint16_t)(c - sid_stil_buf);
+				sid_stil_has_cmt = true;
+			}
+		}
+		if (nl == NULL) {
+			break;
+		}
+		p = nl + 1;
+	}
+	{
+		uint32_t notes = 0;
+
+		for (int i = 0; i < (int)ARRAY_SIZE(sid_stil_sub_off); i++) {
+			if (sid_stil_sub_off[i] != 0U) {
+				notes++;
+			}
+		}
+		LOG_INF("stil %s: %u names, comment %s, %u subsongs with notes",
+			name, sid_stil_names,
+			sid_stil_comment != NULL ? "yes" : "no", notes);
+	}
 }
 
 static const char *sid_sub_name(int sub)
@@ -1914,6 +1984,19 @@ static const char *sid_sub_name(int sub)
 		return "";
 	}
 	return &sid_stil_buf[sid_stil_off[sub]];
+}
+
+/* Comment text for the SID screen: the current subsong's own STIL note,
+ * else the tune-level comment ("" when the tune has none). */
+static const char *sid_comment_text(void)
+{
+	int sub = sid_player_subtune();
+
+	if (sub >= 0 && sub < (int)ARRAY_SIZE(sid_stil_sub_off) &&
+	    sid_stil_sub_off[sub] != 0U) {
+		return &sid_stil_buf[sid_stil_sub_off[sub]];
+	}
+	return sid_stil_comment != NULL ? sid_stil_comment : "";
 }
 
 /*
@@ -2000,21 +2083,66 @@ static uint32_t sid_length_cur(void)
 #define SID_SUB_CHARS 16
 #define SID_CMT_CHARS 28
 
-/* Marquee scrolling: the offset accumulates one second per second only
- * while the SID screen is actually visible, so time spent on the idle
- * face (or any other screen) pauses the scroll instead of silently
- * running it on. `tail` adds extra travel so the last words stay
- * readable (the comment keeps its last word at 1/3 from the window
- * end). */
-static uint32_t sid_scroll_ms;   /* accumulated visible ms since restart */
-static uint32_t sid_scroll_last; /* k_uptime at the last accumulation */
-static bool sid_scroll_started;
+/*
+ * Marquee scrolling: each marquee (title / subsong name / comment) has its
+ * own phase and only restarts when its text changes, so the tune comment
+ * keeps scrolling while stepping through subsongs that fall back to it (a
+ * subsong's own note starts from the beginning). New tunes restart all
+ * three via sid_scroll_restart(). The offset accumulates one second per
+ * second only while the SID screen is visible, so time on the idle face
+ * (or any other screen) pauses the scroll instead of silently running it
+ * on. `tail` adds extra travel so the last words stay readable (the
+ * comment keeps its last word at 1/3 from the window end).
+ */
+enum { SID_SCRL_TITLE, SID_SCRL_SUB, SID_SCRL_CMT, SID_SCRL_N };
 
+struct sid_scroll {
+	uint32_t ms;   /* accumulated visible ms since the text changed */
+	uint32_t last; /* k_uptime at the last accumulation */
+	bool started;
+};
+
+static struct sid_scroll sid_scrolls[SID_SCRL_N];
+static const char *sid_scroll_text[SID_SCRL_N]; /* last text per marquee */
+
+/* True while the painted comment row matches sid_comment_text(), so a
+ * repaint that does not change the text can leave the row (and its scroll
+ * position) alone. Cleared whenever the row could have been clobbered
+ * (full-screen repaint, slider-layout erase). */
+static bool sid_cmt_painted;
+
+static void sid_scroll_reset(struct sid_scroll *s)
+{
+	s->ms = 0;
+	s->last = k_uptime_get_32();
+	s->started = true;
+}
+
+/* True when the marquee text differs from its last painted value. */
+static bool sid_scroll_text_changed(int which, const char *text)
+{
+	const char *old = sid_scroll_text[which];
+
+	return old == NULL || strcmp(old, text) != 0;
+}
+
+/* Restart a marquee when its text changed (compare content: covers fresh
+ * pointers as well as buffers rewritten in place). */
+static void sid_scroll_sync(int which, const char *text)
+{
+	if (sid_scroll_text_changed(which, text)) {
+		sid_scroll_text[which] = text;
+		sid_scroll_reset(&sid_scrolls[which]);
+	}
+}
+
+/* New tune: restart every marquee. */
 static void sid_scroll_restart(void)
 {
-	sid_scroll_ms = 0;
-	sid_scroll_last = k_uptime_get_32();
-	sid_scroll_started = true;
+	for (int i = 0; i < SID_SCRL_N; i++) {
+		sid_scroll_text[i] = NULL;
+		sid_scroll_reset(&sid_scrolls[i]);
+	}
 }
 
 /* Called from the main loop: bank the time since the last call when the
@@ -2023,25 +2151,30 @@ static void sid_scroll_advance(bool visible)
 {
 	uint32_t now = k_uptime_get_32();
 
-	if (!sid_scroll_started) {
-		sid_scroll_started = true;
-		sid_scroll_last = now;
-		return;
+	for (int i = 0; i < SID_SCRL_N; i++) {
+		struct sid_scroll *s = &sid_scrolls[i];
+
+		if (!s->started) {
+			s->started = true;
+			s->last = now;
+			continue;
+		}
+		if (visible) {
+			s->ms += now - s->last;
+		}
+		s->last = now;
 	}
-	if (visible) {
-		sid_scroll_ms += now - sid_scroll_last;
-	}
-	sid_scroll_last = now;
 }
 
-static int sid_scroll_off(int n, int win, int tail)
+static int sid_scroll_off(int which, int n, int win, int tail)
 {
+	const struct sid_scroll *s = &sid_scrolls[which];
 	int maxo = n - win + tail;
 
 	if (maxo <= 0) {
 		return 0;
 	}
-	return (int)((sid_scroll_ms / 1000U) % (uint32_t)(maxo + 1));
+	return (int)((s->ms / 1000U) % (uint32_t)(maxo + 1));
 }
 
 /* Build a `win`-wide window of `s` starting at `off` (padded with spaces)
@@ -2080,8 +2213,10 @@ static void draw_sid_title_line(void)
 	const char *t = sid_player_title();
 	const char *disp = t[0] ? t : "(no sid)";
 
+	sid_scroll_sync(SID_SCRL_TITLE, disp);
 	draw_marquee(TC_SID_TITLE, 8, SID_LINE1_Y, disp, SID_TITLE_CHARS,
-		     sid_scroll_off((int)strlen(disp), SID_TITLE_CHARS, 0),
+		     sid_scroll_off(SID_SCRL_TITLE, (int)strlen(disp),
+				    SID_TITLE_CHARS, 0),
 		     COL_WHITE);
 }
 
@@ -2106,8 +2241,10 @@ static void draw_sid_sub_line(void)
 {
 	const char *s = sid_sub_text();
 
+	sid_scroll_sync(SID_SCRL_SUB, s);
 	draw_marquee(TC_SID_FILE, 8, SID_LINE2_Y, s, SID_SUB_CHARS,
-		     sid_scroll_off((int)strlen(s), SID_SUB_CHARS, 0),
+		     sid_scroll_off(SID_SCRL_SUB, (int)strlen(s),
+				    SID_SUB_CHARS, 0),
 		     COL_CYAN);
 }
 
@@ -2136,12 +2273,14 @@ static void draw_sid_song_line(void)
  * the tune has no comment). */
 static void draw_sid_comment_line(void)
 {
-	const char *c = sid_stil_comment ? sid_stil_comment : "";
+	const char *c = sid_comment_text();
 
+	sid_scroll_sync(SID_SCRL_CMT, c);
 	draw_marquee(TC_SID_CMT, 8, SID_LINE4_Y, c, SID_CMT_CHARS,
-		     sid_scroll_off((int)strlen(c), SID_CMT_CHARS,
+		     sid_scroll_off(SID_SCRL_CMT, (int)strlen(c), SID_CMT_CHARS,
 				    SID_CMT_CHARS / 3),
 		     COL_CYAN);
+	sid_cmt_painted = true;
 }
 
 /* One marquee tick (called once a second while the SID screen is up): the
@@ -2154,8 +2293,7 @@ static void sid_marquee_tick(void)
 	if ((int)strlen(sid_sub_text()) > SID_SUB_CHARS) {
 		draw_sid_sub_line();
 	}
-	if (sid_stil_comment != NULL &&
-	    (int)strlen(sid_stil_comment) > SID_CMT_CHARS) {
+	if ((int)strlen(sid_comment_text()) > SID_CMT_CHARS) {
 		draw_sid_comment_line();
 	}
 }
@@ -2163,11 +2301,17 @@ static void sid_marquee_tick(void)
 static void draw_sid_info(void)
 {
 	char a[20];
-	bool cmt = sid_stil_comment != NULL && sid_stil_comment[0] != '\0';
+	bool cmt = sid_stil_has_cmt;
+	bool cmt_ok = cmt && sid_cmt_painted &&
+		      !sid_scroll_text_changed(SID_SCRL_CMT, sid_comment_text());
 
 	/* clear the text area; the sliders (drawn right after on screen
-	 * redraws) then cover the tail of the previous comment line */
-	fill_rect(0, SID_LINE1_Y, SCR_W, cmt ? 96 : 92, COL_BG);
+	 * redraws) then cover the tail of the previous comment line. When
+	 * the comment text is unchanged its row is left alone - stepping
+	 * between subsongs that share it must not flash or restart it. */
+	fill_rect(0, SID_LINE1_Y, SCR_W,
+		  cmt_ok ? (SID_LINE4_Y - SID_LINE1_Y) : (cmt ? 96 : 92),
+		  COL_BG);
 	text_cache_reset();
 
 	draw_sid_title_line();
@@ -2197,7 +2341,7 @@ static void draw_sid_info(void)
 			    label, mode != 0);
 	}
 
-	if (cmt) {
+	if (cmt && !cmt_ok) {
 		draw_sid_comment_line();
 	}
 }
@@ -2249,7 +2393,7 @@ static void draw_sid_buttons(void)
 static void draw_sid_screen(void)
 {
 	static int sid_layout_drawn = -1;
-	bool cmt = sid_stil_comment != NULL && sid_stil_comment[0] != '\0';
+	bool cmt = sid_stil_has_cmt;
 	int layout = cmt ? 1 : 0;
 
 	/* erase the previous slider position when the layout changes (the
@@ -2258,6 +2402,7 @@ static void draw_sid_screen(void)
 		if (sid_layout_drawn >= 0) {
 			fill_rect(0, 268, SCR_W, 90, COL_BG);
 			text_cache_reset();
+			sid_cmt_painted = false; /* clips the comment row too */
 		}
 		sid_layout_drawn = layout;
 	}
@@ -2610,6 +2755,7 @@ static void draw_ui(void)
 {
 	fill_rect(0, 0, SCR_W, SCR_H, COL_BG);
 	text_cache_reset();
+	sid_cmt_painted = false; /* nothing survives a full repaint */
 
 	switch (ui_scr) {
 	case SCR_SID:
@@ -2874,7 +3020,6 @@ static void sid_ui_sync(void)
 		strncpy(last, now, sizeof(last) - 1);
 		last[sizeof(last) - 1] = '\0';
 		last_elapsed = el;
-		sid_scroll_restart();
 		if (ui_scr == SCR_MAIN) {
 			draw_tile(TILE_SID_X, TILE_Y, "SID", "PLAYER", false);
 			draw_tile(TILE_ALM_X, TILE_Y, "ALARMS",

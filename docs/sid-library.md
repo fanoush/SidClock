@@ -15,8 +15,13 @@
 - **End modes** (`END:` button): `LOOP`, `NEXT TUNE` or `NEXT SUB`
   (default) - what happens when the current length expires.
 - **STIL sidecar**: `<stem>.stil` holds one line per subsong name (may be
-  empty) and a final comment line; the player shows the names in the
-  subtitle and scrolls the comment. Both are optional.
+  empty), the tune-level comment line, then optional `@<subsong> <text>`
+  lines with per-subsong notes (HVSC's `(#N)` comments). The player shows
+  the names in the subtitle and scrolls the comment for the current
+  subsong, falling back to the tune comment when the subsong has none.
+  Each marquee keeps its scroll position while its text stays the same
+  (so a shared tune comment keeps scrolling across subsongs and is not
+  redrawn while unchanged). All parts are optional.
 
 The marquee only advances while the SID screen is visible; playback and
 auto-advance continue while the device is idle or asleep.

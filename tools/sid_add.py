@@ -7,7 +7,7 @@ For every FILE.sid given:
     per-song speed bytes and the NTSC flag),
   - looks it up in the HVSC Songlengths database,
   - writes a .len sidecar (seconds per subsong, what the firmware reads),
-  - writes a .stil sidecar (subsong names + tune comment),
+  - writes a .stil sidecar (subsong names, per-subsong and tune comments),
   - keeps a copy of the tune + sidecars in the archive directory,
   - uploads them to /home on the device over BLE (MCUmgr fs_mgmt).
 
@@ -38,6 +38,13 @@ ROOT = Path(__file__).resolve().parent.parent
 ARCHIVE = ROOT / "sids"
 DB_DEFAULT = ARCHIVE / "Songlengths.txt"
 STIL_DEFAULT = ARCHIVE / "STIL.txt"
+
+# Device .stil limits: keep in sync with the firmware sidecar buffer
+# (SID_STIL_MAX = 3072 in app/src/main.c).
+SID_STIL_NAME_CHARS = 24
+SID_STIL_TUNE_CHARS = 200
+SID_STIL_NOTE_CHARS = 160
+SID_STIL_MAX_BYTES = 3000
 
 
 def sid_md5(d: bytes) -> str:
@@ -76,7 +83,8 @@ def load_db(path: Path) -> dict:
 
 def load_stil(path: Path) -> dict:
     """HVSC STIL.txt -> {path: {"names": {1-based subsong: name},
-    "comment": text}} (fields may wrap across lines)."""
+    "comment": tune comment, "subs": {1-based subsong: comment}}}
+    (fields may wrap across lines)."""
     keys = ("TITLE", "NAME", "AUTHOR", "ARTIST", "PUBLISHER", "COMMENT",
             "RELEASED", "MUSIC", "INFO", "COVER")
     entries = {}
@@ -93,10 +101,17 @@ def load_stil(path: Path) -> dict:
         joined = " ".join(t.strip() for t in text).strip()
         joined = joined.strip('"').strip()
         if field == "COMMENT":
-            if sub == 0 and not entries[cur]["comment"]:
-                entries[cur]["comment"] = joined
-            elif sub == 0:
-                entries[cur]["comment"] += " " + joined
+            if sub == 0:
+                if not entries[cur]["comment"]:
+                    entries[cur]["comment"] = joined
+                else:
+                    entries[cur]["comment"] += " " + joined
+            elif joined:
+                subs = entries[cur]["subs"]
+                if sub in subs:
+                    subs[sub] += " " + joined
+                else:
+                    subs[sub] = joined
         else:  # NAME / TITLE
             if sub > 0 and sub not in entries[cur]["names"] and joined:
                 entries[cur]["names"][sub] = joined
@@ -111,7 +126,7 @@ def load_stil(path: Path) -> dict:
         if raw.startswith("/") or raw.startswith("\\"):
             flush_field()
             cur = stripped
-            entries[cur] = {"names": {}, "comment": ""}
+            entries[cur] = {"names": {}, "comment": "", "subs": {}}
             sub = 0
             continue
         if stripped.startswith("(#") and stripped.endswith(")"):
@@ -144,14 +159,24 @@ def strip_time_range(s: str) -> str:
 
 
 def build_stil(entry: dict, songs: int) -> str:
-    """Device .stil: `songs` name lines, then the comment line."""
+    """Device .stil: `songs` name lines, the tune comment, then optional
+    `@<subsong> <comment>` lines carrying HVSC's per-subsong notes."""
     lines = []
     for i in range(1, songs + 1):
         name = entry["names"].get(i, "")
-        lines.append(strip_time_range(name)[:24])
+        lines.append(strip_time_range(name)[:SID_STIL_NAME_CHARS])
     comment = " ".join(entry["comment"].split())
-    comment = comment[:200]
-    lines.append(comment)
+    lines.append(comment[:SID_STIL_TUNE_CHARS])
+    used = sum(len(line) + 1 for line in lines)
+    for sub in sorted(entry.get("subs", {})):
+        text = " ".join(entry["subs"][sub].split())
+        if not text:
+            continue
+        line = f"@{sub} {text[:SID_STIL_NOTE_CHARS]}"
+        if used + len(line) + 1 > SID_STIL_MAX_BYTES:
+            break  # rare: too many/long notes for the device buffer
+        lines.append(line)
+        used += len(line) + 1
     return "\n".join(lines) + "\n"
 
 
@@ -264,8 +289,12 @@ def main() -> int:
             txt = build_stil(se, songs)
             dst_stil.write_text(txt)
             names = sum(1 for i in range(1, songs + 1) if se["names"].get(i))
-            print(f"  stil: {names}/{songs} subsong names"
-                  f"{', comment' if se['comment'] else ''} -> {dst_stil.name}")
+            notes = len(se.get("subs", {}))
+            extra = ", comment" if se["comment"] else ""
+            if notes:
+                extra += f", {notes} sub note{'s' if notes != 1 else ''}"
+            print(f"  stil: {names}/{songs} subsong names{extra}"
+                  f" -> {dst_stil.name}")
         else:
             print(f"  stil: no STIL entry for this tune")
             if dst_stil.exists():
