@@ -76,7 +76,14 @@ Before calling a change done, verify on hardware:
 
 1. Bump `VERSION` in `app/build.sh` and update `CHANGELOG.md`.
 2. Build + test the checklist above.
-3. Tag (`vX.Y.Z`); CI produces `zephyr.signed.bin` plus the bootloader
-   images as artifacts - attach them to the GitHub release with a
-   SHA-256 checksum file.
-4. `` must pass before publishing.
+3. Commit, push, then tag and push the tag:
+
+   ```sh
+   git tag -a vX.Y.Z -m "SidClock X.Y.Z"
+   git push origin vX.Y.Z
+   ```
+
+   CI builds the firmware and **creates the GitHub release automatically**
+   (tag pushes only) with the signed application, the bootloader images and
+   a `SHA256SUMS` file attached.
+4. `` must pass before tagging.

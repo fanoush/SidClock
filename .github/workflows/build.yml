@@ -3,6 +3,10 @@ name: build
 on:
   push:
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   firmware:
@@ -42,3 +46,34 @@ jobs:
             bootloader/build/zephyr/zephyr.hex
             bootloader/build/zephyr/zephyr.bin
             app/build/zephyr/zephyr.signed.bin
+
+  release:
+    # Pushing a v* tag builds and publishes a GitHub release with the
+    # firmware assets and a SHA-256 checksum file.
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: firmware
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: sidclock-firmware
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p dist
+          cp bootloader/build/zephyr/zephyr.hex "dist/sidclock-bootloader-${GITHUB_REF_NAME}.hex"
+          cp bootloader/build/zephyr/zephyr.bin "dist/sidclock-bootloader-${GITHUB_REF_NAME}.bin"
+          cp app/build/zephyr/zephyr.signed.bin "dist/sidclock-${GITHUB_REF_NAME}.signed.bin"
+          (cd dist && sha256sum ./* > SHA256SUMS)
+          ls -la dist
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "SidClock ${GITHUB_REF_NAME}" \
+            --generate-notes \
+            dist/*
