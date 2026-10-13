@@ -2,7 +2,8 @@
 
 The watch plays `.sid` files from the `/home` LittleFS partition on the
 external flash. This directory is the local staging area for tunes and for
-the two HVSC databases used by `tools/sid_add.py`.
+the HVSC databases used by `tools/sid_add.py` (`Songlengths.md5`, the
+legacy `Songlengths.txt`, and `STIL.txt`).
 
 No SID files are committed to this repository.
 

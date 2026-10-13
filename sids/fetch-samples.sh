@@ -30,6 +30,7 @@ dl() { # hvsc-path [local-name]
 }
 
 # Databases used by tools/sid_add.py
+dl DOCUMENTS/Songlengths.md5
 dl DOCUMENTS/Songlengths.txt
 dl DOCUMENTS/STIL.txt
 

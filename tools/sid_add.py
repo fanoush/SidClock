@@ -20,8 +20,9 @@ Usage:
   tools/sid_add.py --no-upload *.sid          # only generate .len files
   tools/sid_add.py --name 4.sid MyTune.sid    # override the device name
 
-The databases (Songlengths.txt and STIL.txt, from hvsc.c64.org) are expected
-in the archive directory (default: <repo>/sids/).
+The databases from hvsc.c64.org (Songlengths.md5, the legacy
+Songlengths.txt as a fallback, and STIL.txt) are expected in the archive
+directory (default: <repo>/sids/).
 """
 
 import argparse
@@ -36,7 +37,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 ARCHIVE = ROOT / "sids"
-DB_DEFAULT = ARCHIVE / "Songlengths.txt"
+DB_DEFAULT = ARCHIVE / "Songlengths.txt"      # legacy format (fallback)
+MD5_DB_DEFAULT = ARCHIVE / "Songlengths.md5"  # current HVSC format
 STIL_DEFAULT = ARCHIVE / "STIL.txt"
 
 # Device .stil limits: keep in sync with the firmware sidecar buffer
@@ -183,6 +185,7 @@ def build_stil(entry: dict, songs: int) -> str:
 def parse_lengths(v: str):
     out = []
     for tok in v.split():
+        tok = tok.split("(", 1)[0]  # strip (G)/(M)/(Z)/(B) attributes
         if ":" in tok:
             m, s = tok.split(":")
             out.append(int(float(m) * 60 + float(s) + 0.5))
@@ -218,7 +221,10 @@ def main() -> int:
     ap.add_argument("files", nargs="+", help="local .sid file(s)")
     ap.add_argument("--addr", default=None,
                     help="device BLE address (default: $SIDCLOCK_ADDR)")
-    ap.add_argument("--db", default=str(DB_DEFAULT), help="Songlengths.txt path")
+    ap.add_argument("--db", default=str(DB_DEFAULT),
+                    help="legacy Songlengths.txt path (fallback)")
+    ap.add_argument("--md5-db", default=str(MD5_DB_DEFAULT),
+                    help="Songlengths.md5 path (current HVSC format)")
     ap.add_argument("--stil", default=str(STIL_DEFAULT), help="STIL.txt path")
     ap.add_argument("--dir", default=str(ARCHIVE), help="archive directory")
     ap.add_argument("--name", help="override the device file name (single input)")
@@ -237,7 +243,9 @@ def main() -> int:
 
     archive = Path(args.dir)
     archive.mkdir(parents=True, exist_ok=True)
-    db = load_db(Path(args.db))
+    db = load_db(Path(args.db)) if Path(args.db).exists() else {}
+    db_md5 = (load_db(Path(args.md5_db))
+              if Path(args.md5_db).exists() else {})
     stil = load_stil(Path(args.stil)) if Path(args.stil).exists() else {}
     rc = 0
 
@@ -257,7 +265,9 @@ def main() -> int:
 
         songs = (data[0xE] << 8) | data[0xF]
         fp = sid_md5(data)
-        entry = db.get(fp)
+        # Current HVSC databases key on the whole-file MD5; fall back to the
+        # legacy fingerprint for files only present in an old Songlengths.txt.
+        entry = db_md5.get(hashlib.md5(data).hexdigest()) or db.get(fp)
 
         # archive copy
         dst_sid = archive / name

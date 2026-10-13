@@ -2,7 +2,8 @@
 
 ## 1.0.3
 
-Per-subsong STIL comments.
+Per-subsong STIL comments, plus current-HVSC database support in the
+import tool.
 
 **Features**
 
@@ -20,6 +21,14 @@ Per-subsong STIL comments.
   comment (regenerate them with `tools/sid_add.py`); the firmware sidecar
   buffer went from 1 KB to 3 KB to fit the largest HVSC entries. The tune
   comment no longer carries its trailing newline.
+
+**Internal**
+
+- `tools/sid_add.py` now looks tunes up in HVSC's current
+  `Songlengths.md5` database (whole-file MD5) and falls back to the legacy
+  `Songlengths.txt` fingerprint. This fixes recently updated tunes (e.g.
+  Arkanoid, Shades) getting no lengths/comments - the legacy database has
+  not been regenerated for them. `sids/fetch-samples.sh` downloads both.
 
 ## 1.0.2
 
