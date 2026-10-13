@@ -1,5 +1,34 @@
 # Changelog
 
+## 1.0.2
+
+BLE access modes for when the clock is left unattended, plus main-screen
+polish.
+
+**Features**
+
+- Three BLE modes cycled by a new main-screen button: **R/W** (normal),
+  **R/O** (read-only: CTS and debug writes are rejected, the
+  mcumgr/SMP service - OTA, file upload, os reset - is unregistered) and
+  **OFF** (advertising stopped, existing connections dropped). The mode
+  is deliberately not persisted: every reboot starts in R/W so OTA and
+  development always work. Also settable with the DEV-only `blemode`
+  debug/CLI command.
+- Main screen: utility buttons rearranged into a 3x2 grid
+  (AUTO ROT | AUTO BRI | SND on top, BLE mode | - | SLEEP below); the
+  ALARMS tile shows `(ON)`/`(OFF)` instead of highlighting, and the SID
+  tile is no longer highlighted (navigation tiles should not look like
+  toggles).
+- SND OFF now pauses an actively playing tune (silence + idle CPU); SND ON
+  resumes it if the mute was what paused it.
+
+**Internal**
+
+- Debug snapshot grew to 132 bytes: byte [128] reports the BLE mode.
+  `sidclock_ble.py status` prints it and `sidclock_ble.py blemode`
+  switches modes remotely (R/W only).
+- `CONFIG_BT_GATT_DYNAMIC_DB=y` for runtime SMP service registration.
+
 ## 1.0.1
 
 Timekeeping fix: the wall clock is now driven by the raw GRTC system

@@ -4,8 +4,8 @@
  *   - landscape UI on the 368x448 AMOLED (software rotation: the panel stays
  *     in its native portrait address space and every window is transposed)
  *   - main screen: header (clock/date + lux/battery), navigation tiles
- *     (SID player / sensors / settings), AUTO ROT / SND / AUTO BRI / SLEEP
- *     buttons and the volume/brightness sliders
+ *     (SID player / alarms / sensors / settings), AUTO ROT / AUTO BRI /
+ *     SND / BLE mode / SLEEP buttons and the volume/brightness sliders
  *   - SID player screen: track info, HOME/TUNE/PLAY/SUB transport buttons,
  *     volume + brightness sliders and the same header
  *   - idle face after the configured timeout (15 s .. 5 min): big clock that
@@ -29,6 +29,7 @@
 #include <zephyr/bluetooth/bluetooth.h>
 #include <zephyr/bluetooth/conn.h>
 #include <zephyr/bluetooth/gatt.h>
+#include <zephyr/mgmt/mcumgr/transport/smp_bt.h>
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/dfu/mcuboot.h>
 #include <zephyr/logging/log.h>
@@ -81,10 +82,11 @@ LOG_MODULE_REGISTER(sidclock, LOG_LEVEL_INF);
 
 /* Landscape UI layout (software-rotated 448x368 logical frame):
  * the main screen = header (clock/date/version + lux/battery block),
- * navigation tiles (SID player / sensors / settings), utility buttons
- * (AUTO ROT / SND / AUTO BRI / SLEEP) and the volume + brightness
- * sliders. Sub-screens share the same header and a centred HOME button on
- * the second header line; the idle clock face is unchanged. */
+ * navigation tiles (SID player / alarms / sensors / settings), utility
+ * buttons (AUTO ROT / AUTO BRI / SND / BLE mode / SLEEP) and the volume +
+ * brightness sliders. Sub-screens share the same header and a centred
+ * HOME button on the second header line; the idle clock face is
+ * unchanged. */
 
 /* Shared HOME button, centred between the date and the charging status */
 #define HOME_X 184
@@ -92,12 +94,14 @@ LOG_MODULE_REGISTER(sidclock, LOG_LEVEL_INF);
 #define HOME_W 80
 #define HOME_H 28
 
-/* Main screen: utility buttons in a centred 2x2 grid between the tiles
- * and the sliders */
+/* Main screen: utility buttons in a 3x2 grid between the tiles and the
+ * sliders (columns align with the sliders below, the middle cell of the
+ * second row is intentionally empty) */
 #define UB_W 136
 #define UB_H 34
-#define UB_X1 80
-#define UB_X2 232
+#define UB_X1 8
+#define UB_X2 156
+#define UB_X3 304
 #define UB_Y1 198
 #define UB_Y2 244
 
@@ -1007,6 +1011,33 @@ BT_GATT_SERVICE_DEFINE(bas_svc,
 	BT_GATT_CCC(batt_ccc_changed, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE),
 );
 
+/*
+ * BLE access mode, cycled by the main-screen BLE button:
+ *   R/W - everything as usual (time set, debug writes, OTA/SMP)
+ *   R/O - no writes at all: CTS and debug writes are rejected and the
+ *         mcumgr/SMP service (OTA, file transfer, os reset) is
+ *         unregistered; reads keep working
+ *   OFF - additionally stop advertising and drop existing connections
+ * The mode is intentionally NOT persisted: every boot starts in R/W so
+ * OTA and development always work.
+ */
+enum ble_mode { BLE_MODE_RW = 0, BLE_MODE_RO, BLE_MODE_OFF };
+
+static uint8_t ble_mode = BLE_MODE_RW;
+static bool ble_adv_on;        /* connectable advertising is running */
+static bool ble_smp_on = true; /* mcumgr transport registers at boot */
+
+static const char *ble_mode_label(void)
+{
+	return ble_mode == BLE_MODE_OFF ? "BLE OFF" :
+	       ble_mode == BLE_MODE_RO ? "BLE R/O" : "BLE R/W";
+}
+
+static void ble_apply_mode(void);
+static void ble_ui_sync(void);
+static void sound_set(bool on);
+
+
 static uint8_t cts_value[10];
 
 static void cts_fill(void)
@@ -1048,6 +1079,9 @@ static ssize_t ble_cts_write(struct bt_conn *conn,
 	uint16_t year;
 	uint8_t mon, day, hh, mm, ss;
 
+	if (ble_mode != BLE_MODE_RW) {
+		return BT_GATT_ERR(BT_ATT_ERR_WRITE_NOT_PERMITTED);
+	}
 	if (offset != 0U || len != 10U) {
 		return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
 	}
@@ -1122,8 +1156,8 @@ BT_GATT_SERVICE_DEFINE(ess_svc,
 					       0x9c1d, 0x77ce3f41a5c0))
 
 /* [0..19] audio status/format/timing, [20..33] I2S registers,
- * [34..95] diag, [96..127] timekeeping telemetry (see ble_dbg_time()) */
-static uint8_t ble_dbg[128];
+ * [34..95] diag, [96..127] timekeeping telemetry, [128] BLE access mode */
+static uint8_t ble_dbg[132];
 
 /* Timekeeping telemetry: the wall-clock timebase (GRTC), the kernel uptime
  * (which can step on this port) and the clock guard state - lets a host
@@ -1171,6 +1205,7 @@ static ssize_t ble_dbg_read(struct bt_conn *conn,
 	}
 
 	ble_dbg_time(ble_dbg + 96);
+	sys_put_le32(ble_mode, ble_dbg + 128); /* [128] mode, rest spare */
 
 	return bt_gatt_attr_read(conn, attr, buf, len, offset, ble_dbg,
 				 sizeof(ble_dbg));
@@ -1182,11 +1217,15 @@ static ssize_t ble_dbg_write(struct bt_conn *conn,
 {
 	const uint8_t *p = buf;
 
+	if (ble_mode != BLE_MODE_RW) {
+		return BT_GATT_ERR(BT_ATT_ERR_WRITE_NOT_PERMITTED);
+	}
 	if (offset != 0U ||
 	    !(len == 1U ||
 	      (len == 2U && p[0] == 0x0EU) ||
 	      (len == 2U && p[0] == 0x12U) ||
 	      (len == 2U && p[0] == 0x14U) ||
+	      (len == 2U && p[0] == 0x15U) ||
 	      (len == 3U && p[0] == 0x13U) ||
 	      (len >= 2U && len <= 21U && p[0] == 0x11U) ||
 	      (len == 5U && (p[0] == 0x09U || p[0] == 0x0AU ||
@@ -1227,8 +1266,7 @@ static ssize_t ble_dbg_write(struct bt_conn *conn,
 		audio_beep();
 		break;
 	case 0x03:
-		sound_on = !sound_on;
-		audio_set_enabled(sound_on);
+		sound_set(!sound_on);
 		break;
 	case 0x0D:
 		fs_storage_init(true); /* DESTRUCTIVE: formats /home if needed */
@@ -1316,6 +1354,15 @@ static ssize_t ble_dbg_write(struct bt_conn *conn,
 		k_spin_unlock(&time_lock, key);
 		break;
 	}
+	case 0x15:
+		/* BLE access mode: 0 = R/W, 1 = R/O, 2 = off. Only reachable
+		 * in R/W - the write gate at the top rejects it otherwise. */
+		if (len != 2U) {
+			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+		}
+		ble_mode = (uint8_t)(p[1] % 3U);
+		ble_apply_mode();
+		break;
 	case 0x07:
 		audio_rate_next();
 		break;
@@ -1678,6 +1725,7 @@ static void alarm_service(void);
 static void alarm_capture_ringtone(void);
 static void alm_cfg_save(void);
 static void alm_cfg_load(void);
+static void sound_set(bool on);
 
 /* --- header shared by all screens ---------------------------------- */
 
@@ -1720,18 +1768,20 @@ static void draw_main_screen(void)
 {
 	draw_header();
 
-	draw_tile(TILE_SID_X, TILE_Y, "SID", "PLAYER",
-		  sid_player_is_playing() && !sid_player_is_paused());
-	draw_tile(TILE_ALM_X, TILE_Y, "ALARMS", NULL, alarm_any_armed());
+	draw_tile(TILE_SID_X, TILE_Y, "SID", "PLAYER", false);
+	draw_tile(TILE_ALM_X, TILE_Y, "ALARMS",
+		  alarm_any_armed() ? "(ON)" : "(OFF)", false);
 	draw_tile(TILE_SENS_X, TILE_Y, "SENSOR", NULL, false);
 	draw_tile(TILE_SET_X, TILE_Y, "SETUP", NULL, false);
 
 	draw_button(UB_X1, UB_Y1, UB_W, UB_H,
 		    auto_rot ? "AUTO ROT" : "ROT OFF", auto_rot);
-	draw_button(UB_X2, UB_Y1, UB_W, UB_H,
+	draw_button(UB_X2, UB_Y1, UB_W, UB_H, "AUTO BRI", bri_auto);
+	draw_button(UB_X3, UB_Y1, UB_W, UB_H,
 		    sound_on ? "SND ON" : "SND OFF", sound_on);
-	draw_button(UB_X1, UB_Y2, UB_W, UB_H, "AUTO BRI", bri_auto);
-	draw_button(UB_X2, UB_Y2, UB_W, UB_H, "SLEEP", false);
+	draw_button(UB_X1, UB_Y2, UB_W, UB_H, ble_mode_label(),
+		    ble_mode != BLE_MODE_OFF);
+	draw_button(UB_X3, UB_Y2, UB_W, UB_H, "SLEEP", false);
 
 	draw_slider_volume();
 	draw_slider_brightness();
@@ -2826,11 +2876,9 @@ static void sid_ui_sync(void)
 		last_elapsed = el;
 		sid_scroll_restart();
 		if (ui_scr == SCR_MAIN) {
-			draw_tile(TILE_SID_X, TILE_Y, "SID", "PLAYER",
-				  sid_player_is_playing() &&
-					  !sid_player_is_paused());
-			draw_tile(TILE_ALM_X, TILE_Y, "ALARMS", NULL,
-				  alarm_any_armed());
+			draw_tile(TILE_SID_X, TILE_Y, "SID", "PLAYER", false);
+			draw_tile(TILE_ALM_X, TILE_Y, "ALARMS",
+				  alarm_any_armed() ? "(ON)" : "(OFF)", false);
 		} else if (ui_scr == SCR_SID) {
 			/* full re-layout: the comment line decides where
 			 * the sliders sit */
@@ -2931,7 +2979,7 @@ static void set_brightness(uint8_t value)
 	if (bri_auto) {
 		bri_auto = false;
 		if (ui_scr == SCR_MAIN) {
-			draw_button(UB_X1, UB_Y2, UB_W, UB_H, "AUTO BRI",
+			draw_button(UB_X2, UB_Y1, UB_W, UB_H, "AUTO BRI",
 				    false);
 		}
 		LOG_INF("auto brightness off (manual slider)");
@@ -3288,7 +3336,7 @@ static void als_ct_init(void)
 static void toggle_bri_auto(void)
 {
 	bri_auto = !bri_auto;
-	draw_button(UB_X1, UB_Y2, UB_W, UB_H, "AUTO BRI", bri_auto);
+	draw_button(UB_X2, UB_Y1, UB_W, UB_H, "AUTO BRI", bri_auto);
 	LOG_INF("auto brightness %s", bri_auto ? "on" : "off");
 	if (bri_auto) {
 		brightness_auto_apply();
@@ -3299,14 +3347,35 @@ static void toggle_bri_auto(void)
 	}
 }
 
-/* Sound enable: gates the synthesized sounds and the SID output. */
+/* Sound enable: gates the synthesized sounds and the SID output. Turning
+ * the sound off pauses an actively playing tune; turning it back on
+ * resumes it if the mute is what paused it. */
+static bool mute_paused; /* SND OFF paused the tune -> SND ON resumes it */
+
+static void sound_set(bool on)
+{
+	sound_on = on;
+	audio_set_enabled(on);
+	if (!on && sid_player_is_playing() && !sid_player_is_paused()) {
+		sid_player_pause();
+		mute_paused = true;
+	} else if (on && mute_paused) {
+		mute_paused = false;
+		if (sid_player_is_playing() && sid_player_is_paused()) {
+			sid_player_resume();
+		}
+	}
+	sid_ui_sync(); /* keep the SID screen transport button honest */
+	if (ui_scr == SCR_MAIN) {
+		draw_button(UB_X3, UB_Y1, UB_W, UB_H,
+			    on ? "SND ON" : "SND OFF", on);
+	}
+	LOG_INF("sound %s", on ? "on" : "off");
+}
+
 static void toggle_sound(void)
 {
-	sound_on = !sound_on;
-	audio_set_enabled(sound_on);
-	draw_button(UB_X2, UB_Y1, UB_W, UB_H,
-		    sound_on ? "SND ON" : "SND OFF", sound_on);
-	LOG_INF("sound %s", sound_on ? "on" : "off");
+	sound_set(!sound_on);
 }
 
 /* SLEEP: idle mode with the panel dark. No clock is drawn and no lux /
@@ -3504,14 +3573,20 @@ static void touch_poll(void)
 			return;
 		}
 		if (first && hit(x, y, UB_X2, UB_Y1, UB_W, UB_H)) {
+			toggle_bri_auto();
+			return;
+		}
+		if (first && hit(x, y, UB_X3, UB_Y1, UB_W, UB_H)) {
 			toggle_sound(); /* plays its own click */
 			return;
 		}
 		if (first && hit(x, y, UB_X1, UB_Y2, UB_W, UB_H)) {
-			toggle_bri_auto();
+			ble_mode = (uint8_t)((ble_mode + 1U) % 3U);
+			ble_apply_mode();
+			ble_ui_sync(); /* redraw the button right away */
 			return;
 		}
-		if (first && hit(x, y, UB_X2, UB_Y2, UB_W, UB_H)) {
+		if (first && hit(x, y, UB_X3, UB_Y2, UB_W, UB_H)) {
 			enter_sleep();
 			return;
 		}
@@ -4138,6 +4213,7 @@ static void bt_setup(void)
 	if (err) {
 		LOG_ERR("advertising start failed: %d", err);
 	} else {
+		ble_adv_on = true;
 		LOG_INF("BLE advertising as \"%s\"", CONFIG_BT_DEVICE_NAME);
 	}
 }
@@ -4151,7 +4227,13 @@ static void bt_connected(struct bt_conn *conn, uint8_t err)
 		LOG_ERR("BLE connect failed (%u)", err);
 		return;
 	}
+	if (ble_mode == BLE_MODE_OFF) {
+		/* racing a mode change: no BLE in OFF */
+		(void)bt_conn_disconnect(conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+		return;
+	}
 
+	ble_adv_on = false; /* connectable advertising stops on connect */
 	LOG_INF("BLE connected (MTU %u)", bt_gatt_get_mtu(conn));
 
 	(void)bt_conn_le_data_len_update(conn, BT_LE_DATA_LEN_PARAM_MAX);
@@ -4183,12 +4265,18 @@ static void bt_le_phy_updated(struct bt_conn *conn, struct bt_conn_le_phy_info *
 
 static void adv_work_handler(struct k_work *work)
 {
-	int err = bt_le_adv_start(BT_LE_ADV_CONN_FAST_1, ad, ARRAY_SIZE(ad), NULL, 0);
+	int err;
+
+	if (ble_mode == BLE_MODE_OFF) {
+		return; /* BLE switched off from the UI */
+	}
+	err = bt_le_adv_start(BT_LE_ADV_CONN_FAST_1, ad, ARRAY_SIZE(ad), NULL, 0);
 
 	if (err) {
 		LOG_WRN("re-advertising failed: %d, retrying", err);
 		k_work_reschedule(&adv_work, K_MSEC(500));
 	} else {
+		ble_adv_on = true;
 		LOG_INF("BLE advertising restarted");
 	}
 }
@@ -4197,7 +4285,82 @@ static void bt_disconnected(struct bt_conn *conn, uint8_t reason)
 {
 	ARG_UNUSED(conn);
 	LOG_INF("BLE disconnected (reason %u)", reason);
-	k_work_reschedule(&adv_work, K_MSEC(200));
+	if (ble_mode != BLE_MODE_OFF) {
+		k_work_reschedule(&adv_work, K_MSEC(200));
+	}
+}
+
+/* Register/unregister the mcumgr BLE service (OTA + fs_mgmt + os_mgmt). */
+static void ble_smp_set(bool on)
+{
+	int rc;
+
+	if (on == ble_smp_on) {
+		return;
+	}
+	rc = on ? smp_bt_register() : smp_bt_unregister();
+	if (rc == 0) {
+		ble_smp_on = on;
+		LOG_INF("SMP service %s", on ? "registered" : "unregistered");
+	} else {
+		LOG_WRN("SMP %s failed: %d", on ? "register" : "unregister", rc);
+	}
+}
+
+static void ble_disconnect_conn(struct bt_conn *conn, void *data)
+{
+	ARG_UNUSED(data);
+
+	(void)bt_conn_disconnect(conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+}
+
+static void ble_mode_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	if (ble_mode == BLE_MODE_OFF) {
+		ble_smp_set(false);
+		if (ble_adv_on) {
+			(void)bt_le_adv_stop();
+			ble_adv_on = false;
+		}
+		bt_conn_foreach(BT_CONN_TYPE_LE, ble_disconnect_conn, NULL);
+		return;
+	}
+
+	ble_smp_set(ble_mode == BLE_MODE_RW);
+	if (!ble_adv_on) {
+		k_work_reschedule(&adv_work, K_NO_WAIT);
+	}
+}
+
+/* Deferred on purpose: the debug command runs in the BT RX thread, where
+ * the HCI calls above could stall, and an immediate disconnect would eat
+ * the ATT response of the very write that changed the mode. */
+static K_WORK_DELAYABLE_DEFINE(ble_mode_work, ble_mode_work_handler);
+
+/* Apply the current BLE mode to advertising, connections and the SMP
+ * service. Safe from any context (the work item is ISR/thread-safe). */
+static void ble_apply_mode(void)
+{
+	k_work_reschedule(&ble_mode_work, K_MSEC(100));
+}
+
+/* Repaint the main-screen BLE button if the mode changed. The BLE debug
+ * command runs in the BT thread, so drawing is deferred to a call from the
+ * main loop or the tap handler. */
+static void ble_ui_sync(void)
+{
+	static uint8_t shown = 0xFFU;
+
+	if (shown == ble_mode) {
+		return;
+	}
+	shown = ble_mode;
+	if (ui_scr == SCR_MAIN && !idle_mode) {
+		draw_button(UB_X1, UB_Y2, UB_W, UB_H, ble_mode_label(),
+			    ble_mode != BLE_MODE_OFF);
+	}
 }
 
 BT_CONN_CB_DEFINE(conn_callbacks) = {
@@ -4467,11 +4630,13 @@ int main(void)
 		}
 
 		/* repaint the SID screens if playback changed elsewhere
-		 * (e.g. the BLE debug commands) */
+		 * (e.g. the BLE debug commands) and the BLE mode button if
+		 * it was changed over BLE */
 		if (k_uptime_get_32() - t_sidui > 300U) {
 			t_sidui = k_uptime_get_32();
 			sid_check_end();
 			sid_ui_sync();
+			ble_ui_sync();
 		}
 
 		if (k_uptime_get_32() - t_batt > 2000U) {

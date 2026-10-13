@@ -27,6 +27,8 @@ Developer/debug commands (see docs/ble-services.md; behaviour may change):
   fsformat  DESTRUCTIVE: format the /home LittleFS partition
   glitch    developer: inject a fake timebase glitch (reset | fwd) to
             verify the clock guard absorbs it
+  blemode   BLE access mode: rw (default) | ro (no writes / no OTA) |
+            off (advertising off) - only accepted while in rw
 
 Uploading SID tunes (any name, played in file name order by the device):
   smpmgr --ble <addr> file upload <local.sid> /home/<name>.sid
@@ -117,6 +119,9 @@ async def cmd_status(addr):
             up, grtc, glitch = guard
             print(f"guard:   {glitch} glitches, uptime {up / 3600:.1f} h, "
                   f"grtc {grtc / 3600:.1f} h")
+        mode = _ble_mode(raw)
+        if mode:
+            print(f"ble:     {mode}")
 
 
 async def cmd_set_time(addr, tz=None):
@@ -155,6 +160,32 @@ async def cmd_monitor(addr):
             await asyncio.sleep(2)
 
 
+async def cmd_blemode(addr, mode=None):
+    """Switch BLE access mode (R/W only; R/O and OFF need the device UI or
+    a reboot to undo)."""
+    code = {"rw": 0, "r/w": 0, "ro": 1, "r/o": 1, "readonly": 1,
+            "off": 2}.get((mode or "rw").lower())
+    if code is None:
+        raise SystemExit("ble mode: rw | ro | off")
+    async with BleakClient(addr) as c:
+        before = await c.read_gatt_char(DBG_CHAR)
+        try:
+            await c.write_gatt_char(DBG_CHAR, bytes([0x15, code]),
+                                    response=True)
+        except Exception:
+            if code != 2:
+                raise  # only OFF is expected to drop the link
+        await asyncio.sleep(1)
+        try:
+            after = await c.read_gatt_char(DBG_CHAR)
+        except Exception:
+            after = None  # BLE OFF drops the link immediately
+
+    print(f"ble mode: {_ble_mode(before)} -> {_ble_mode(after)}")
+    if code and _ble_mode(after) != ("R/W", "R/O", "OFF")[code]:
+        print("note: undo R/O or OFF from the device screen (or reboot)")
+
+
 async def cmd_glitch(addr, mode=None):
     """Developer test: fake a timebase glitch, verify the clock guard."""
     code = {"reset": 0, "jump": 0, "fwd": 1, "forward": 1}.get(
@@ -191,6 +222,13 @@ def _time_guard(raw):
     if len(raw) < 128:
         return None
     return (_u64(raw, 96) / 1000.0, _u64(raw, 104) / 1e6, _u32(raw, 112))
+
+
+def _ble_mode(raw):
+    """'R/W' | 'R/O' | 'OFF' from the snapshot, or None (old firmware)."""
+    if raw is None or len(raw) < 129 or raw[128] > 2:
+        return None
+    return ("R/W", "R/O", "OFF")[raw[128]]
 
 
 def _rate_of(raw):
@@ -379,7 +417,7 @@ def main():
             "status", "set-time", "monitor", "audio", "click", "beep",
             "tone", "mute", "rate", "tonefreq",
         "tonestart", "tonestop", "fsformat", "sid", "sidname", "chip",
-        "sidstop", "ls", "glitch",
+        "sidstop", "ls", "glitch", "blemode",
         ],
     )
     ap.add_argument(
@@ -413,12 +451,13 @@ def main():
         "ls": cmd_ls,
         "sidstop": lambda a: cmd_tone(a, 0x0F),
         "glitch": cmd_glitch,
+        "blemode": cmd_blemode,
     }[args.command]
     if args.command in ("sidname", "chip"):
         asyncio.run(fn(args.addr, args.value))
     elif args.command == "set-time":
         asyncio.run(fn(args.addr, args.value))
-    elif args.command == "glitch":
+    elif args.command in ("glitch", "blemode"):
         asyncio.run(fn(args.addr, args.value))
     elif args.command in ("rate", "tonefreq", "tonestart", "sid"):
         asyncio.run(fn(args.addr,

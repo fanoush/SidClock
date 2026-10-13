@@ -91,6 +91,14 @@ Do not break these without discussing it in the PR/commit:
   playing music; ringtone length from `len_sec`; touch stops them.
 - **SLEEP** is "dark idle": no drawing, no lux/rotation checks, but SID
   playback + auto-advance and alarms keep running.
+- **BLE access modes** (R/W / R/O / OFF) cycled by the main-screen button:
+  R/O rejects CTS + debug writes and unregisters the mcumgr SMP service
+  (OTA/fs/os), OFF also stops advertising and drops connections. Not
+  persisted - every boot is R/W. Remote switching is the DEV-only debug
+  command `0x15`/`blemode`; SMP (un)registration rides on
+  `CONFIG_BT_GATT_DYNAMIC_DB`.
+- **SND OFF** pauses an actively playing tune and SND ON resumes it (only
+  when the mute is what paused it).
 - **AUTO ROT** toggle controls all automatic orientation changes.
 - **Persistence** formats are documented in `docs/architecture.md`; keep
   them backwards compatible (they live in LittleFS across updates).
@@ -114,8 +122,12 @@ Do not break these without discussing it in the PR/commit:
   trusted value when the counter moves backwards or jumps >2 min. Never
   put `k_uptime_get()` back into wall-clock math.
 - Debug snapshot bytes [96..127] carry timekeeping telemetry (k_uptime,
-  raw GRTC counter, guard trips); `sidclock_ble.py status/monitor` print
-  it and `glitch reset|fwd` injects a fake glitch to exercise the guard.
+  raw GRTC counter, guard trips); byte [128] is the BLE access mode.
+  `sidclock_ble.py status/monitor` print it, `glitch reset|fwd` injects a
+  fake glitch and `blemode rw|ro|off` switches the BLE mode (R/W only).
+- Every BLE write handler must check `ble_mode == BLE_MODE_RW` - the CTS
+  and debug handlers gate at the top; new write paths that forget it
+  silently bypass R/O.
 - The console UART shares the amplifier pins: keep `CONFIG_SERIAL=n` and
   `&uart20 { status = "disabled"; }`.
 - The panel needs a full re-init (`gc9307_panel_state(dev, 1)`) after

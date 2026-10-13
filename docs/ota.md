@@ -47,7 +47,9 @@ or use any recent `smpmgr` from PyPI.
    ```
 
 3. Make sure the device is not connected to another central (a second BLE
-   connection also blocks the update) and keep it on the charger.
+   connection also blocks the update) and keep it on the charger. The
+   screen must show `BLE R/W` (the default after a reboot); in `BLE R/O`
+   or `BLE OFF` the update service is not available.
 
 4. Upload:
 
@@ -82,6 +84,9 @@ or use any recent `smpmgr` from PyPI.
 
 - `--ble <addr> not found`: BlueZ sometimes drops the device from cache
   after a reconnect. Retry, or `remove <addr>` in `bluetoothctl` first.
+- SMP service not found / `upgrade` fails immediately: the device is in
+  `BLE R/O` or `BLE OFF` (main-screen button). Set it back to `BLE R/W`;
+  a reboot also restores R/W.
 - Transfer stalls: check the battery/charger and that no central is
   connected. Retrying is safe - a partial image in slot 1 is simply
   overwritten.
