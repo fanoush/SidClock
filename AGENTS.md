@@ -124,7 +124,8 @@ Do not break these without discussing it in the PR/commit:
 - Debug snapshot bytes [96..127] carry timekeeping telemetry (k_uptime,
   raw GRTC counter, guard trips); byte [128] is the BLE access mode.
   `sidclock_ble.py status/monitor` print it, `glitch reset|fwd` injects a
-  fake glitch and `blemode rw|ro|off` switches the BLE mode (R/W only).
+  fake glitch, `blemode rw|ro|off` switches the BLE mode (R/W only) and
+  `filedelete <name>` removes tunes (`.sid`/`.len`/`.stil` only).
 - Every BLE write handler must check `ble_mode == BLE_MODE_RW` - the CTS
   and debug handlers gate at the top; new write paths that forget it
   silently bypass R/O.

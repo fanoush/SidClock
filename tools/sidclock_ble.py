@@ -12,6 +12,8 @@ User commands:
   sid N     play /home/N.sid (N = 0..9)
   sidname S play /home/S by file name (e.g. Last_Ninja_2.sid)
   sidstop   stop SID playback
+  filedelete <name>  delete a song file from /home (a .sid also removes
+            its .len/.stil sidecars; config files are protected)
   chip M    SID chip model: auto (follow PSID flags) | 6581 | 8580
   ls        list the files in /home on the device
 
@@ -372,6 +374,31 @@ async def cmd_sidname(addr, name=None):
           f"title={title!r}")
 
 
+async def cmd_filedelete(addr, name=None):
+    """Delete a song file from /home (a .sid also drops its sidecars)."""
+    if not name:
+        raise SystemExit("usage: filedelete <name>  (e.g. Parallax.sid)")
+    names = [name]
+    if name.lower().endswith(".sid"):
+        names += [name[:-4] + ".len", name[:-4] + ".stil"]
+    async with BleakClient(addr) as c:
+        for i, n in enumerate(names):
+            data = n.encode("ascii", "replace")
+            if len(data) > 20:
+                raise SystemExit("file name too long (max 20 chars)")
+            try:
+                await c.write_gatt_char(DBG_CHAR, bytes([0x16]) + data,
+                                        response=True)
+                print(f"deleted: {n}")
+            except Exception:
+                if i == 0:
+                    raise SystemExit(
+                        f"could not delete {n} - missing, or not a "
+                        ".sid/.len/.stil file"
+                    )
+                print(f"not present: {n}")
+
+
 async def cmd_chip(addr, mode=None):
     modes = {"auto": 0, "6581": 1, "8580": 2}
     m = 0 if mode is None else modes.get(str(mode).lower())
@@ -417,7 +444,7 @@ def main():
             "status", "set-time", "monitor", "audio", "click", "beep",
             "tone", "mute", "rate", "tonefreq",
         "tonestart", "tonestop", "fsformat", "sid", "sidname", "chip",
-        "sidstop", "ls", "glitch", "blemode",
+        "sidstop", "ls", "glitch", "blemode", "filedelete",
         ],
     )
     ap.add_argument(
@@ -452,8 +479,9 @@ def main():
         "sidstop": lambda a: cmd_tone(a, 0x0F),
         "glitch": cmd_glitch,
         "blemode": cmd_blemode,
+        "filedelete": cmd_filedelete,
     }[args.command]
-    if args.command in ("sidname", "chip"):
+    if args.command in ("sidname", "chip", "filedelete"):
         asyncio.run(fn(args.addr, args.value))
     elif args.command == "set-time":
         asyncio.run(fn(args.addr, args.value))

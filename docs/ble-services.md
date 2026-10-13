@@ -39,6 +39,7 @@ arguments:
 | `13` + u16 LE | request a `/home` listing page from that entry index; the next read returns `name\n` rows in bytes [34..94], byte [95] = next index or 0xFF |
 | `14` + u8 `mode` | developer test: inject a fake uptime glitch (`0` = counter reset, `1` = forward jump) to verify the clock guard |
 | `15` + u8 `mode` | set the BLE access mode (`0` = R/W, `1` = R/O, `2` = OFF); only accepted in R/W |
+| `16` + name | delete `/home/<name>` - only `.sid`, `.len` and `.stil` files (config files are protected); rejected in R/O and OFF |
 | `50` | 1 s test tone |
 
 The read snapshot (132 bytes) mixes audio state (sample rate, DMA buffer
@@ -71,6 +72,13 @@ R/W, and `status` prints the current mode.
 This is not a security boundary (the BLE link is open and images are
 SHA-256-checked only) - it prevents accidental or casual changes while
 the device is unattended; see [ota.md](ota.md) and [security.md](security.md).
+
+## Removing tunes
+
+`tools/sidclock_ble.py filedelete <name>` deletes `/home/<name>`; for a
+`.sid` it also removes the matching `.len` and `.stil` sidecars. Only
+those three extensions can be deleted (the config files are protected)
+and the command requires R/W mode.
 
 ## Host CLI
 

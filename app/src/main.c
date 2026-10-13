@@ -1211,6 +1211,15 @@ static ssize_t ble_dbg_read(struct bt_conn *conn,
 				 sizeof(ble_dbg));
 }
 
+/* True when `name` ends with `ext` (and is longer than the extension). */
+static bool name_has_ext(const char *name, const char *ext)
+{
+	size_t nl = strlen(name);
+	size_t el = strlen(ext);
+
+	return nl > el && strcmp(name + nl - el, ext) == 0;
+}
+
 static ssize_t ble_dbg_write(struct bt_conn *conn,
 			     const struct bt_gatt_attr *attr, const void *buf,
 			     uint16_t len, uint16_t offset, uint8_t flags)
@@ -1228,6 +1237,7 @@ static ssize_t ble_dbg_write(struct bt_conn *conn,
 	      (len == 2U && p[0] == 0x15U) ||
 	      (len == 3U && p[0] == 0x13U) ||
 	      (len >= 2U && len <= 21U && p[0] == 0x11U) ||
+	      (len >= 2U && len <= 21U && p[0] == 0x16U) ||
 	      (len == 5U && (p[0] == 0x09U || p[0] == 0x0AU ||
 			     p[0] == 0x0BU || p[0] == 0x10U)))) {
 		return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
@@ -1309,6 +1319,38 @@ static ssize_t ble_dbg_write(struct bt_conn *conn,
 		} else {
 			return BT_GATT_ERR(BT_ATT_ERR_VALUE_NOT_ALLOWED);
 		}
+		break;
+	}
+	case 0x16: {
+		/* Delete a song file from /home (the .sid plus its .len and
+		 * .stil sidecars). Restricted to those extensions so the
+		 * config files cannot be removed by accident. */
+		char name[24], path[40];
+
+		if (len < 2U || len > 21U) {
+			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+		}
+		memcpy(name, p + 1, len - 1U);
+		name[len - 1U] = '\0';
+		if (strchr(name, '/') != NULL || strstr(name, "..") != NULL ||
+		    !(name_has_ext(name, ".sid") ||
+		      name_has_ext(name, ".len") ||
+		      name_has_ext(name, ".stil"))) {
+			return BT_GATT_ERR(BT_ATT_ERR_VALUE_NOT_ALLOWED);
+		}
+		snprintf(path, sizeof(path), "/home/%s", name);
+		if (fs_unlink(path) != 0) {
+			return BT_GATT_ERR(BT_ATT_ERR_VALUE_NOT_ALLOWED);
+		}
+		if (strcmp(name, sid_cur_name) == 0) {
+			/* the loaded tune is gone: stop it and forget it */
+			sid_player_stop();
+			audio_sid_stop();
+			sid_cur_name[0] = '\0';
+			sid_stil_load("");
+			sid_remember_save();
+		}
+		LOG_INF("file deleted: %s", path);
 		break;
 	}
 	case 0x12:

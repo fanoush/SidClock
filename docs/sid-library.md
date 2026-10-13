@@ -50,6 +50,12 @@ Manual upload also works (sidecars are optional):
 smpmgr --ble <addr> file upload sids/Commando.sid /home/Commando.sid
 ```
 
+Remove a tune (a `.sid` also removes its `.len`/`.stil` sidecars):
+
+```sh
+tools/sidclock_ble.py filedelete Parallax.sid
+```
+
 **Licensing**: SID files are copyrighted by their composers; HVSC
 distributes them with permission. Keep them out of git - they are ignored
 by `.gitignore` - and credit the composers. See `sids/README.md` for

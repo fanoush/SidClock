@@ -21,6 +21,10 @@ import tool.
   comment (regenerate them with `tools/sid_add.py`); the firmware sidecar
   buffer went from 1 KB to 3 KB to fit the largest HVSC entries. The tune
   comment no longer carries its trailing newline.
+- New `filedelete` command (debug opcode `0x16`): remove tunes from
+  `/home`, a `.sid` also drops its `.len`/`.stil` sidecars. Only those
+  extensions can be deleted (config files stay protected) and the command
+  needs R/W mode.
 
 **Internal**
 
