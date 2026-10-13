@@ -34,15 +34,21 @@ dl DOCUMENTS/Songlengths.md5
 dl DOCUMENTS/Songlengths.txt
 dl DOCUMENTS/STIL.txt
 
-# A few well-known tunes to get started (edit/extend freely)
+# A few well-known tunes to get started (edit/extend freely).
+# Arkanoid and Parallax are deliberately not here: current HVSC ships
+# Arkanoid as an RSID (Real C64) image and Parallax's player does not
+# emulate well in the cSID-light core - both sound wrong on the device.
 dl MUSICIANS/H/Hubbard_Rob/Commando.sid
 dl MUSICIANS/H/Hubbard_Rob/IK_plus.sid
+dl MUSICIANS/H/Hubbard_Rob/Knucklebusters.sid
+dl MUSICIANS/T/Tel_Jeroen/Supremacy.sid
+dl MUSICIANS/H/Huelsbeck_Chris/Shades.sid
 dl MUSICIANS/D/Daglish_Ben/Last_Ninja.sid
+dl MUSICIANS/D/Daglish_Ben/Thing_Bounces_Back.sid
 dl MUSICIANS/G/Gray_Matt/Last_Ninja_2.sid
 dl MUSICIANS/O/Ouwehand_Reyn/Last_Ninja_3.sid
 dl MUSICIANS/G/Galway_Martin/Ocean_Loader_2.sid
 dl MUSICIANS/G/Galway_Martin/Yie_Ar_Kung_Fu.sid
-dl MUSICIANS/G/Galway_Martin/Arkanoid.sid
 
 echo
 echo "done - next:  tools/sid_add.py sids/Commando.sid"

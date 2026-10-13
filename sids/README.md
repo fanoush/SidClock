@@ -9,7 +9,7 @@ No SID files are committed to this repository.
 
 ## Getting tunes
 
-Run once (downloads the HVSC databases + eight well-known sample tunes):
+Run once (downloads the HVSC databases + eleven well-known sample tunes):
 
 ```sh
 sids/fetch-samples.sh
@@ -22,10 +22,15 @@ Or copy your own collection from a local
 rights holder; HVSC distributes the collection with their permission.
 Fetching tunes for private use is fine, but do not redistribute them
 (keep them out of git - they are already in `.gitignore`). Credit belongs
-to the composers: Commando © Rob Hubbard, Last Ninja © Ben Daglish /
-Anthony Lees, Last Ninja 2 © Matt Gray, Last Ninja 3 © Reyn Ouwehand,
-Ocean Loader 2 / Yie Ar Kung Fu / Arkanoid © Martin Galway, IK+ © Rob
-Hubbard.
+to the composers: Commando / IK+ / Knucklebusters © Rob Hubbard, Last
+Ninja © Ben Daglish / Anthony Lees, Thing Bounces Back © Ben Daglish,
+Last Ninja 2 © Matt Gray, Last Ninja 3 © Reyn Ouwehand, Ocean Loader 2 /
+Yie Ar Kung Fu © Martin Galway, Supremacy © Jeroen Tel, Shades © Chris
+Hülsbeck.
+
+Some HVSC entries do not play well on the device's cSID-light core:
+Arkanoid is now shipped as an RSID (Real C64) image and Parallax's player
+fails to emulate correctly, so neither is part of the sample set.
 
 ## Preparing and uploading a tune
 
