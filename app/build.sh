@@ -10,6 +10,12 @@
 #
 #   SIDCLOCK_SDK=/path/to/sdk ./build.sh
 #
+# SID engine selection (default: crsid): SIDCLOCK_SID_ENGINE=csid ./build.sh
+# builds with the original cSID-light core instead of cRSID-1.58, for A/B
+# comparison; =dual links both, switchable per tune at runtime
+# (tools/sidclock_ble.py engine). The on-display version string gains a
+# -csid/-crsid/-dual suffix; the signed image version is the same.
+#
 # Result:
 #   build/zephyr/zephyr.signed.bin   <- upload over BLE with smpmgr
 #
@@ -34,6 +40,7 @@ cmake -GNinja \
     -DBUILD_VERSION=v4.0.99-sidclock \
     -DZEPHYR_MODULES="$SDK/sdk/mcuboot;$SDK/sdk/modules/hal/nordic;$SDK/sdk/modules/hal/cmsis;$SDK/sdk/modules/crypto/tinycrypt;$SDK/sdk/modules/debug/segger;$SDK/sdk/modules/lib/zcbor;$SDK/sdk/modules/fs/littlefs" \
     -DSIDCLOCK_VERSION="$VERSION" \
+    -DSIDCLOCK_SID_ENGINE="${SIDCLOCK_SID_ENGINE:-crsid}" \
     -DDTC_OVERLAY_FILE="$HERE/app.overlay" \
     -DPYTHON_EXECUTABLE="$(command -v python3)"
 

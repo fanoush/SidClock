@@ -261,9 +261,14 @@ async def cmd_audio(addr):
                     errors="replace")
                 print(f"sid playing {raw[72]}  songs {raw[73]}  "
                       f"rc {raw[74] - 256 if raw[74] > 127 else raw[74]}  "
-                      f"render {raw[13] * 4} us  title {title!r}  "
+                      f"render {raw[13] | (raw[14] << 8)} us  title {title!r}  "
                       f"calls {raw[90] | (raw[91] << 8)}  "
                       f"frames {raw[92] | (raw[93] << 8)}")
+            if len(raw) > 139:
+                print(f"crash: boots {raw[129]}  cause 0x{raw[131]:02x}{raw[130]:02x}  "
+                      f"audio_hb {raw[132] | (raw[133] << 8)}  "
+                      f"main_hb {raw[134] | (raw[135] << 8)}  "
+                      f"engine {raw[136]}")
             if len(raw) > 68:
                 mode = "direct" if raw[10] == 255 else f"step {raw[10]}"
                 print(f"{mode}  rate {_rate_of(raw)} Hz")

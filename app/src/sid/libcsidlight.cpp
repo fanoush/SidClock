@@ -72,14 +72,28 @@ byte *filedata;             // pointer to incoming psid data
 #elif MEMORY_ALLOCATION_LOGIC==2
   byte *memory = NULL;
 #elif MEMORY_ALLOCATION_LOGIC==3
+#ifdef SID_ENGINE_DUAL
+  /* Dual-engine build: reuse cRSID's 64 KB C64 RAM instead of a private
+   * copy (only one engine runs at a time; every load re-initialises it).
+   * The crsid headers need C++-compatible restrict. `memory` keeps array
+   * semantics (indexing, memset, sizeof) through the member access. */
+#define restrict __restrict__
+#include "crsid/C64/C64.h"
+  extern cRSID_C64instance cRSID_C64;
+#define memory (cRSID_C64.RAMbank)
+#else
   // static memory
   byte memory[MAX_DATA_LEN];  // represents the memory map of the virtual C64 environment
+#endif
 #elif MEMORY_ALLOCATION_LOGIC==4
   // mapped memory
   SIDMemory memory;  // represents the memory map of the virtual C64 environment
 #endif
 
-byte timermode[0x20], SIDtitle[0x20], SIDauthor[0x20], SIDinfo[0x20];
+byte timermode[0x20];
+#ifndef SID_ENGINE_DUAL
+byte SIDtitle[0x20], SIDauthor[0x20], SIDinfo[0x20];
+#endif
 int sid_frame_calls = 0; /* diagnostic: play-routine frames since boot */
 unsigned int sid_cpu_calls = 0; /* diagnostic: 6510 instructions emulated */
 
@@ -179,8 +193,10 @@ void play(Uint8 *stream, int len) // called by SDL at samplerate pace
     } // fprintf( stderr,"%d  %f\n",framecnt,playtime); }
     if (finished == 0)
     {
+      int bound_steps = 0; //rescue bound: legit players need < 100 instrs/sample; break (glitch) instead of hanging forever
       while (CPUtime <= clock_ratio)
       {
+        if (++bound_steps > 4096) { finished = 1; break; }
         pPC = PC;
         if (CPU() >= 0xFE || ((memory[1] & 3) > 1 && pPC < 0xE000 && (PC == 0xEA31 || PC == 0xEA81)))
         {
@@ -1279,17 +1295,29 @@ unsigned int combinedWF(unsigned char num, unsigned char channel, const unsigned
 
 const char *libcsid_getauthor()
 {
+#ifdef SID_ENGINE_DUAL
+  return "";
+#else
   return (char *)&SIDauthor;
+#endif
 }
 
 const char *libcsid_getinfo()
 {
+#ifdef SID_ENGINE_DUAL
+  return "";
+#else
   return (char *)&SIDinfo;
+#endif
 }
 
 const char *libcsid_gettitle()
 {
+#ifdef SID_ENGINE_DUAL
+  return "";
+#else
   return (char *)&SIDtitle;
+#endif
 }
 
 uint8_t libcsid_get_total_tunes_number() {
@@ -1371,6 +1399,36 @@ int libcsid_load(unsigned char *_buffer, int _bufferlen)
   /* Payload: copied from the in-memory file buffer, or streamed through
    * libcsid_stream_fill() for files too large to buffer (the shim reads
    * them from the filesystem in chunks; the header stays in _buffer). */
+#ifdef SID_ENGINE_DUAL
+  /* Dual-engine build: stream straight into the shared C64 RAM instead of
+   * a permanent 512 B staging buffer (same bytes, same bounds). */
+  if (libcsid_stream_fill)
+  {
+    for (i = offs + 2; i < datalen; )
+    {
+      int want = (int)(datalen - i);
+      int room = (int)MAX_DATA_LEN - (int)(loadaddr + i - (offs + 2));
+      int got;
+
+      if (want > 512) want = 512;
+      if (room <= 0) break;
+      if (want > room) want = room;
+      got = libcsid_stream_fill(&memory[loadaddr + i - (offs + 2)], want);
+      if (got <= 0) break;
+      i += (unsigned int)got;
+    }
+  }
+  else
+  {
+    for (i = offs + 2; i < datalen; i++)
+    {
+      if (loadaddr + i - (offs + 2) < MAX_DATA_LEN)
+      {
+        memory[loadaddr + i - (offs + 2)] = filedata[i];
+      }
+    }
+  }
+#else
   {
     static byte stream_buf[512];
     int stream_len = 0, stream_pos = 0;
@@ -1402,8 +1460,12 @@ int libcsid_load(unsigned char *_buffer, int _bufferlen)
       }
     }
   }
+#endif
   #endif
 
+#ifndef SID_ENGINE_DUAL
+  /* Dual-engine build: title strings come from the shim's header copies;
+   * the legacy arrays are compiled out (see above). */
   strend = 1;
   for (i = 0; i < 32; i++)
   {
@@ -1442,6 +1504,8 @@ int libcsid_load(unsigned char *_buffer, int _bufferlen)
       strend = SIDinfo[i] = 0;
     }
   }
+#endif
+  (void)strend;
 
   initaddr = filedata[0xA] + filedata[0xB] ? filedata[0xA] * 256 + filedata[0xB] : loadaddr;
   playaddr = playaddf = filedata[0xC] * 256 + filedata[0xD];

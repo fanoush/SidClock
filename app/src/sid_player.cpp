@@ -67,11 +67,27 @@ static int model_arg(void)
 	       model_mode == 2 ? SIDMODEL_8580 : -1; /* -1: use file's flag */
 }
 
+#ifdef SID_ENGINE_DUAL
+/* Global engine mode, switched from the main-screen button (default is the
+ * new core). Applied on every load; see libcsid_select_engine(). */
+static int sid_engine_legacy;
+
+extern "C" void sid_player_set_engine_mode(int legacy)
+{
+	sid_engine_legacy = legacy ? 1 : 0;
+}
+
+extern "C" int sid_player_engine_legacy(void)
+{
+	return sid_engine_legacy;
+}
+#endif /* SID_ENGINE_DUAL */
+
 extern "C" {
-extern int sid_frame_calls; /* in libcsidlight.cpp */
-extern unsigned int sid_cpu_calls; /* in libcsidlight.cpp */
-extern int subtune; /* in libcsidlight.cpp */
-extern int SID_model[3]; /* in libcsidlight.cpp */
+extern int sid_frame_calls; /* engine state (see sid/) */
+extern unsigned int sid_cpu_calls; /* engine state (see sid/) */
+extern int subtune; /* engine state (see sid/) */
+extern int SID_model[3]; /* engine state (see sid/) */
 extern int (*libcsid_stream_fill)(unsigned char *, int); /* in libcsidlight.cpp */
 }
 
@@ -151,6 +167,9 @@ static int sid_load_file(const char *path)
 		skip -= (int)rd;
 	}
 
+#ifdef SID_ENGINE_DUAL
+	libcsid_select_engine(sid_engine_legacy);
+#endif
 	libcsid_init(SID_RATE, model_arg());
 	libcsid_stream_fill = sid_stream_read;
 	libcsid_load(sid_hdr, sid_file_len);
@@ -163,6 +182,14 @@ static int sid_load_file(const char *path)
 	paused = false;
 	sid_elapsed_samples = 0;
 	last_rc = 0;
+#ifdef SID_ENGINE_DUAL
+	{
+		const char *base = strrchr(path, '/');
+
+		dbg_record_tune(base != NULL ? base + 1 : path,
+				sid_engine_legacy);
+	}
+#endif
 	LOG_INF("SID: %s (%d B) \"%s\" by \"%s\", %u song(s)", path, (int)sz,
 		libcsid_gettitle(), libcsid_getauthor(),
 		libcsid_get_total_tunes_number());
@@ -178,6 +205,8 @@ extern "C" int sid_player_load(const char *path)
 	k_mutex_unlock(&sid_lock);
 	return rc;
 }
+
+
 
 /* Re-initialise the emulator for a new true hardware rate and reload the
  * current tune into the fresh map (streamed from the filesystem again). */

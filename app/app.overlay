@@ -227,3 +227,11 @@
 &uart20 {
 	status = "disabled";
 };
+
+/* Independent watchdog for the hang safety net (see crash telemetry in
+ * main.c): 30 s window fed from the main loop; any wedged thread that
+ * stops the loop (directly or via a stuck lock) reboots the device and
+ * the retained log tells what was running. */
+&wdt31 {
+	status = "okay";
+};

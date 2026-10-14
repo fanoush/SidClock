@@ -19,6 +19,9 @@ void audio_set_volume(uint8_t volume);
 /* Write a single byte of the debug snapshot (e.g. UI diagnostics). */
 void audio_dbg_byte(int i, uint8_t v);
 
+/* Hang-triage heartbeat, called once per audio-thread loop (see main.c). */
+void dbg_heartbeat_audio(void);
+
 void audio_click(void);
 void audio_beep(void);
 void audio_long_tone(void);

@@ -69,7 +69,7 @@ LOG_MODULE_REGISTER(audio, LOG_LEVEL_INF);
 #define HW_RATE_DEN 22050U
 
 #define AUDIO_RATE_HZ 22050U
-#define AUDIO_FRAMES 512U /* 23 ms per buffer at 22.05 kHz */
+#define AUDIO_FRAMES 320U /* ~14.5 ms per buffer at 22.05 kHz (sized for RAM: with both SID engines resident, 512 does not fit) */
 #define AUDIO_BUF_BYTES (AUDIO_FRAMES * 4U)
 
 /* suspend the stream (and let the amplifier power down) after this long
@@ -424,6 +424,7 @@ static void audio_thread(void *a, void *b, void *c)
 
 	while (1) {
 		dbg[15]++; /* loop rate diagnostic (8-bit) */
+		dbg_heartbeat_audio(); /* hang-triage heartbeat (see main.c) */
 		{
 			uint32_t now = k_uptime_get_32();
 			uint32_t gap = now - loop_last;
@@ -612,7 +613,7 @@ void audio_long_tone(void)
 /* Repeats for a ~700 ms burst at the current sample rate. */
 static uint16_t beep_repeats(void)
 {
-	uint32_t reps = (hw_rate() * 7U) / 5120U;
+	uint32_t reps = (hw_rate() * 7U) / (10U * AUDIO_FRAMES);
 
 	return (uint16_t)(reps ? reps : 1U);
 }

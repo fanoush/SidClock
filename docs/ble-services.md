@@ -47,8 +47,16 @@ health, enable registers), SID state (playing flag, song count, title,
 render timing) and UI diagnostics; bytes [96..127] carry timekeeping
 telemetry - `k_uptime_get()` ms, the raw GRTC cycle counter, the clock
 guard trip count and the current clock base - so a host can spot a broken
-uptime source, and byte [128] reports the BLE access mode. Every read is
-passive: it must not disturb the running I2S bit clock.
+uptime source, and byte [128] reports the BLE access mode. Bytes [129..139]
+carry crash telemetry: boot counter, hwinfo reset-cause flags (LE), audio
+and main thread heartbeats (u16 LE each, a stalled one names the hung
+thread) and the active SID engine (0 = new, 1 = legacy, 0xFF = none).
+Every read is passive: it must not disturb the running I2S bit clock.
+
+A 30 s independent watchdog (fed from the main loop) reboots instead of
+freezing: any wedged thread stops the loop directly or via a stuck lock.
+After an unexpected reboot, `tools/sidclock_ble.py audio` shows the boot
+count, the reset cause and which heartbeat stalled.
 
 ## BLE access modes
 

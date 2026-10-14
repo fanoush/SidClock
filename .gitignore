@@ -18,6 +18,9 @@ __pycache__/
 sids/*.sid
 sids/*.len
 sids/*.stil
+sids/Songlengths.md5
+sids/Songlengths.txt
+sids/STIL.txt
 sids/Songlengths.txt
 sids/STIL.txt
 sids/hvsc/

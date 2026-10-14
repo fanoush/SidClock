@@ -29,6 +29,14 @@ extern uint8_t libcsid_get_default_tune_number();
 
 extern void libcsid_render(unsigned short *output, int numsamples);
 
+#ifdef SID_ENGINE_DUAL
+/* Dual-engine build only: select the core for subsequent init/load/play
+ * calls (0 = cRSID Light, 1 = legacy cSID-light). Both share one 64 KB
+ * C64 RAM; selecting re-initialises on the next load. */
+extern void libcsid_select_engine(int legacy);
+extern int libcsid_selected_engine(void);
+#endif
+
 #ifdef __cplusplus
 }
 #endif

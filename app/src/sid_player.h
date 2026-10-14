@@ -33,6 +33,13 @@ int sid_player_model_mode(void);
 /* The chip model actually in use (6581/8580) - meaningful in auto mode. */
 int sid_player_chip(void);
 
+#ifdef SID_ENGINE_DUAL
+/* Global engine mode for all tunes (default: new core). The main-screen
+ * engine button flips it; the next load (or reload) applies it. */
+void sid_player_set_engine_mode(int legacy);
+int sid_player_engine_legacy(void);
+#endif
+
 bool sid_player_is_playing(void);
 bool sid_player_is_paused(void);
 uint32_t sid_player_elapsed_s(void); /* seconds since the (sub)song started */
@@ -46,6 +53,9 @@ void sid_player_render(int16_t *dst, int frames);
 
 /* Compact status for the BLE debug read: [0] playing, [1] songs, [2..] title */
 void sid_player_info(uint8_t *out, size_t len);
+
+/* Crash telemetry (see main.c): record what is playing. */
+void dbg_record_tune(const char *name, int engine);
 
 #ifdef __cplusplus
 }

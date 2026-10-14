@@ -35,6 +35,9 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/init.h>
 #include <zephyr/drivers/adc.h>
+#include <zephyr/drivers/watchdog.h>
+#include <zephyr/drivers/hwinfo.h>
+#include <zephyr/linker/section_tags.h>
 #include <zephyr/storage/flash_map.h>
 #include <zephyr/fs/fs.h>
 #include <zephyr/fs/littlefs.h>
@@ -54,6 +57,11 @@ LOG_MODULE_REGISTER(sidclock, LOG_LEVEL_INF);
  */
 #ifndef SIDCLOCK_VERSION
 #define SIDCLOCK_VERSION "dev"
+#endif
+/* SID engine tag for A/B builds (set by CMake, display only - the signed
+ * image version above stays engine-independent for OTA comparison). */
+#ifndef SID_ENGINE_SUFFIX
+#define SID_ENGINE_SUFFIX ""
 #endif
 
 #define SCR_W 448
@@ -1156,8 +1164,97 @@ BT_GATT_SERVICE_DEFINE(ess_svc,
 					       0x9c1d, 0x77ce3f41a5c0))
 
 /* [0..19] audio status/format/timing, [20..33] I2S registers,
- * [34..95] diag, [96..127] timekeeping telemetry, [128] BLE access mode */
-static uint8_t ble_dbg[132];
+ * [34..95] diag, [96..127] timekeeping telemetry, [128] BLE access mode,
+ * [129..139] crash telemetry (see below) */
+static uint8_t ble_dbg[140];
+
+/* Crash telemetry in retained RAM (survives watchdog resets): which boot
+ * this is, why the last reset happened, thread heartbeats (a stalled
+ * counter names the hung thread) and what was playing. Read from the
+ * snapshot bytes [129..139] after an unexpected reboot. */
+#define CRASH_MAGIC 0xC8A4C1AAu
+struct crash_log {
+	uint32_t magic;
+	uint8_t boots;        /* [129] boot counter (wraps) */
+	uint8_t cause_lo;     /* [130] hwinfo reset-cause flags low byte */
+	uint8_t cause_hi;     /* [131] ... high byte */
+	uint16_t audio_hb;    /* [132..133] audio-thread heartbeat */
+	uint16_t main_hb;     /* [134..135] main-thread heartbeat */
+	uint8_t engine;       /* [136] 0 = new core, 1 = legacy, 0xFF = none */
+	char tune[20];        /* current tune file name (not in snapshot) */
+};
+static struct crash_log __noinit crash_log;
+
+static const struct device *wdt_dev;
+static int wdt_chan = -1;
+
+/* Called once at boot: count boots, latch the reset cause. */
+static void crash_log_boot(void)
+{
+	uint32_t cause = 0U;
+
+	if (crash_log.magic != CRASH_MAGIC) {
+		memset(&crash_log, 0, sizeof(crash_log));
+		crash_log.magic = CRASH_MAGIC;
+	}
+	crash_log.boots++;
+	if (hwinfo_get_reset_cause(&cause) == 0) {
+		crash_log.cause_lo = (uint8_t)cause;
+		crash_log.cause_hi = (uint8_t)(cause >> 8);
+		(void)hwinfo_clear_reset_cause();
+	}
+	crash_log.engine = 0xFFU;
+}
+
+/* Watchdog: 30 s window fed from the main loop (worst legit gap is ~5 s).
+ * Any wedged thread stops the loop directly or via a stuck lock and the
+ * device reboots instead of freezing; the retained log tells what died. */
+static void watchdog_start(void)
+{
+	struct wdt_timeout_cfg cfg = {
+		.window = { .min = 0U, .max = 30000U },
+		.callback = NULL,
+		.flags = WDT_FLAG_RESET_SOC,
+	};
+
+	wdt_dev = DEVICE_DT_GET(DT_ALIAS(watchdog0));
+	if (!device_is_ready(wdt_dev)) {
+		wdt_dev = NULL;
+		return;
+	}
+	wdt_chan = wdt_install_timeout(wdt_dev, &cfg);
+	if (wdt_chan < 0) {
+		wdt_dev = NULL;
+		return;
+	}
+	if (wdt_setup(wdt_dev, WDT_OPT_PAUSE_HALTED_BY_DBG) != 0) {
+		wdt_dev = NULL;
+	}
+}
+
+/* Record what is playing (called on every successful tune load). */
+void dbg_record_tune(const char *name, int engine)
+{
+	size_t nl = strlen(name);
+
+	if (nl >= sizeof(crash_log.tune)) {
+		nl = sizeof(crash_log.tune) - 1U;
+	}
+	memcpy(crash_log.tune, name, nl);
+	crash_log.tune[nl] = '\0';
+	crash_log.engine = engine ? 1U : 0U;
+}
+
+/* Heartbeats for the hang triage (called from the watched threads). */
+void dbg_heartbeat_main(void)
+{
+	crash_log.main_hb++;
+}
+
+void dbg_heartbeat_audio(void)
+{
+	crash_log.audio_hb++;
+}
 
 /* Timekeeping telemetry: the wall-clock timebase (GRTC), the kernel uptime
  * (which can step on this port) and the clock guard state - lets a host
@@ -1206,6 +1303,15 @@ static ssize_t ble_dbg_read(struct bt_conn *conn,
 
 	ble_dbg_time(ble_dbg + 96);
 	sys_put_le32(ble_mode, ble_dbg + 128); /* [128] mode, rest spare */
+	ble_dbg[129] = crash_log.boots; /* crash telemetry [129..139] */
+	ble_dbg[130] = crash_log.cause_lo;
+	ble_dbg[131] = crash_log.cause_hi;
+	ble_dbg[132] = (uint8_t)crash_log.audio_hb;
+	ble_dbg[133] = (uint8_t)(crash_log.audio_hb >> 8);
+	ble_dbg[134] = (uint8_t)crash_log.main_hb;
+	ble_dbg[135] = (uint8_t)(crash_log.main_hb >> 8);
+	ble_dbg[136] = crash_log.engine;
+	ble_dbg[137] = ble_dbg[138] = ble_dbg[139] = 0;
 
 	return bt_gatt_attr_read(conn, attr, buf, len, offset, ble_dbg,
 				 sizeof(ble_dbg));
@@ -1321,6 +1427,7 @@ static ssize_t ble_dbg_write(struct bt_conn *conn,
 		}
 		break;
 	}
+
 	case 0x16: {
 		/* Delete a song file from /home (the .sid plus its .len and
 		 * .stil sidecars). Restricted to those extensions so the
@@ -1800,7 +1907,7 @@ static void redraw_clock(void)
 static void draw_header(void)
 {
 	redraw_clock();
-	draw_text_cached(TC_VER, 8, 52, "v" SIDCLOCK_VERSION, COL_CYAN, COL_BG);
+	draw_text_cached(TC_VER, 8, 52, "v" SIDCLOCK_VERSION SID_ENGINE_SUFFIX, COL_CYAN, COL_BG);
 	draw_battery();
 }
 
@@ -1823,6 +1930,11 @@ static void draw_main_screen(void)
 		    sound_on ? "SND ON" : "SND OFF", sound_on);
 	draw_button(UB_X1, UB_Y2, UB_W, UB_H, ble_mode_label(),
 		    ble_mode != BLE_MODE_OFF);
+#ifdef SID_ENGINE_DUAL
+	draw_button(UB_X2, UB_Y2, UB_W, UB_H,
+		    sid_player_engine_legacy() ? "cSID" : "cRSID",
+		    sid_player_engine_legacy());
+#endif
 	draw_button(UB_X3, UB_Y2, UB_W, UB_H, "SLEEP", false);
 
 	draw_slider_volume();
@@ -3773,6 +3885,29 @@ static void touch_poll(void)
 			ble_ui_sync(); /* redraw the button right away */
 			return;
 		}
+#ifdef SID_ENGINE_DUAL
+		if (first && hit(x, y, UB_X2, UB_Y2, UB_W, UB_H)) {
+			/* Engine A/B: full stop, flip the core, restart the
+			 * same tune if one was playing. */
+			bool was = sid_player_is_playing();
+			char path[40];
+
+			sid_player_stop();
+			audio_sid_stop();
+			sid_player_set_engine_mode(
+				!sid_player_engine_legacy());
+			if (was && sid_cur_name[0] != '\0') {
+				snprintf(path, sizeof(path), "/home/%s",
+					 sid_cur_name);
+				if (sid_player_load(path) == 0) {
+					sid_player_play_default();
+					audio_sid_start();
+				}
+			}
+			draw_ui(); /* redraw the button right away */
+			return;
+		}
+#endif
 		if (first && hit(x, y, UB_X3, UB_Y2, UB_W, UB_H)) {
 			enter_sleep();
 			return;
@@ -4562,6 +4697,8 @@ BT_CONN_CB_DEFINE(conn_callbacks) = {
 
 int main(void)
 {
+	crash_log_boot();
+	watchdog_start();
 	disp = DEVICE_DT_GET(DT_CHOSEN(zephyr_display));
 	if (!device_is_ready(disp)) {
 		LOG_ERR("display not ready");
@@ -4640,6 +4777,11 @@ int main(void)
 	uint32_t t_autorot = 0;
 
 	while (1) {
+		/* hang safety net + triage heartbeat (see watchdog_start) */
+		dbg_heartbeat_main();
+		if (wdt_dev != NULL) {
+			(void)wdt_feed(wdt_dev, wdt_chan);
+		}
 		/* the SID marquee only advances while its screen is on
 		 * show (idle face, other screens and the dark panel pause
 		 * it instead of silently running it on) */

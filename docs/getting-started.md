@@ -50,6 +50,9 @@ app/build.sh                     # application + MCUboot signature -> app/build/
 
 Both scripts are idempotent; rerun after changes. `bootloader/build.sh rtt`
 builds a debug bootloader with SEGGER RTT logging instead.
+`SIDCLOCK_SID_ENGINE=csid app/build.sh` builds with the legacy cSID-light
+core instead of cRSID (A/B comparison; the display version shows the engine).
+`=dual` links both cores with per-tune runtime switching.
 
 ## 3. First flash (SWD)
 

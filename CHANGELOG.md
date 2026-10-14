@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+- SID engine swap (not yet validated on hardware): the default build now
+  plays through cRSID-1.58 in Light profile (integer-only, more accurate:
+  cycle-exact CPU/ADSR, fixed 6581 filter bottom, RTI at $DC0C, more digis
+  and real RSID support), slimmed for RAM (4 KB IO banks, no ROM banks,
+  computed banking) behind the unchanged `libcsid_*` API. The original
+  cSID-light core stays available with `SIDCLOCK_SID_ENGINE=csid` for A/B
+  comparison; the on-display version grows a `-crsid`/`-csid` suffix while
+  the signed image version is identical for both. Audio buffers shrank
+  512 to 384 frames to fit the bigger engine state (RAM at 99.6%).
+- Optional dual-engine build (`SIDCLOCK_SID_ENGINE=dual`, display
+  suffix `-dual`): legacy cSID-light linked alongside cRSID, sharing
+  one 64 KB C64 RAM with a main-screen toggle button (second row middle,
+  dual builds only) that stops playback, flips the core and restarts the
+  tune. For heavy tunes (e.g. Arkanoid) that overrun the render budget;
+  defaults to the new core.
+
 ## 1.0.3
 
 Per-subsong STIL comments, plus current-HVSC database support in the
