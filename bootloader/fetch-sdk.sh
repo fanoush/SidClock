@@ -13,6 +13,8 @@
 #
 # Default target: $SIDCLOCK_SDK, else <repo>/.sdk (gitignored).
 #
+# Works on Linux x86_64 and aarch64 (SDK URLs follow the host arch).
+#
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -20,6 +22,12 @@ ROOT="$(cd "$HERE/.." && pwd)"
 # shellcheck disable=SC1091
 [ -f "$ROOT/local.conf" ] && . "$ROOT/local.conf"
 TARGET="${1:-${SIDCLOCK_SDK:-$ROOT/.sdk}}"
+
+case "$(uname -m)" in
+	x86_64|amd64) SDK_ARCH=x86_64 ;;
+	aarch64|arm64) SDK_ARCH=aarch64 ;;
+	*) echo "error: unsupported host architecture '$(uname -m)' (need x86_64 or aarch64)" >&2; exit 1 ;;
+esac
 
 SRC="$TARGET/src"
 TOOLS="$TARGET/tools"
@@ -38,9 +46,9 @@ dl() { # url file
 }
 
 # --- Zephyr SDK 0.17.0 (minimal + host tools + arm toolchain) ---
-dl https://github.com/zephyrproject-rtos/sdk-ng/releases/download/v0.17.0/zephyr-sdk-0.17.0_linux-x86_64_minimal.tar.xz "$TOOLS/sdk-minimal.tar.xz"
-dl https://github.com/zephyrproject-rtos/sdk-ng/releases/download/v0.17.0/hosttools_linux-x86_64.tar.xz "$TOOLS/hosttools.tar.xz"
-dl https://github.com/zephyrproject-rtos/sdk-ng/releases/download/v0.17.0/toolchain_linux-x86_64_arm-zephyr-eabi.tar.xz "$TOOLS/arm-zephyr-eabi.tar.xz"
+dl https://github.com/zephyrproject-rtos/sdk-ng/releases/download/v0.17.0/zephyr-sdk-0.17.0_linux-${SDK_ARCH}_minimal.tar.xz "$TOOLS/sdk-minimal.tar.xz"
+dl https://github.com/zephyrproject-rtos/sdk-ng/releases/download/v0.17.0/hosttools_linux-${SDK_ARCH}.tar.xz "$TOOLS/hosttools.tar.xz"
+dl https://github.com/zephyrproject-rtos/sdk-ng/releases/download/v0.17.0/toolchain_linux-${SDK_ARCH}_arm-zephyr-eabi.tar.xz "$TOOLS/arm-zephyr-eabi.tar.xz"
 
 # --- sources (pinned revisions) ---
 dl https://codeload.github.com/nrfconnect/sdk-zephyr/tar.gz/f791c49f492c "$SRC/zephyr.tar.gz"
@@ -53,7 +61,16 @@ dl https://codeload.github.com/zephyrproject-rtos/zcbor/tar.gz/9b07780aca6fb21f8
 dl https://codeload.github.com/zephyrproject-rtos/segger/tar.gz/cf56b1d9c80f81a26e2ac5727c9cf177116a4692 "$SRC/segger.tar.gz"
 
 # --- ninja (hosttools does not ship it on all platforms) ---
-dl https://github.com/ninja-build/ninja/releases/download/v1.12.1/ninja-linux.zip "$SRC/ninja-linux.zip"
+# Prefer a ninja already on PATH (this is required on aarch64, where the
+# ninja project ships no linux binary zip); otherwise fetch the x86_64 build.
+if ! command -v ninja >/dev/null 2>&1; then
+	if [ "$SDK_ARCH" = "x86_64" ]; then
+		dl https://github.com/ninja-build/ninja/releases/download/v1.12.1/ninja-linux.zip "$SRC/ninja-linux.zip"
+	else
+		echo "error: ninja not found - install it first (pip install ninja, or apt install ninja-build)." >&2
+		exit 1
+	fi
+fi
 
 # --- unpack sources ---
 untar() { # archive dest (strip the single top-level dir)
@@ -81,7 +98,7 @@ fi
 [ -d "$SDKDIR/hosttools" ] || tar -xf "$TOOLS/hosttools.tar.xz" -C "$SDKDIR"
 [ -d "$SDKDIR/arm-zephyr-eabi" ] || tar -xf "$TOOLS/arm-zephyr-eabi.tar.xz" -C "$SDKDIR"
 
-if [ ! -x "$TOOLS/bin/ninja" ]; then
+if [ ! -x "$TOOLS/bin/ninja" ] && [ -s "$SRC/ninja-linux.zip" ]; then
 	mkdir -p "$TOOLS/bin"
 	python3 - "$SRC/ninja-linux.zip" "$TOOLS/bin" <<'PY'
 import sys

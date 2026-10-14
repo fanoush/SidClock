@@ -5,7 +5,7 @@ onto a device.
 
 ## 0. Prerequisites
 
-- Linux host (x86_64), ~3 GB disk for the pinned SDK.
+- Linux host (x86_64 or ARM64/aarch64), ~3 GB disk for the pinned SDK.
 - `python3`, `pip`, `curl`, `tar`, `git`, `cmake` (>= 3.20) and a C++ host
   toolchain for the SDK helper scripts.
 - [SEGGER J-Link](https://www.segger.com/downloads/jlink/) software if you
@@ -23,6 +23,9 @@ modules, and Zephyr SDK 0.17.0 with the ARM toolchain):
 ```sh
 bootloader/fetch-sdk.sh          # -> ./.sdk (gitignored)
 ```
+
+On ARM64 hosts `ninja` must already be on `PATH` (`pip install ninja`
+or `apt install ninja-build`); on x86_64 the script fetches it.
 
 To keep the SDK elsewhere, run with a target directory
 (`bootloader/fetch-sdk.sh ~/sidclock-sdk`) and put the path in the
