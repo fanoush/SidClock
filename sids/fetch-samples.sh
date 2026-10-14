@@ -49,6 +49,10 @@ dl MUSICIANS/G/Gray_Matt/Last_Ninja_2.sid
 dl MUSICIANS/O/Ouwehand_Reyn/Last_Ninja_3.sid
 dl MUSICIANS/G/Galway_Martin/Ocean_Loader_2.sid
 dl MUSICIANS/G/Galway_Martin/Yie_Ar_Kung_Fu.sid
+# Multi-SID test tunes (PSID v3/v4: second/third SID at $D420/$D440).
+# Short local names: the BLE play command accepts at most 20 characters.
+dl MUSICIANS/J/Jammer/Yet_Bigger_Beat_2SID.sid YBB_2SID.sid
+dl MUSICIANS/J/Jammer/Melbourne_Shuffle_3SID.sid Melbourne_3SID.sid
 
 echo
 echo "done - next:  tools/sid_add.py sids/Commando.sid"
