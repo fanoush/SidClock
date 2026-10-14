@@ -51,6 +51,8 @@ INLINE void cRSID_emulateADSRs (FASTVAR cRSID_SIDinstance *const FASTPTR SID, FA
  //'Paused' causes immediate stopping in audio-buffer thread, so SID-baseaddress changes during tune-switching won't give segfaults
  //if ( RARELY (cRSID.Paused || SID->BasePtr == NULL) ) return; //printf( "%p-", SID->BasePtr ); //avoid some segfaults when NULL-ing SID4
 
+ if (SID->ADSRidle) return; //OPT: all voices proven steady; woken by SID-register writes (see CPU.c)
+
  for (Channel=0; Channel < SID_CHANNELS_RANGE; Channel += SID_CHANNEL_SPACING) {
   //OPT: skip voices already proven steady (woken by SID-register writes,
   //see the ADSRsteady hooks in CPU.c); no state can change for them.
@@ -74,7 +76,7 @@ INLINE void cRSID_emulateADSRs (FASTVAR cRSID_SIDinstance *const FASTPTR SID, FA
 
   *RateCounterPtr += cycles; if ( RARELY (*RateCounterPtr >= 0x8000) ) *RateCounterPtr -= 0x8000; //*RateCounterPtr &= 0x7FFF; //can wrap around (ADSR delay-bug: short 1st frame)
 
-  if ( RARELY (PrescalePeriod <= *RateCounterPtr && *RateCounterPtr < PrescalePeriod+cycles) ) { //ratecounter shot (matches rateperiod) (in genuine SID ratecounter is LFSR)
+  while ( PrescalePeriod <= *RateCounterPtr ) { //OPT: cycles is the whole sample span now (batch call); fire every shot it contains
    *RateCounterPtr -= PrescalePeriod; //reset rate-counter on period-match
    if ( (*ADSRstatePtr & ATTACK_BITVAL) || ++(*ExponentCounterPtr) == ADSRexponentPeriods[*EnvelopeCounterPtr] ) {
     *ExponentCounterPtr = 0;
@@ -90,8 +92,13 @@ INLINE void cRSID_emulateADSRs (FASTVAR cRSID_SIDinstance *const FASTPTR SID, FA
    { FASTVAR unsigned char st = *ADSRstatePtr; FASTVAR unsigned char env = *EnvelopeCounterPtr; //OPT: re-prove this voice at its envelope matches
      FASTVAR unsigned char bit = (unsigned char)(1u << ((Channel*2+7)>>4)); //Channel is 0/7/14, no division
      if ((st & ATTACK_BITVAL) || ((st & DECAYSUSTAIN_BITVAL) && env != (SR&0xF0)+(SR>>4)) || (!(st & (ATTACK_BITVAL|DECAYSUSTAIN_BITVAL)) && (st & HOLDZEROn_BITVAL) && env != 0)) SID->ADSRsteady &= (unsigned char)~bit;
-     else SID->ADSRsteady |= bit;
-     if (SID->ADSRsteady == 0x07) SID->ADSRidle = 1; }
+     else { SID->ADSRsteady |= bit; *RateCounterPtr = 0; } //OPT: freeze the rate counter cleanly while steady (no burst on the next wake)
+     if (SID->ADSRsteady == 0x07) SID->ADSRidle = 1;
+     if (SID->ADSRsteady & bit) break; }
+   //phase may have changed mid-batch: recompute the period for the next shot
+   if (*ADSRstatePtr & ATTACK_BITVAL) PrescalePeriod = ADSRprescalePeriods[ AD >> 4 ];
+   else if (*ADSRstatePtr & DECAYSUSTAIN_BITVAL) PrescalePeriod = ADSRprescalePeriods[ AD & 0x0F ];
+   else PrescalePeriod = ADSRprescalePeriods[ SR & 0x0F ];
   }}
 
 }
