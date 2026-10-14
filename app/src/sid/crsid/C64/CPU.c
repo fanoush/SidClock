@@ -41,6 +41,12 @@ static INLINE unsigned char rd (FASTVAR unsigned short address) {
 
 static INLINE void wr (FASTVAR unsigned short address, FASTVAR unsigned char data) {
  *cRSID_getMemWritePtr(address)=data;
+ if (RARELY (0xD400 <= address && address < 0xD41C)) { //OPT: SID-reg write may restart envelopes
+  if (TIGHTLY (cRSID_C64.SID[1].BaseAddress <= address && address < cRSID_C64.SID[1].BaseAddress+0x1C)) cRSID_C64.SID[1].ADSRidle = cRSID_C64.SID[1].ADSRsteady = 0;
+  if (TIGHTLY (cRSID_C64.SID[2].BaseAddress != 0 && cRSID_C64.SID[2].BaseAddress <= address && address < cRSID_C64.SID[2].BaseAddress+0x1C)) cRSID_C64.SID[2].ADSRidle = cRSID_C64.SID[2].ADSRsteady = 0;
+  if (TIGHTLY (cRSID_C64.SID[3].BaseAddress != 0 && cRSID_C64.SID[3].BaseAddress <= address && address < cRSID_C64.SID[3].BaseAddress+0x1C)) cRSID_C64.SID[3].ADSRidle = 0; cRSID_C64.SID[3].ADSRsteady = 0;
+  if (TIGHTLY (cRSID_C64.SID[4].BaseAddress != 0 && cRSID_C64.SID[4].BaseAddress <= address && address < cRSID_C64.SID[4].BaseAddress+0x1C)) cRSID_C64.SID[4].ADSRidle = 0; cRSID_C64.SID[4].ADSRsteady = 0;
+ }
  if ( LIKELY (cRSID_C64.RealSIDmode && (cRSID_C64.RAMbank[1] & 3)) ) {
   //if(data&1) { //only writing 1 to $d019 bit0 would acknowledge, not any value (but RMW instructions write $d019 back before mod.)
    if ( RARELY (address==0xD019) ) { cRSID_acknowledgeVICrasterIRQ(); }
@@ -51,6 +57,12 @@ static INLINE void wr (FASTVAR unsigned short address, FASTVAR unsigned char dat
 static INLINE void wr2 (FASTVAR unsigned short address, FASTVAR unsigned char data) { //PSID-hack specific memory-write
  FASTVAR int Tmp;
  *cRSID_getMemWritePtr(address)=data;
+ if (RARELY (0xD400 <= address && address < 0xD41C)) { //OPT: SID-reg write may restart envelopes (see wr())
+  if (TIGHTLY (cRSID_C64.SID[1].BaseAddress <= address && address < cRSID_C64.SID[1].BaseAddress+0x1C)) cRSID_C64.SID[1].ADSRidle = cRSID_C64.SID[1].ADSRsteady = 0;
+  if (TIGHTLY (cRSID_C64.SID[2].BaseAddress != 0 && cRSID_C64.SID[2].BaseAddress <= address && address < cRSID_C64.SID[2].BaseAddress+0x1C)) cRSID_C64.SID[2].ADSRidle = cRSID_C64.SID[2].ADSRsteady = 0;
+  if (TIGHTLY (cRSID_C64.SID[3].BaseAddress != 0 && cRSID_C64.SID[3].BaseAddress <= address && address < cRSID_C64.SID[3].BaseAddress+0x1C)) cRSID_C64.SID[3].ADSRidle = 0; cRSID_C64.SID[3].ADSRsteady = 0;
+  if (TIGHTLY (cRSID_C64.SID[4].BaseAddress != 0 && cRSID_C64.SID[4].BaseAddress <= address && address < cRSID_C64.SID[4].BaseAddress+0x1C)) cRSID_C64.SID[4].ADSRidle = 0; cRSID_C64.SID[4].ADSRsteady = 0;
+ }
  if ( LIKELY (cRSID_C64.RAMbank[1] & 3) ) {
 
   if ( TIGHTLY (cRSID_C64.RealSIDmode) ) {

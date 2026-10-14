@@ -194,6 +194,10 @@ cRSID_Output* cRSID_emulateC64 () {
 
 
  unsigned int bound_steps = 0; //rescue bound: legit players need < 100 instrs/sample; break (glitch) instead of hanging forever
+ //OPT: two instruction-loop flavours (ADSR stepping on/off) selected per
+ //sample, so busy tunes pay no per-instruction branch (M33 has no dynamic
+ //branch prediction). Keep both arms in sync.
+ if (LIKELY (!cRSID_C64.SID[1].ADSRidle || cRSID_C64.SID[2].BaseAddress != 0 || cRSID_C64.SID[3].BaseAddress != 0 || cRSID_C64.SID[4].BaseAddress != 0)) {
  while (cRSID_C64.SampleCycleCnt <= cRSID_C64.SampleClockRatio) {
   if (++bound_steps > 4096) { cRSID_C64.SampleCycleCnt = cRSID_C64.SampleClockRatio + 1; break; }
 
@@ -238,6 +242,49 @@ cRSID_Output* cRSID_emulateC64 () {
   if (cRSID_C64.SID[4].BaseAddress != 0) cRSID_emulateADSRs( &cRSID_C64.SID[4], InstructionCycles );
 
  } //end of 1MHz cycle-based emulations (CPU, VIC, CIA, ADSR)
+ }
+ else {
+ while (cRSID_C64.SampleCycleCnt <= cRSID_C64.SampleClockRatio) {
+  if (++bound_steps > 4096) { cRSID_C64.SampleCycleCnt = cRSID_C64.SampleClockRatio + 1; break; }
+
+  if ( CALMLY (!cRSID_C64.RealSIDmode) ) {
+   if ( RARELY (cRSID_C64.FrameCycleCnt >= cRSID.FrameCycles) ) {
+    cRSID_C64.FrameCycleCnt -= cRSID.FrameCycles;
+    if ( RARELY (cRSID_C64.Finished) ) { //some tunes (e.g. Barbarian, A-Maze-Ing) don't always finish in 1 frame
+     cRSID_initCPU( cRSID.PlayAddress ); //(PSID docs say bank-register should always be set for each call's region)
+     cRSID_C64.Finished=0; //cRSID_C64.SampleCycleCnt=0; //PSID workaround for some tunes (e.g. Galdrumway):
+     ++sid_frame_calls; //new play-routine call starting (device debug counter)
+     if ( LIKELY (cRSID.TimerSource==0) ) cRSID_C64.IObankRD[((0xD019) & 0xFFF)] = 0x81; //always simulate to player-calls that VIC-IRQ happened
+     else cRSID_C64.IObankRD[((0xDC0D) & 0xFFF)] = 0x83; //always simulate to player-calls that CIA TIMERA/TIMERB-IRQ happened
+   }}
+   if ( TIGHTLY (cRSID_C64.Finished==0) ) {
+    if ( RARELY ((InstructionCycles = cRSID_emulateCPU()) >= 0xFE) ) { InstructionCycles=6; cRSID_C64.Finished=1; }
+   }
+   else InstructionCycles=7; //idle between player-calls
+   cRSID_C64.FrameCycleCnt += InstructionCycles;
+   cRSID_C64.IObankRD[((0xDC04) & 0xFFF)] += InstructionCycles; //very simple CIA1 TimerA simulation for PSID (e.g. Delta-Mix_E-Load_loader)
+  }
+
+  else { //RealSID emulations:
+   if ( RARELY (cRSID_handleCPUinterrupts()) ) { cRSID_C64.Finished=0; InstructionCycles=7; ++sid_frame_calls; } //IRQ/NMI dispatched (device debug counter)
+   else if ( MOSTLY (cRSID_C64.Finished==0) ) {
+    if ( RARELY ((InstructionCycles = cRSID_emulateCPU()) >= 0xFE) ) {
+     /*if (InstructionCycles!=0xFE && !(cRSID_C64.CPU.ST&I))*/ cRSID_C64.Finished=1;
+     InstructionCycles=6;
+    }
+   }
+   else InstructionCycles=7; //idle between IRQ-calls
+   cRSID_C64.IRQ = cRSID_C64.NMI = 0; //prepare for collecting IRQ sources
+   cRSID_C64.IRQ |= cRSID_emulateCIA( &cRSID_C64.CIA[1], InstructionCycles );
+   cRSID_C64.NMI |= cRSID_emulateCIA( &cRSID_C64.CIA[2], InstructionCycles );
+   cRSID_C64.IRQ |= cRSID_emulateVIC( InstructionCycles );
+  }
+
+  cRSID_C64.SampleCycleCnt += (InstructionCycles << CRSID_CLOCK_FRACTIONAL_BITS);
+
+
+ } //end of 1MHz cycle-based emulations (CPU, VIC, CIA, ADSR)
+ }
  cRSID_C64.SampleCycleCnt -= cRSID_C64.SampleClockRatio;
 
 

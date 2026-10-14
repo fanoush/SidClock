@@ -77,6 +77,8 @@ typedef struct cRSID_SIDinstance {
  unsigned char*     BasePtrRD;     //SID-baseaddress location in host's memory (SID OSC3/ENV3 written here for readback)
  //ADSR-related:
  unsigned char      ADSRstate[15];
+ unsigned char      ADSRidle; //OPT: skip ADSR stepping while all voices steady (set on SID-reg writes, cleared below)
+ unsigned char      ADSRsteady; //OPT: per-voice steady bits (evaluated at envelope matches, see SID_ADSR.c)
  unsigned short     RateCounter[15];
  unsigned char      EnvelopeCounter[15];
  unsigned char      ExponentCounter[15];

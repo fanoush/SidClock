@@ -84,6 +84,11 @@ INLINE void cRSID_emulateADSRs (FASTVAR cRSID_SIDinstance *const FASTPTR SID, FA
       --(*EnvelopeCounterPtr); //resid adds 1 cycle delay, we omit that mechanism here
       if (*EnvelopeCounterPtr==0) *ADSRstatePtr &= ~HOLDZEROn_BITVAL;
    }}}
+   { FASTVAR unsigned char st = *ADSRstatePtr; FASTVAR unsigned char env = *EnvelopeCounterPtr; //OPT: re-prove this voice at its envelope matches
+     FASTVAR unsigned char bit = (unsigned char)(1u << ((Channel*2+7)>>4)); //Channel is 0/7/14, no division
+     if ((st & ATTACK_BITVAL) || ((st & DECAYSUSTAIN_BITVAL) && env != (SR&0xF0)+(SR>>4)) || (!(st & (ATTACK_BITVAL|DECAYSUSTAIN_BITVAL)) && (st & HOLDZEROn_BITVAL) && env != 0)) SID->ADSRsteady &= (unsigned char)~bit;
+     else SID->ADSRsteady |= bit;
+     if (SID->ADSRsteady == 0x07) SID->ADSRidle = 1; }
   }}
 
 }
