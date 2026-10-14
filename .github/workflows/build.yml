@@ -36,9 +36,6 @@ jobs:
       - name: Build application
         run: app/build.sh
 
-      - name: Public-tree check
-        run: 
-
       - uses: actions/upload-artifact@v4
         with:
           name: sidclock-firmware

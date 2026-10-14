@@ -158,5 +158,5 @@ OTA, persistence across reset.
    part of the test checklist.
 3. Keep commits small and explain hardware-side verification in the
    message.
-4. Before publishing: `` (must pass), update
-   `CHANGELOG.md`, bump `VERSION` for releases.
+4. Before publishing: update `CHANGELOG.md` and bump `VERSION` for
+   releases.

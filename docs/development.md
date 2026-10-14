@@ -86,4 +86,3 @@ Before calling a change done, verify on hardware:
    CI builds the firmware and **creates the GitHub release automatically**
    (tag pushes only) with the signed application, the bootloader images and
    a `SHA256SUMS` file attached.
-4. `` must pass before tagging.
