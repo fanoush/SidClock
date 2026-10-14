@@ -15,6 +15,7 @@ User commands:
   filedelete <name>  delete a song file from /home (a .sid also removes
             its .len/.stil sidecars; config files are protected)
   chip M    SID chip model: auto (follow PSID flags) | 6581 | 8580
+  engine E  SID engine (dual builds): new (cRSID) | old (cSID-light)
   ls        list the files in /home on the device
 
 Developer/debug commands (see docs/ble-services.md; behaviour may change):
@@ -379,6 +380,16 @@ async def cmd_sidname(addr, name=None):
           f"title={title!r}")
 
 
+async def cmd_engine(addr, value=None):
+    """Switch the SID engine (dual-engine builds): new (cRSID) | old (cSID)."""
+    if value not in ("new", "old"):
+        raise SystemExit("usage: engine new|old  (cRSID / cSID-light)")
+    async with BleakClient(addr) as c:
+        await c.write_gatt_char(DBG_CHAR, bytes([0x17, 1 if value == "old" else 0]),
+                                response=True)
+        print(f"SID engine: {value}")
+
+
 async def cmd_filedelete(addr, name=None):
     """Delete a song file from /home (a .sid also drops its sidecars)."""
     if not name:
@@ -450,6 +461,7 @@ def main():
             "tone", "mute", "rate", "tonefreq",
         "tonestart", "tonestop", "fsformat", "sid", "sidname", "chip",
         "sidstop", "ls", "glitch", "blemode", "filedelete",
+        "engine",
         ],
     )
     ap.add_argument(
@@ -485,8 +497,9 @@ def main():
         "glitch": cmd_glitch,
         "blemode": cmd_blemode,
         "filedelete": cmd_filedelete,
+        "engine": cmd_engine,
     }[args.command]
-    if args.command in ("sidname", "chip", "filedelete"):
+    if args.command in ("sidname", "chip", "filedelete", "engine"):
         asyncio.run(fn(args.addr, args.value))
     elif args.command == "set-time":
         asyncio.run(fn(args.addr, args.value))

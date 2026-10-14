@@ -1344,6 +1344,9 @@ static ssize_t ble_dbg_write(struct bt_conn *conn,
 	      (len == 3U && p[0] == 0x13U) ||
 	      (len >= 2U && len <= 21U && p[0] == 0x11U) ||
 	      (len >= 2U && len <= 21U && p[0] == 0x16U) ||
+#ifdef SID_ENGINE_DUAL
+	      (len == 2U && p[0] == 0x17U) ||
+#endif
 	      (len == 5U && (p[0] == 0x09U || p[0] == 0x0AU ||
 			     p[0] == 0x0BU || p[0] == 0x10U)))) {
 		return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
@@ -1460,6 +1463,34 @@ static ssize_t ble_dbg_write(struct bt_conn *conn,
 		LOG_INF("file deleted: %s", path);
 		break;
 	}
+#ifdef SID_ENGINE_DUAL
+	case 0x17: {
+		/* Global SID engine (0 = new cRSID, 1 = legacy cSID-light),
+		 * the same action as the main-screen button: stop, flip,
+		 * restart the same tune if one was playing. */
+		if (len != 2U || p[1] > 1U) {
+			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+		}
+		if (p[1] != (uint8_t)sid_player_engine_legacy()) {
+			bool was = sid_player_is_playing();
+			char path[40];
+
+			sid_player_stop();
+			audio_sid_stop();
+			sid_player_set_engine_mode((int)p[1]);
+			if (was && sid_cur_name[0] != '\0') {
+				snprintf(path, sizeof(path), "/home/%s",
+					 sid_cur_name);
+				if (sid_player_load(path) == 0) {
+					sid_player_play_default();
+					audio_sid_start();
+				}
+			}
+		}
+		LOG_INF("sid engine: %s", p[1] ? "legacy" : "new");
+		break;
+	}
+#endif
 	case 0x12:
 		if (len != 2U) {
 			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
