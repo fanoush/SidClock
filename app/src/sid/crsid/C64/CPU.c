@@ -28,18 +28,25 @@ static INLINE void storeReg (void) {
 }*/
 
 static INLINE unsigned char rd (FASTVAR unsigned short address) {
- FASTVAR unsigned char value;
- value = *cRSID_getMemReadPtr(address);
- if ( TIGHTLY (cRSID_C64.RealSIDmode) ) {
-  if ( LIKELY (cRSID_C64.RAMbank[1] & 3) ) {
-   if ( RARELY (address==0xDC0D) ) { cRSID_acknowledgeCIAIRQ( &cRSID_C64.CIA[1] ); }
-   else if ( RARELY (address==0xDD0D) ) { cRSID_acknowledgeCIAIRQ( &cRSID_C64.CIA[2] ); }
+ //OPT: pages other than $D000-$DFFF always read plain RAM (slim banking);
+ //skip the full bank-pointer path for them (the common case).
+ if ( MOSTLY ((address & 0xF000) != 0xD000) ) return cRSID_C64.RAMbank[address];
+ {
+  FASTVAR unsigned char value;
+  value = *cRSID_getMemReadPtr(address);
+  if ( TIGHTLY (cRSID_C64.RealSIDmode) ) {
+   if ( LIKELY (cRSID_C64.RAMbank[1] & 3) ) {
+    if ( RARELY (address==0xDC0D) ) { cRSID_acknowledgeCIAIRQ( &cRSID_C64.CIA[1] ); }
+    else if ( RARELY (address==0xDD0D) ) { cRSID_acknowledgeCIAIRQ( &cRSID_C64.CIA[2] ); }
+   }
   }
+  return value;
  }
- return value;
 }
 
 static INLINE void wr (FASTVAR unsigned short address, FASTVAR unsigned char data) {
+ //OPT: pages other than $D000-$DFFF always write plain RAM (slim banking).
+ if ( MOSTLY ((address & 0xF000) != 0xD000) ) { cRSID_C64.RAMbank[address] = data; return; }
  *cRSID_getMemWritePtr(address)=data;
  if (RARELY (0xD400 <= address && address < 0xD41C)) { //OPT: SID-reg write may restart envelopes
   if (TIGHTLY (cRSID_C64.SID[1].BaseAddress <= address && address < cRSID_C64.SID[1].BaseAddress+0x1C)) cRSID_C64.SID[1].ADSRidle = cRSID_C64.SID[1].ADSRsteady = 0;
@@ -56,6 +63,8 @@ static INLINE void wr (FASTVAR unsigned short address, FASTVAR unsigned char dat
 
 static INLINE void wr2 (FASTVAR unsigned short address, FASTVAR unsigned char data) { //PSID-hack specific memory-write
  FASTVAR int Tmp;
+ //OPT: pages other than $D000-$DFFF always write plain RAM (slim banking).
+ if ( MOSTLY ((address & 0xF000) != 0xD000) ) { cRSID_C64.RAMbank[address] = data; return; }
  *cRSID_getMemWritePtr(address)=data;
  if (RARELY (0xD400 <= address && address < 0xD41C)) { //OPT: SID-reg write may restart envelopes (see wr())
   if (TIGHTLY (cRSID_C64.SID[1].BaseAddress <= address && address < cRSID_C64.SID[1].BaseAddress+0x1C)) cRSID_C64.SID[1].ADSRidle = cRSID_C64.SID[1].ADSRsteady = 0;

@@ -193,13 +193,11 @@ cRSID_Output* cRSID_emulateC64 () {
  //Cycle-based/-paced part of emulations:
 
 
- unsigned int bound_steps = 0; //rescue bound: legit players need < 100 instrs/sample; break (glitch) instead of hanging forever
  //OPT: two instruction-loop flavours (ADSR stepping on/off) selected per
  //sample, so busy tunes pay no per-instruction branch (M33 has no dynamic
  //branch prediction). Keep both arms in sync.
  if (LIKELY (!cRSID_C64.SID[1].ADSRidle || cRSID_C64.SID[2].BaseAddress != 0 || cRSID_C64.SID[3].BaseAddress != 0 || cRSID_C64.SID[4].BaseAddress != 0)) {
  while (cRSID_C64.SampleCycleCnt <= cRSID_C64.SampleClockRatio) {
-  if (++bound_steps > 4096) { cRSID_C64.SampleCycleCnt = cRSID_C64.SampleClockRatio + 1; break; }
 
   if ( CALMLY (!cRSID_C64.RealSIDmode) ) {
    if ( RARELY (cRSID_C64.FrameCycleCnt >= cRSID.FrameCycles) ) {
@@ -245,7 +243,6 @@ cRSID_Output* cRSID_emulateC64 () {
  }
  else {
  while (cRSID_C64.SampleCycleCnt <= cRSID_C64.SampleClockRatio) {
-  if (++bound_steps > 4096) { cRSID_C64.SampleCycleCnt = cRSID_C64.SampleClockRatio + 1; break; }
 
   if ( CALMLY (!cRSID_C64.RealSIDmode) ) {
    if ( RARELY (cRSID_C64.FrameCycleCnt >= cRSID.FrameCycles) ) {

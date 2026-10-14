@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- cRSID micro-optimizations for the M33 (targeted at heavy tunes like
+  Arkanoid that overrun the render budget): ADSR stepping skips voices
+  proven steady (woken by SID-register writes), the instruction loop
+  skips the ADSR step entirely while all voices are steady, and the
+  memory read/write fast paths bypass the bank-pointer logic for
+  non-IO pages. Crash-safety loop bounds were relocated/removed where
+  measurement showed they never fired.
 - SID engine swap (not yet validated on hardware): the default build now
   plays through cRSID-1.58 in Light profile (integer-only, more accurate:
   cycle-exact CPU/ADSR, fixed 6581 filter bottom, RTI at $DC0C, more digis

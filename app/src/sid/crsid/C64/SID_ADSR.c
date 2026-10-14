@@ -52,6 +52,9 @@ INLINE void cRSID_emulateADSRs (FASTVAR cRSID_SIDinstance *const FASTPTR SID, FA
  //if ( RARELY (cRSID.Paused || SID->BasePtr == NULL) ) return; //printf( "%p-", SID->BasePtr ); //avoid some segfaults when NULL-ing SID4
 
  for (Channel=0; Channel < SID_CHANNELS_RANGE; Channel += SID_CHANNEL_SPACING) {
+  //OPT: skip voices already proven steady (woken by SID-register writes,
+  //see the ADSRsteady hooks in CPU.c); no state can change for them.
+  if (SID->ADSRsteady & (unsigned char)(1u << ((Channel*2+7)>>4))) continue;
 
   ChannelPtr=&SID->BasePtr[Channel]; AD=ChannelPtr[5]; SR=ChannelPtr[6];
   ADSRstatePtr = &(SID->ADSRstate[Channel]);
