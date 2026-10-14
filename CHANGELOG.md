@@ -1,31 +1,45 @@
 # Changelog
 
-## Unreleased
+## 1.0.4
 
-- cRSID micro-optimizations for the M33 (targeted at heavy tunes like
-  Arkanoid that overrun the render budget): envelope stepping is batched
-  once per sample (was per instruction) with a multi-shot rate-counter
-  loop, voices proven steady are skipped and their rate counters frozen
-  cleanly (woken by SID-register writes), and the memory read/write fast
-  paths bypass the bank-pointer logic for non-IO pages. Result: heavy
-  sections ~25% faster than the first port; note attacks may lead by up
-  to one sample (43 us, inaudible). Crash-safety loop bounds were
-  removed where measurement showed they never fire (the watchdog stays).
-- SID engine swap (not yet validated on hardware): the default build now
-  plays through cRSID-1.58 in Light profile (integer-only, more accurate:
-  cycle-exact CPU/ADSR, fixed 6581 filter bottom, RTI at $DC0C, more digis
-  and real RSID support), slimmed for RAM (4 KB IO banks, no ROM banks,
-  computed banking) behind the unchanged `libcsid_*` API. The original
-  cSID-light core stays available with `SIDCLOCK_SID_ENGINE=csid` for A/B
-  comparison; the on-display version grows a `-crsid`/`-csid` suffix while
-  the signed image version is identical for both. Audio buffers shrank
-  512 to 384 frames to fit the bigger engine state (RAM at 99.6%).
-- Optional dual-engine build (`SIDCLOCK_SID_ENGINE=dual`, display
-  suffix `-dual`): legacy cSID-light linked alongside cRSID, sharing
-  one 64 KB C64 RAM with a main-screen toggle button (second row middle,
-  dual builds only) that stops playback, flips the core and restarts the
-  tune. For heavy tunes (e.g. Arkanoid) that overrun the render budget;
-  defaults to the new core.
+New SID engine with a dual-engine safety net, tuned to fit the real-time
+budget on the nRF54L15.
+
+**Features**
+
+- The player now runs cRSID-1.58 (Light profile) instead of the old
+  cSID-light core: cycle-exact CPU/ADSR timing, fixed 6581 filter
+  low-end (Myth), RTI at $DC0C, more digis and real RSID tunes. The
+  default build links both engines: the main-screen button between
+  `BLE R/W` and `SLEEP` toggles cRSID/cSID at runtime for tunes that
+  play oddly (stops playback, flips the core, restarts the tune), and
+  `tools/sidclock_ble.py engine new|old` does the same from the host.
+  `SIDCLOCK_SID_ENGINE=crsid` or `=csid` builds single-engine images
+  for A/B comparison (their display version gains `-crsid`/`-csid`).
+- 2SID/3SID/4SID tune support (PSID v3/v4 and WebSID headers): verified
+  on device with Jammer's 2SID/3SID tunes, up to 68% of the audio
+  render budget; two multi-SID test tunes were added to
+  `sids/fetch-samples.sh`.
+- Independent watchdog (30 s, fed from the main loop) reboots the
+  device instead of freezing if a thread wedges, and the BLE debug
+  snapshot carries crash telemetry: boot count, reset cause, audio/main
+  thread heartbeats and the active engine.
+
+**Internal**
+
+- cRSID slimmed for RAM: 4 KB IO banks, no ROM banks (ROM stubs live in
+  the RAM copy like the old core), computed memory banking, no
+  MD5/SongLengths engine, 320-frame audio buffers; RAM at 99.5%.
+- Render-speed work for the M33 (heavy tunes like Arkanoid overran the
+  budget in the first port): envelope stepping batched once per sample
+  with a multi-shot rate-counter loop, steady voices skipped and their
+  rate counters frozen cleanly (woken by SID register writes), memory
+  read/write fast paths for non-IO pages, and crash-safety loop bounds
+  removed where measurement showed they never fire. Heavy sections are
+  ~25% faster than the first port and Arkanoid now fits; normal tunes
+  cost ~10% more CPU than the old engine (was 1.7-1.9x at the first
+  port). Note attacks may lead by up to one sample (43 us); envelope
+  rates are unchanged.
 
 ## 1.0.3
 

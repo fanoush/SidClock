@@ -1964,7 +1964,7 @@ static void draw_main_screen(void)
 #ifdef SID_ENGINE_DUAL
 	draw_button(UB_X2, UB_Y2, UB_W, UB_H,
 		    sid_player_engine_legacy() ? "cSID" : "cRSID",
-		    sid_player_engine_legacy());
+		    false); /* neither engine is "selected": it is an A/B toggle */
 #endif
 	draw_button(UB_X3, UB_Y2, UB_W, UB_H, "SLEEP", false);
 

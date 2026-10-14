@@ -12,15 +12,14 @@ app/src/
   audio.c/.h         I2S output engine (nrfx register level) + SID/tone mixing
   sid_player.cpp/.h  C bridge between the UI/audio and the SID emulator
   sid/               vendored SID core (libcsid.h API) + PSID streaming loader:
-                       - crsid/ + libcrsid_shim.c (default): cRSID-1.58 Light,
+                       - crsid/ + libcrsid_shim.c: cRSID-1.58 Light,
                          integer-only, slimmed for RAM (4 KB IO banks, no ROM
                          banks, computed banking)
-                       - libcsidlight.cpp (legacy): original cSID-light;
-                         select at build time with SIDCLOCK_SID_ENGINE=csid
-                         (see app/build.sh), for A/B comparison;
-                         =dual links both with a main-screen toggle button
-                         (middle of the second row, dual builds only) that
-                         stops playback, flips the core and restarts the tune
+                       - libcsidlight.cpp (legacy): original cSID-light
+                       The default build links both (SIDCLOCK_SID_ENGINE=dual)
+                       with a main-screen toggle button (middle of the second
+                       row) that stops playback, flips the core and restarts
+                       the tune; =crsid/=csid build single-engine images.
   display_gc9307.c   SPI panel driver (custom framing, power states)
   opt400x.c          OPT3007/OPT4001 ambient light driver
   font1524.h         15x24 bitmap font
