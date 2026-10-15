@@ -27,7 +27,7 @@ ROOT="$(cd "$HERE/.." && pwd)"
 [ -f "$ROOT/local.conf" ] && . "$ROOT/local.conf"
 SDK="${SIDCLOCK_SDK:-$ROOT/.sdk}"
 
-VERSION="1.0.4"
+VERSION="1.0.5"
 
 export ZEPHYR_BASE="$SDK/sdk/zephyr"
 export ZEPHYR_TOOLCHAIN_VARIANT=zephyr

@@ -30,7 +30,7 @@ void cRSID_createSIDchip (cRSID_SIDinstance* SID, unsigned short model, char cha
  //static cRSID_C64instance* C64 = &cRSID_C64;
 
  //SID->C64 = C64;
- SID->ADSRidle = SID->ADSRsteady = 0; //OPT: fresh emulation state (see SID_ADSR.c)
+ SID->ADSRacc = 0; SID->ADSRthr = 0; SID->ADSRquiet = 0; //OPT: fresh emulation state; thr=0 forces a pass at the first instruction (see SID_ADSR.c)
  SID->ChipModel = model; SID->Channel=channel;
  if( baseaddress>=0xD400 && (baseaddress<0xD800 || (0xDE00<=baseaddress && baseaddress<=0xDFE0)) ) { //check valid address, avoid Color-RAM
   SID->BaseAddress = baseaddress; SID->BasePtr = &cRSID_C64.IObankWR[((baseaddress) & 0xFFF)]; SID->BasePtrRD = &cRSID_C64.IObankRD[((baseaddress) & 0xFFF)];
@@ -43,7 +43,7 @@ void cRSID_createSIDchip (cRSID_SIDinstance* SID, unsigned short model, char cha
 
 void cRSID_initSIDchip (cRSID_SIDinstance* SID) {
  static unsigned char Channel;
- SID->ADSRidle = SID->ADSRsteady = 0; //OPT: fresh emulation state (see SID_ADSR.c)
+ SID->ADSRacc = 0; SID->ADSRthr = 0; SID->ADSRquiet = 0; //OPT: fresh emulation state; thr=0 forces a pass at the first instruction (see SID_ADSR.c)
  for (Channel = 0; Channel < 21; Channel+=7) {
   SID->ADSRstate[Channel] = 0; SID->RateCounter[Channel] = 0;
   SID->EnvelopeCounter[Channel] = 0; SID->ExponentCounter[Channel] = 0;

@@ -20,12 +20,11 @@ static const unsigned char cRSID_ADSR_DAC_6581[] = {
 };
 
 
-INLINE void cRSID_emulateADSRs (FASTVAR cRSID_SIDinstance *const FASTPTR SID, FASTVAR char cycles) {
+INLINE void cRSID_emulateADSRs (FASTVAR cRSID_SIDinstance *const FASTPTR SID, FASTVAR unsigned short prefix, FASTVAR unsigned char lastc) {
  static enum {
   SID_CHANNEL_SPACING = 7, SID_CHANNEL_COUNT = 3, CHANNEL2_INDEX = (2*SID_CHANNEL_SPACING), SID_CHANNELS_RANGE = (SID_CHANNEL_SPACING * SID_CHANNEL_COUNT),
  } Specs;
  static enum { GATE_BITVAL=0x01, ATTACK_BITVAL=0x80, DECAYSUSTAIN_BITVAL=0x40, HOLDZEROn_BITVAL=0x10 } ADSRstateBits;
-
  static const short ADSRprescalePeriods[16] = {
   9, 32, 63, 95, 149, 220, 267, 313, 392, 977, 1954, 3126, 3907, 11720, 19532, 31251
  };
@@ -41,28 +40,60 @@ INLINE void cRSID_emulateADSRs (FASTVAR cRSID_SIDinstance *const FASTPTR SID, FA
   1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1
  };
 
- FASTVAR unsigned char Channel;
- static unsigned char PrevGate, AD, SR;
- FASTVAR unsigned short PrescalePeriod;
+ FASTVAR unsigned char Channel, vi, PrevGate, AD, SR, bit, write_pending;
+ FASTVAR unsigned short PrescalePeriod, Distance, thr;
  FASTVAR unsigned char * FASTPTR ChannelPtr, * FASTPTR ADSRstatePtr, * FASTPTR EnvelopeCounterPtr, * FASTPTR ExponentCounterPtr;
  FASTVAR unsigned short * FASTPTR RateCounterPtr;
+ FASTVAR unsigned short r, crossings;
+ FASTVAR unsigned int total;
 
+ //OPT: event-driven envelope pass with exact upstream semantics.
+ //The caller (C64.c loop tail) folds the 1MHz cycles of consecutive
+ //instructions into SID->ADSRacc and calls here when those cycles can reach
+ //the earliest possible envelope event of a non-quiet voice, or right after
+ //a SID-register write (ADSRthr=0, see CPU.c). 'prefix' is the cycles of the
+ //folded calls: for every one of them a shot was provably impossible, so
+ //they collapse into one counter add (which cannot wrap: prefix < thr <=
+ //each voice's distance to 0x8000). 'lastc' is the current call's cycles,
+ //evaluated with the full upstream window test.
+ //A voice is 'quiet' while its envelope holds a level (sustain level or
+ //released to zero): its shots can then only bounce the rate counter modulo
+ //the period and step the exponent counter (resets at its per-envelope
+ //period), never moving the envelope. That is exactly replayable in one
+ //modulo step (no stalls: cycles/call <= 7 < 9 <= any period), from the
+ //period cached when the voice went quiet, so quiet voices are kept out of
+ //the event scheduling entirely. A register write (write_pending) folds its
+ //pending cycles the same way first, then evaluates the write's call with
+ //the full upstream logic so edge/period changes apply on that exact call.
 
- //'Paused' causes immediate stopping in audio-buffer thread, so SID-baseaddress changes during tune-switching won't give segfaults
- //if ( RARELY (cRSID.Paused || SID->BasePtr == NULL) ) return; //printf( "%p-", SID->BasePtr ); //avoid some segfaults when NULL-ing SID4
+ write_pending = (unsigned char)(SID->ADSRthr == 0); //the pass was forced by a SID-reg write
 
- if (SID->ADSRidle) return; //OPT: all voices proven steady; woken by SID-register writes (see CPU.c)
+ thr = 0x8000; //(no-event sentinel; real distances are always <= 0x7FFF)
 
- for (Channel=0; Channel < SID_CHANNELS_RANGE; Channel += SID_CHANNEL_SPACING) {
-  //OPT: skip voices already proven steady (woken by SID-register writes,
-  //see the ADSRsteady hooks in CPU.c); no state can change for them.
-  if (SID->ADSRsteady & (unsigned char)(1u << ((Channel*2+7)>>4))) continue;
+ for (vi = 0, Channel = 0; Channel < SID_CHANNELS_RANGE; Channel += SID_CHANNEL_SPACING, ++vi) {
+
+  bit = (unsigned char)(1u << ((Channel*2+7)>>4)); //Channel is 0/7/14, no division
 
   ChannelPtr=&SID->BasePtr[Channel]; AD=ChannelPtr[5]; SR=ChannelPtr[6];
   ADSRstatePtr = &(SID->ADSRstate[Channel]);
   RateCounterPtr = &(SID->RateCounter[Channel]);
   EnvelopeCounterPtr = &(SID->EnvelopeCounter[Channel]);
   ExponentCounterPtr = &(SID->ExponentCounter[Channel]);
+
+  if (SID->ADSRquiet & bit) { //replay the held-level time exactly with modulo math
+   PrescalePeriod = SID->ADSRqperiod[vi];
+   total = (unsigned int)*RateCounterPtr + prefix;
+   if (!write_pending) total += lastc; //pure cycle-fold pass: fold the current call too
+   crossings = (unsigned short)(total / PrescalePeriod); //every crossing is a shot (RC < period, so the window always matches)
+   *RateCounterPtr = (unsigned short)(total - (unsigned int)crossings * PrescalePeriod);
+   if (crossings) { //shots step the exponent counter, which resets at its per-envelope period
+    if (ADSRexponentPeriods[*EnvelopeCounterPtr] == 1) *ExponentCounterPtr = 0;
+    else *ExponentCounterPtr = (unsigned char)(((unsigned short)*ExponentCounterPtr + crossings) % ADSRexponentPeriods[*EnvelopeCounterPtr]);
+   }
+   if (!write_pending) continue; //no event to schedule until a SID-register write
+   SID->ADSRquiet &= (unsigned char)~bit; //the write's call must be evaluated in full below
+  }
+  else *RateCounterPtr += prefix; //folded calls: shot impossible, wrap impossible (see above)
 
   PrevGate = (*ADSRstatePtr & GATE_BITVAL);
   if ( RARELY (PrevGate != (ChannelPtr[4] & GATE_BITVAL)) ) { //gatebit-change?
@@ -74,9 +105,9 @@ INLINE void cRSID_emulateADSRs (FASTVAR cRSID_SIDinstance *const FASTPTR SID, FA
   else if (*ADSRstatePtr & DECAYSUSTAIN_BITVAL) PrescalePeriod = ADSRprescalePeriods[ AD & 0x0F ];
   else PrescalePeriod = ADSRprescalePeriods[ SR & 0x0F ];
 
-  *RateCounterPtr += cycles; if ( RARELY (*RateCounterPtr >= 0x8000) ) *RateCounterPtr -= 0x8000; //*RateCounterPtr &= 0x7FFF; //can wrap around (ADSR delay-bug: short 1st frame)
+  *RateCounterPtr += lastc; if ( RARELY (*RateCounterPtr >= 0x8000) ) *RateCounterPtr -= 0x8000; //can wrap around (ADSR delay-bug: short 1st frame)
 
-  while ( PrescalePeriod <= *RateCounterPtr ) { //OPT: cycles is the whole sample span now (batch call); fire every shot it contains
+  if ( RARELY (PrescalePeriod <= *RateCounterPtr && *RateCounterPtr < PrescalePeriod+lastc) ) { //ratecounter shot (matches rateperiod) (in genuine SID ratecounter is LFSR)
    *RateCounterPtr -= PrescalePeriod; //reset rate-counter on period-match
    if ( (*ADSRstatePtr & ATTACK_BITVAL) || ++(*ExponentCounterPtr) == ADSRexponentPeriods[*EnvelopeCounterPtr] ) {
     *ExponentCounterPtr = 0;
@@ -89,17 +120,28 @@ INLINE void cRSID_emulateADSRs (FASTVAR cRSID_SIDinstance *const FASTPTR SID, FA
       --(*EnvelopeCounterPtr); //resid adds 1 cycle delay, we omit that mechanism here
       if (*EnvelopeCounterPtr==0) *ADSRstatePtr &= ~HOLDZEROn_BITVAL;
    }}}
-   { FASTVAR unsigned char st = *ADSRstatePtr; FASTVAR unsigned char env = *EnvelopeCounterPtr; //OPT: re-prove this voice at its envelope matches
-     FASTVAR unsigned char bit = (unsigned char)(1u << ((Channel*2+7)>>4)); //Channel is 0/7/14, no division
-     if ((st & ATTACK_BITVAL) || ((st & DECAYSUSTAIN_BITVAL) && env != (SR&0xF0)+(SR>>4)) || (!(st & (ATTACK_BITVAL|DECAYSUSTAIN_BITVAL)) && (st & HOLDZEROn_BITVAL) && env != 0)) SID->ADSRsteady &= (unsigned char)~bit;
-     else { SID->ADSRsteady |= bit; *RateCounterPtr = 0; } //OPT: freeze the rate counter cleanly while steady (no burst on the next wake)
-     if (SID->ADSRsteady == 0x07) SID->ADSRidle = 1;
-     if (SID->ADSRsteady & bit) break; }
-   //phase may have changed mid-batch: recompute the period for the next shot
+   //the shot may have changed the phase: the distance below needs the new period
    if (*ADSRstatePtr & ATTACK_BITVAL) PrescalePeriod = ADSRprescalePeriods[ AD >> 4 ];
    else if (*ADSRstatePtr & DECAYSUSTAIN_BITVAL) PrescalePeriod = ADSRprescalePeriods[ AD & 0x0F ];
    else PrescalePeriod = ADSRprescalePeriods[ SR & 0x0F ];
-  }}
+  }
 
+  //quiet check: the envelope holds a level (sustain level, or released to
+  //zero) and the counter is below its period (a stalled counter needs its
+  //0x8000-wrap shot scheduled): shots then would not move the envelope
+  //until a register write, so the voice can be folded by modulo math.
+  if ( *RateCounterPtr < PrescalePeriod && !(*ADSRstatePtr & ATTACK_BITVAL) &&
+       ( ((*ADSRstatePtr & DECAYSUSTAIN_BITVAL) && *EnvelopeCounterPtr == (SR&0xF0)+(SR>>4)) ||
+         (!(*ADSRstatePtr & (DECAYSUSTAIN_BITVAL|HOLDZEROn_BITVAL)) && *EnvelopeCounterPtr == 0) ) ) {
+   SID->ADSRquiet |= bit; SID->ADSRqperiod[vi] = PrescalePeriod;
+   continue; //no event to schedule for a quiet voice
+  }
+  SID->ADSRquiet &= (unsigned char)~bit;
+
+  r = *RateCounterPtr; //distance to the next shot, or to the 0x8000 wrap that retries a stalled counter
+  Distance = (r < PrescalePeriod) ? (unsigned short)(PrescalePeriod - r) : (unsigned short)(0x8000 - r);
+  if (Distance < thr) thr = Distance;
+ }
+
+ SID->ADSRthr = thr;
 }
-

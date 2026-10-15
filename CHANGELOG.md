@@ -1,5 +1,32 @@
 # Changelog
 
+## 1.0.5
+
+SID engine: exact ADSR envelope timing restored while keeping the render
+speed. Fixes the new engine losing beats and voices in tunes like Last
+Ninja 2, second subsong.
+
+**Internal**
+
+- 1.0.4 stepped the envelopes once per sample by replaying every shot
+  the sample contained. That rescheduled shots that upstream cRSID
+  leaves stalled (its rate counter is only tested against a window of
+  the current instruction's cycles), which changed envelope phases and
+  dropped envelope steps for seconds at a time in some tunes.
+- The envelope pass is event-driven now: the CPU loop folds the cycles
+  of consecutive instructions into a per-SID accumulator and runs the
+  ADSR emulation only when the earliest shot (or the 0x8000 wrap that
+  retries a stalled counter) can be reached within them, or right after
+  a SID-register write; provably shotless folded calls collapse into a
+  single counter add, and voices holding a level (sustain, released to
+  zero) fold through exact modulo math. No sample-boundary rounding
+  anywhere, so envelope timing matches upstream again.
+- Host verification: bit-identical to upstream cRSID-1.58 on all 20
+  sample tunes (single- and multi-SID, including the 2SID/3SID set);
+  Last Ninja 2 subsong 2 renders byte-identical WAVs over 60 s. On the
+  host worst-window profiler Arkanoid is back within a few percent of
+  1.0.4's render time and multi-SID tunes stay well inside the budget.
+
 ## 1.0.4
 
 New SID engine with a dual-engine safety net, tuned to fit the real-time

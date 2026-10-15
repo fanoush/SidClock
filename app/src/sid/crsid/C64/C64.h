@@ -77,8 +77,10 @@ typedef struct cRSID_SIDinstance {
  unsigned char*     BasePtrRD;     //SID-baseaddress location in host's memory (SID OSC3/ENV3 written here for readback)
  //ADSR-related:
  unsigned char      ADSRstate[15];
- unsigned char      ADSRidle; //OPT: skip ADSR stepping while all voices steady (set on SID-reg writes, cleared below)
- unsigned char      ADSRsteady; //OPT: per-voice steady bits (evaluated at envelope matches, see SID_ADSR.c)
+ unsigned short     ADSRacc; //OPT: folded 1MHz cycles since the last envelope pass (see the C64.c loop tail)
+ unsigned short     ADSRthr; //OPT: cycles until the next possible envelope event; a SID-reg write sets it 0 to force a pass
+ unsigned char      ADSRquiet; //OPT: voices holding a level (sustain/zero): folded by modulo math, no event scheduling
+ unsigned short     ADSRqperiod[3]; //OPT: period cached when a voice went quiet (the folded math uses it)
  unsigned short     RateCounter[15];
  unsigned char      EnvelopeCounter[15];
  unsigned char      ExponentCounter[15];
@@ -206,7 +208,7 @@ void               cRSID_createSIDchip (cRSID_SIDinstance* SID, unsigned short m
 void               cRSID_initSIDchip   (cRSID_SIDinstance* SID);
 static INLINE int  cRSID_emulateHQresampledSID (FASTVAR cRSID_SIDinstance *const FASTPTR SID, FASTVAR char cycles);
 // C64/SID_ADSR.c
-void               cRSID_emulateADSRs  (FASTVAR cRSID_SIDinstance *const FASTPTR SID, FASTVAR char cycles);
+void               cRSID_emulateADSRs  (FASTVAR cRSID_SIDinstance *const FASTPTR SID, FASTVAR unsigned short prefix, FASTVAR unsigned char lastc);
 // C64/SID_OscWaves.c
 int             cRSID_emulateSID_light (FASTVAR cRSID_SIDinstance *const FASTPTR SID); //calls output-stage too
 cRSID_SIDwavOutput cRSID_emulateHQwaves(FASTVAR cRSID_SIDinstance *const FASTPTR SID, FASTVAR char cycles); //, FASTVAR char filter);

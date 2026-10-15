@@ -193,7 +193,6 @@ cRSID_Output* cRSID_emulateC64 () {
  //Cycle-based/-paced part of emulations:
 
 
- unsigned int adsr_cycles = 0; //OPT: ADSR is stepped once per sample with all cycles accumulated (cheaper than per instruction)
  while (cRSID_C64.SampleCycleCnt <= cRSID_C64.SampleClockRatio) {
 
   if ( CALMLY (!cRSID_C64.RealSIDmode) ) {
@@ -230,18 +229,34 @@ cRSID_Output* cRSID_emulateC64 () {
   }
 
   cRSID_C64.SampleCycleCnt += (InstructionCycles << CRSID_CLOCK_FRACTIONAL_BITS);
-  adsr_cycles += InstructionCycles;
+
+  //OPT: event-driven envelope stepping (exact upstream window semantics).
+  //Per SID the instruction cycles fold into ADSRacc and a pass runs only
+  //when they can reach the earliest possible envelope event; SID-register
+  //writes force a pass (ADSRthr=0, see CPU.c). Folded calls collapse into
+  //the prefix add inside the pass (see SID_ADSR.c).
+  { FASTVAR unsigned short acc;
+    acc = cRSID_C64.SID[1].ADSRacc + InstructionCycles;
+    if ( acc >= cRSID_C64.SID[1].ADSRthr ) { cRSID_emulateADSRs( &cRSID_C64.SID[1], (unsigned short)(acc - InstructionCycles), InstructionCycles ); acc = 0; }
+    cRSID_C64.SID[1].ADSRacc = acc;
+  }
+  if (cRSID_C64.SID[2].BaseAddress != 0) { FASTVAR unsigned short acc;
+    acc = cRSID_C64.SID[2].ADSRacc + InstructionCycles;
+    if ( acc >= cRSID_C64.SID[2].ADSRthr ) { cRSID_emulateADSRs( &cRSID_C64.SID[2], (unsigned short)(acc - InstructionCycles), InstructionCycles ); acc = 0; }
+    cRSID_C64.SID[2].ADSRacc = acc;
+  }
+  if (cRSID_C64.SID[3].BaseAddress != 0) { FASTVAR unsigned short acc;
+    acc = cRSID_C64.SID[3].ADSRacc + InstructionCycles;
+    if ( acc >= cRSID_C64.SID[3].ADSRthr ) { cRSID_emulateADSRs( &cRSID_C64.SID[3], (unsigned short)(acc - InstructionCycles), InstructionCycles ); acc = 0; }
+    cRSID_C64.SID[3].ADSRacc = acc;
+  }
+  if (cRSID_C64.SID[4].BaseAddress != 0) { FASTVAR unsigned short acc;
+    acc = cRSID_C64.SID[4].ADSRacc + InstructionCycles;
+    if ( acc >= cRSID_C64.SID[4].ADSRthr ) { cRSID_emulateADSRs( &cRSID_C64.SID[4], (unsigned short)(acc - InstructionCycles), InstructionCycles ); acc = 0; }
+    cRSID_C64.SID[4].ADSRacc = acc;
+  }
 
  } //end of 1MHz cycle-based emulations (CPU, VIC, CIA, ADSR)
-
- //OPT: step the envelopes once per sample with the sample's total cycles
- //(the loop above no longer calls ADSR per instruction).
- if (adsr_cycles != 0) {
-  cRSID_emulateADSRs( &cRSID_C64.SID[1], (char)adsr_cycles );
-  if (cRSID_C64.SID[2].BaseAddress != 0) cRSID_emulateADSRs( &cRSID_C64.SID[2], (char)adsr_cycles );
-  if (cRSID_C64.SID[3].BaseAddress != 0) cRSID_emulateADSRs( &cRSID_C64.SID[3], (char)adsr_cycles );
-  if (cRSID_C64.SID[4].BaseAddress != 0) cRSID_emulateADSRs( &cRSID_C64.SID[4], (char)adsr_cycles );
- }
  cRSID_C64.SampleCycleCnt -= cRSID_C64.SampleClockRatio;
 
 
