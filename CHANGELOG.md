@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.0.6
+
+Two weekday fixes; the date itself was always right.
+
+**Fixes**
+
+- The clock header and idle screen showed a day of week two days off
+  (e.g. "Sun" for a Friday): the weekday index was computed with a
+  constant that assumed a different epoch weekday. It now uses
+  "1970-01-01 was a Thursday" like the CTS time service already did.
+- REPEAT alarms used the same off-by-two index, so they rang two days
+  off the selected weekday (a Sunday alarm went off on Friday).
+
 ## 1.0.5
 
 SID engine: exact ADSR envelope timing restored while keeping the render

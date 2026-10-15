@@ -1919,7 +1919,8 @@ static void date_string(char *buf, size_t len)
 	int y, m, d;
 
 	epoch_to_date(epoch, &y, &m, &d);
-	snprintf(buf, len, "%s %02d %s", wd[(days + 6U) % 7U], d,
+	/* Unix day 0 (1970-01-01) was a Thursday: index 4 in this Sun-first table */
+	snprintf(buf, len, "%s %02d %s", wd[(days + 4U) % 7U], d,
 		 month_names[m - 1]);
 }
 
@@ -2758,7 +2759,8 @@ static void alarm_service(void)
 	uint32_t mins = minute % (24U * 60U);
 	uint8_t hh = (uint8_t)(mins / 60U);
 	uint8_t mm = (uint8_t)(mins % 60U);
-	uint32_t wd_mon = (epoch / 86400U + 5U) % 7U; /* 0 = Monday */
+	/* 0 = Monday; Unix day 0 (1970-01-01) was a Thursday = index 3 */
+	uint32_t wd_mon = (epoch / 86400U + 3U) % 7U;
 
 	if (alarm_ringing) {
 		if ((int32_t)(k_uptime_get_32() - alarm_until) >= 0) {
