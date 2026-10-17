@@ -2,7 +2,8 @@
 
 ## 1.0.6
 
-Two weekday fixes; the date itself was always right.
+Weekday fixes in the clock and in REPEAT alarms, a `NEXT SUB` auto-advance
+fix, and a leaner release build (~15 KB RAM freed).
 
 **Fixes**
 
@@ -29,6 +30,10 @@ Two weekday fixes; the date itself was always right.
 
 **Internal**
 
+- `threads` (BLE debug command `1D`) latches the per-thread stack
+  high-water marks so a suspected overflow can be sized from the host (a
+  thread with less than 256 B free is flagged); it is also how the stacks
+  kept in the release build were checked.
 - RAM: about 15 KB of the 188 KB is freed. The 8 KB system heap is
   disabled (`CONFIG_HEAP_MEM_POOL_SIZE=0`, verified: nothing in the image
   calls `malloc`/`k_malloc`/`operator new`) and the release RTT log buffer
