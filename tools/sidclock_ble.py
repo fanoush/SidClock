@@ -33,8 +33,8 @@ Developer/debug commands (see docs/ble-services.md; behaviour may change):
             verify the clock guard absorbs it
   blemode   BLE access mode: rw (default) | ro (no writes / no OTA) |
             off (advertising off) - only accepted while in rw
-  threads   per-thread stack high-water marks in creation order
-            (overflow hunt - flags threads with <256 B free)
+  threads   per-thread stack high-water marks (name, size, free) in
+            creation order - flags threads with <256 B free
 
 The bring-up tests (click, beep, tone, rate, tonefreq, tonestart,
 tonestop) exist only in debug builds (SIDCLOCK_DEBUG=1 ./build.sh); a
@@ -509,7 +509,7 @@ async def _poll_marker(c, marker):
     for _ in range(15):
         await asyncio.sleep(1)
         raw = await c.read_gatt_char(DBG_CHAR)
-        if len(raw) < 50:
+        if len(raw) < 96:
             raise SystemExit("short snapshot (old firmware?)")
         if raw[34] == marker:
             return raw
@@ -517,25 +517,63 @@ async def _poll_marker(c, marker):
 
 
 async def cmd_threads(addr, value=None):
-    """Per-thread stack high-water marks in creation order."""
+    """Per-thread stack high-water marks (name, size, free) in creation order."""
     async with connect(addr) as c:
-        rows = []
-        for page in (0, 1):
+        raws = []
+        pages = 2  # firmware without thread names: 5 entries per page
+        for page in range(3):
             payload = bytes([0x1D]) if page == 0 else bytes([0x1D, page])
             await c.write_gatt_char(DBG_CHAR, payload, response=True)
             raw = await _poll_marker(c, 0x1D)
-            for i in range(5):
-                size = raw[36 + 4 * i] | (raw[37 + 4 * i] << 8)
-                free = raw[38 + 4 * i] | (raw[39 + 4 * i] << 8)
-                if size == 0:
-                    continue
-                rows.append((size, free))
+            raws.append(raw)
+            if page == 0:
+                pages = _stack_page_count(raw)
+            if page + 1 >= pages:
+                break
+    rows = _parse_stack_pages(raws)
     print(f"threads: {len(rows)} (creation order)")
-    for i, (size, free) in enumerate(rows):
+    wid = max((len(name) for name, _, _ in rows), default=4)
+    for i, (name, size, free) in enumerate(rows):
         used = size - free
         flag = "  <-- LOW!" if free < 256 else ""
-        print(f"  [{i}] size {size:5d}  free {free:5d}  "
+        print(f"  [{i}] {name:<{wid}}  size {size:5d}  free {free:5d}  "
               f"used {used:5d} ({100 * used // size} %){flag}")
+
+
+def _stack_page_count(raw):
+    """3 snapshot pages for the named layout, 2 for the older one.
+
+    Bit 7 of the page byte in [35] is set when the firmware fills the name
+    fields, which is also what changes the entries per page from 5 to 4.
+    """
+    return 3 if raw[35] & 0x80 else 2
+
+
+def _parse_stack_pages(raws):
+    """(name, size, free) rows from the 0x1D snapshot pages.
+
+    Names live in bytes [52..95] as 11-byte fields, aligned with the
+    (size, free) pairs at [36..51], 4 threads per page; bit 7 of the page
+    byte in [35] marks that layout. A firmware that predates it keeps the
+    5-per-page pairs at [36..55] and leaves non-text bytes where the names
+    would be, so those rows are labelled by position instead.
+    """
+    rows = []
+    for page, raw in enumerate(raws):
+        named = bool(raw[35] & 0x80)
+        per = 4 if named else 5
+        for i in range(per):
+            size = raw[36 + 4 * i] | (raw[37 + 4 * i] << 8)
+            free = raw[38 + 4 * i] | (raw[39 + 4 * i] << 8)
+            if size == 0:
+                continue
+            name = f"#{per * page + i}"
+            if named:
+                label = raw[52 + 11 * i:63 + 11 * i].split(b"\0")[0]
+                if label:
+                    name = label.decode("ascii", "replace").strip()
+            rows.append((name, size, free))
+    return rows
 
 
 def main():

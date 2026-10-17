@@ -430,20 +430,27 @@ static void home_write_dir(void); /* below */
 static int16_t ls_start = -1; /* pending /home listing request (page start) */
 
 /* Stack telemetry (debug command 0x1D [+ u8 page]): per-thread stack
- * (size, free) pairs in creation order, 5 per page at snapshot [36..55]
- * ([34] marker, [35] page<<7 | count). Sizes identify the threads
- * (main/mgmt 4096, bt_rx 2048, sysworkq 1024, ...). */
-#define STACKS_MAX 10U
+ * (size, free) pairs plus thread names in creation order, 4 per page.
+ * Snapshot [34] marker, [35] page | 0x80 (bit 7 = names present),
+ * [36..51] 4 x (size, free) u16 LE, [52..95] the matching 11-byte names.
+ * The bit tells an older host that these bytes are not names. */
+#define STACKS_MAX 12U
+#define STACKS_PER_PAGE 4U
+#define STACKS_NAME_MAX 11U /* including the terminator */
+#define STACKS_NAME_OFF 52U
 static bool stacks_pending;
 static bool stacks_valid;
 static uint8_t stacks_page;
 static uint8_t stacks_n;
 static uint16_t stacks_size[STACKS_MAX];
 static uint16_t stacks_free[STACKS_MAX];
+static char stacks_name[STACKS_MAX][STACKS_NAME_MAX];
 
 static void stacks_cb(struct thread_analyzer_info *info)
 {
+	const char *nm = info->name != NULL ? info->name : "?";
 	uint32_t free;
+	size_t k = 0U;
 
 	if (stacks_n >= STACKS_MAX) {
 		return;
@@ -453,6 +460,12 @@ static void stacks_cb(struct thread_analyzer_info *info)
 		       : (uint32_t)(info->stack_size - info->stack_used);
 	stacks_size[stacks_n] = (uint16_t)MIN(info->stack_size, 0xFFFFU);
 	stacks_free[stacks_n] = (uint16_t)MIN(free, 0xFFFFU);
+	stacks_name[stacks_n][0] = '\0';
+	while (k < STACKS_NAME_MAX - 1U && nm[k] != '\0') {
+		stacks_name[stacks_n][k] = nm[k];
+		k++;
+	}
+	stacks_name[stacks_n][k] = '\0';
 	stacks_n++;
 }
 
@@ -1336,21 +1349,24 @@ static ssize_t ble_dbg_read(struct bt_conn *conn,
 	}
 
 	if (stacks_valid && ls_start < 0) {
-		/* stack telemetry (command 0x1D): [34] marker, [35] page,
-		 * [36..] up to 5 x (size, free) u16 LE pairs, creation order */
-		uint8_t off = stacks_page * 5U;
+		/* stack telemetry (command 0x1D): [34] marker, [35] page |
+		 * 0x80, [36..51] up to 4 x (size, free) u16 LE pairs and
+		 * [52..95] the matching 11-byte names, 4 threads per page */
+		uint8_t off = stacks_page * STACKS_PER_PAGE;
 		uint8_t n = 0U;
 
 		ble_dbg[34] = 0x1DU;
-		ble_dbg[35] = stacks_page;
-		memset(ble_dbg + 36, 0, 20);
-		while (n < 5U && off + n < stacks_n) {
+		ble_dbg[35] = (uint8_t)(stacks_page | 0x80U);
+		memset(ble_dbg + 36, 0, 60);
+		while (n < STACKS_PER_PAGE && off + n < stacks_n) {
 			ble_dbg[36 + 4U * n] = (uint8_t)stacks_size[off + n];
 			ble_dbg[37 + 4U * n] =
 				(uint8_t)(stacks_size[off + n] >> 8);
 			ble_dbg[38 + 4U * n] = (uint8_t)stacks_free[off + n];
 			ble_dbg[39 + 4U * n] =
 				(uint8_t)(stacks_free[off + n] >> 8);
+			memcpy(ble_dbg + STACKS_NAME_OFF + STACKS_NAME_MAX * n,
+			       stacks_name[off + n], STACKS_NAME_MAX);
 			n++;
 		}
 		stacks_valid = false;
@@ -1566,15 +1582,15 @@ static ssize_t ble_dbg_write(struct bt_conn *conn,
 		break;
 	case 0x1D:
 		/* Stack telemetry for the overflow hunt: latch per-thread
-		 * (size, free) pairs for the snapshot read. Optional 2nd
-		 * byte selects page 0/1 (5 threads each). */
+		 * (size, free) pairs and names for the snapshot read.
+		 * Optional 2nd byte selects page 0..2 (4 threads each). */
 		if (len != 1U && len != 2U) {
 			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
 		}
 		if (stacks_pending) {
 			return BT_GATT_ERR(BT_ATT_ERR_VALUE_NOT_ALLOWED);
 		}
-		stacks_page = (len == 2U) ? (p[1] & 1U) : 0U;
+		stacks_page = (len == 2U) ? (p[1] & 3U) : 0U;
 		stacks_pending = true;
 		stacks_valid = false;
 		LOG_INF("stack telemetry armed (page %u)", stacks_page);
