@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.7
+
+**Internal**
+
+- `threads` (BLE debug command `1D`) now reports the thread name with each
+  stack high-water mark, 4 threads per page, so a tight stack can be
+  attributed without recognising its size. Verified on hardware.
+
 ## 1.0.6
 
 Weekday fixes in the clock and in REPEAT alarms, a `NEXT SUB` auto-advance

@@ -38,7 +38,7 @@ ROOT="$(cd "$HERE/.." && pwd)"
 [ -f "$ROOT/local.conf" ] && . "$ROOT/local.conf"
 SDK="${SIDCLOCK_SDK:-$ROOT/.sdk}"
 
-VERSION="1.0.6"
+VERSION="1.0.7"
 
 # Always passed explicitly: the CMake cache would otherwise keep an earlier
 # build's value (same caveat as SIDCLOCK_SID_ENGINE below).
