@@ -5,15 +5,20 @@
 - Reads **PSID/RSID** tunes from `/home` on the external flash, in file
   name order. Files up to ~200 kB are streamed from flash into the
   emulator's 64 kB C64 map.
-- Starts each tune at the **default subtune** from the PSID header; the
-  SID screen has SUB-/SUB+ transport plus play/pause/stop.
+- A tune loaded by hand (tune change, SUB+/-, PLAY, BLE `sid`/`sidname`)
+  starts at the **default subtune** from the PSID header; the SID screen
+  has SUB-/SUB+ transport plus play/pause/stop.
 - **Chip model**: `auto` follows the PSID flags; 6581/8580 can be forced
   for A/B comparison. Switching reloads the tune.
 - **Song length sidecars**: `<stem>.len` contains seconds per subsong
   (space/comma/newline separated; a single value applies to all). Without
   a sidecar the tune simply loops.
 - **End modes** (`END:` button): `LOOP`, `NEXT TUNE` or `NEXT SUB`
-  (default) - what happens when the current length expires.
+  (default) - what happens when the current length expires. In `NEXT SUB`
+  mode an automatically loaded tune starts at its **first** subtune, so
+  the subtunes before the header default are not skipped on the way
+  through; `NEXT TUNE` starts each tune at the header default (the
+  author's pick).
 - **STIL sidecar**: `<stem>.stil` holds one line per subsong name (may be
   empty), the tune-level comment line, then optional `@<subsong> <text>`
   lines with per-subsong notes (HVSC's `(#N)` comments). The player shows

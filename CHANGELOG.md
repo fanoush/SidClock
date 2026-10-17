@@ -12,6 +12,11 @@ Two weekday fixes; the date itself was always right.
   "1970-01-01 was a Thursday" like the CTS time service already did.
 - REPEAT alarms used the same off-by-two index, so they rang two days
   off the selected weekday (a Sunday alarm went off on Friday).
+- `NEXT SUB` auto-advance started each newly loaded tune at the PSID
+  startSong, which skipped the subtunes before it every time the player
+  moved on to the next tune. Automatically loaded tunes now start at
+  their first subtune; a manual tune change (and `NEXT TUNE` mode)
+  still starts at the header default.
 
 **Host tools**
 

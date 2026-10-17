@@ -3171,7 +3171,14 @@ static bool sid_find_next(int dir, char *out, size_t len)
 	return true;
 }
 
-static void sid_step(int dir)
+/* Load the next (dir = +1) or previous (dir = -1) tune in file-name order.
+ *
+ * first_sub starts the fresh tune at its first subsong instead of the PSID
+ * startSong: the automatic end-of-tune advance in "next sub" mode has to
+ * play every subsong in order, so starting at the metadata default would
+ * skip the ones before it. A manual tune change (and "next tune" mode)
+ * keeps the author's intended subtune. */
+static void sid_step(int dir, bool first_sub)
 {
 	char path[40], name[24];
 
@@ -3189,7 +3196,11 @@ static void sid_step(int dir)
 		sid_load_lengths(name);
 		sid_stil_load(name);
 		sid_remember_save();
-		sid_player_play_default();
+		if (first_sub) {
+			sid_player_play(0);
+		} else {
+			sid_player_play_default();
+		}
 		audio_sid_start();
 	} else {
 		LOG_WRN("sid load failed: %s", path);
@@ -3200,7 +3211,7 @@ static void sid_toggle_play(void)
 {
 	if (!sid_player_is_playing()) {
 		if (sid_player_songs() <= 0) {
-			sid_step(1); /* nothing loaded yet: find the first tune */
+			sid_step(1, false); /* nothing loaded yet: first tune */
 			return;
 		}
 		sid_player_play(sid_player_subtune()); /* start/restart */
@@ -3219,7 +3230,7 @@ static void sid_sub_step(int dir)
 	int sub;
 
 	if (total <= 0) {
-		sid_step(1);
+		sid_step(1, false);
 		return;
 	}
 	sub = (sid_player_subtune() + dir) % total;
@@ -3247,11 +3258,14 @@ static void sid_check_end(void)
 	if (sid_end_mode == 2) {
 		sid_player_play(sid_player_subtune()); /* loop the subtune */
 	} else if (sid_end_mode == 1) {
-		sid_step(1); /* next tune */
+		sid_step(1, false); /* next tune: the PSID startSong */
 	} else if (sid_player_subtune() + 1 < sid_player_songs()) {
 		sid_sub_step(1); /* next subtune */
 	} else {
-		sid_step(1); /* last subtune: continue with the next tune */
+		/* last subtune of this tune: the next one starts from its
+		 * first subsong so that none before the startSong are
+		 * skipped in this mode */
+		sid_step(1, true);
 	}
 }
 
@@ -4025,7 +4039,7 @@ static void touch_poll(void)
 		}
 		if (first &&
 		    hit(x, y, SID_TUNEL_X, SID_ROW1_Y, SID_TUNEL_W, SID_ROW1_H)) {
-			sid_step(-1);
+			sid_step(-1, false);
 			return;
 		}
 		if (first &&
@@ -4042,7 +4056,7 @@ static void touch_poll(void)
 		}
 		if (first &&
 		    hit(x, y, SID_TUNER_X, SID_ROW1_Y, SID_TUNER_W, SID_ROW1_H)) {
-			sid_step(1);
+			sid_step(1, false);
 			return;
 		}
 		if (first &&
