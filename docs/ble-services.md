@@ -45,6 +45,7 @@ signals: they are only compiled into **debug builds**
 | `16` + name | delete `/home/<name>` - only `.sid`, `.len` and `.stil` files (config files are protected); rejected in R/O and OFF |
 | `17` + u8 engine | global SID engine, dual-engine builds only: `0` = new cRSID, `1` = legacy cSID-light (same as the main-screen button: stops, flips, restarts the current tune) |
 | `1D` [+ u8 `page`] | thread stack telemetry for the overflow hunt: latch per-thread `(size, free)` u16 pairs (creation order, 4 per page) at `[36..51]` and the matching 11-byte thread names at `[52..95]`; `[34]` marker, `[35]` page with bit 7 set to say the names follow (bit 7 clear = the older 5-per-page layout without names). Under 256 B free anywhere is the smoking gun. |
+| `1E` [+ u8 `mode`] | drain the SEGGER RTT log buffer - the `LOG_*` lines a debug probe would show; the next read returns up to 60 bytes of text at `[36..95]`, the byte count in `[35]`, `[34]` = marker. The bare opcode (or `mode` 0) **consumes** the chunk, so the device forgets it and a second call only shows newer lines. `mode` 1 restarts a *peek* at the oldest unread byte and 2 continues it; a peek never moves the read pointer, so it is repeatable and a later consume still sees the window. |
 | `50` | 1 s test tone |
 
 The read snapshot (132 bytes) mixes audio state (sample rate, DMA buffer
@@ -64,6 +65,17 @@ the stack has been since boot and never decreases. A real overflow trips
 the hardware stack guard (a reset, recorded in the crash telemetry) before
 it could show up here as 0 free.
 Every read is passive: it must not disturb the running I2S bit clock.
+
+`tools/sidclock_ble.py log` drains the RTT buffer over BLE: the same
+`LOG_*` lines a debug probe would show, without needing SWD access (the
+pads are under the back cover). `--peek` prints the window without
+consuming it and `-f` follows; both together watch new lines while leaving
+the buffer intact for a later plain `log`. The buffer runs in **overwrite**
+mode (`CONFIG_LOG_BACKEND_RTT_MODE_OVERWRITE`): nothing on the device reads
+it back, so a full buffer discards its oldest unread bytes instead of every
+new line, and it always holds the newest window - its first line can be the
+tail of a line whose start is gone, and that partial line is printed as it
+is. The log core's small ring does the same one stage earlier.
 
 A 30 s independent watchdog (fed from the main loop) reboots instead of
 freezing: any wedged thread stops the loop directly or via a stuck lock.

@@ -18,6 +18,11 @@ User commands:
   chip M    SID chip model: auto (follow PSID flags) | 6581 | 8580
   engine E  SID engine (dual builds): new (cRSID) | old (cSID-light)
   ls        list the files in /home on the device
+  log       print the device's SEGGER RTT log buffer (the LOG_* lines a
+            debug probe would show). The lines are consumed by default;
+            --peek prints the buffer without consuming it (repeatable) and
+            -f/--follow keeps printing new lines until Ctrl-C (the two
+            combine: show the window, then only what is new)
 
 Developer/debug commands (see docs/ble-services.md; behaviour may change):
   audio     read the audio debug snapshot (I2S state + return codes)
@@ -56,6 +61,7 @@ import argparse
 import asyncio
 import contextlib
 import os
+import signal
 import struct
 import sys
 import time
@@ -70,6 +76,8 @@ CTS_CHAR = "00002a2b-0000-1000-8000-00805f9b34fb"      # CTS Current Time
 ILLUMINANCE_CHAR = "00002afb-0000-1000-8000-00805f9b34fb"  # ESS Illuminance
 DBG_CHAR = "73696463-6c6f-4b02-9c1d-77ce3f41a5c0"      # SidClock debug
 CONNECT_TIMEOUT = 3.0  # s; fail fast when the device is not advertising
+LOG_CHUNK = 60        # log text bytes the 0x1E command serves per read
+LOG_MAX_CHUNKS = 300  # ...so this is one 8 KB window (debug build)
 
 
 def lux_u24(raw):
@@ -98,6 +106,31 @@ def time_str(raw):
         "<HBBBBBBBB", bytes(raw)
     )
     return f"{year:04d}-{mon:02d}-{day:02d} {hh:02d}:{mm:02d}:{ss:02d} (dow {dow})"
+
+
+@contextlib.contextmanager
+def _sigint_graceful():
+    """First Ctrl-C: let the poll loop stop; second Ctrl-C: get out by force.
+
+    asyncio's runner cancels the main task on the first Ctrl-C, but that
+    cancellation is swallowed somewhere inside bleak's read, so the command
+    kept running and the BLE link stayed up (blocking the next run). A flag
+    the loop checks leaves through the normal disconnect path instead; a
+    second Ctrl-C raises KeyboardInterrupt as usual, for when even that is
+    stuck.
+    """
+    state = {"stop": False}
+
+    def handler(_signum, _frame):
+        if state["stop"]:
+            raise KeyboardInterrupt
+        state["stop"] = True
+
+    prev = signal.signal(signal.SIGINT, handler)
+    try:
+        yield lambda: state["stop"]
+    finally:
+        signal.signal(signal.SIGINT, prev)
 
 
 @contextlib.asynccontextmanager
@@ -202,22 +235,23 @@ async def cmd_monitor(addr):
     async with connect(addr) as c:
         print("polling battery + lux + clock guard every 2 s - Ctrl-C to stop",
               flush=True)
-        while True:
-            batt = await c.read_gatt_char(BATTERY_CHAR)
-            lux = await c.read_gatt_char(ILLUMINANCE_CHAR)
-            raw = await c.read_gatt_char(DBG_CHAR)
-            guard = _time_guard(raw)
-            extra = ""
-            if guard:
-                up, grtc, glitch = guard
-                extra = (f"   uptime {up / 3600:6.2f} h  "
-                         f"grtc {grtc / 3600:6.2f} h  guard {glitch}")
-            print(
-                f"{time.strftime('%H:%M:%S')}  battery {batt[0]:3d} %   "
-                f"lux {lux_u24(lux):9.2f}{extra}",
-                flush=True,
-            )
-            await asyncio.sleep(2)
+        with _sigint_graceful() as stop:
+            while not stop():
+                batt = await c.read_gatt_char(BATTERY_CHAR)
+                lux = await c.read_gatt_char(ILLUMINANCE_CHAR)
+                raw = await c.read_gatt_char(DBG_CHAR)
+                guard = _time_guard(raw)
+                extra = ""
+                if guard:
+                    up, grtc, glitch = guard
+                    extra = (f"   uptime {up / 3600:6.2f} h  "
+                             f"grtc {grtc / 3600:6.2f} h  guard {glitch}")
+                print(
+                    f"{time.strftime('%H:%M:%S')}  battery {batt[0]:3d} %   "
+                    f"lux {lux_u24(lux):9.2f}{extra}",
+                    flush=True,
+                )
+                await asyncio.sleep(2)
 
 
 async def cmd_blemode(addr, mode=None):
@@ -483,6 +517,94 @@ async def cmd_chip(addr, mode=None):
           f" (reloads the current tune)")
 
 
+def _rtt_chunk(raw):
+    """Log text from a snapshot read served by the 0x1E debug command."""
+    if len(raw) < 96 or raw[34] != 0x1E:
+        return None
+    return bytes(raw[36:36 + min(raw[35], LOG_CHUNK)])
+
+
+async def _log_chunk(c, mode):
+    """One log chunk; exit in one line when the device does not serve 0x1E."""
+    await dbg_write(c, bytes([0x1E, mode]), "log")
+    raw = await c.read_gatt_char(DBG_CHAR)
+    text = _rtt_chunk(raw)
+    if text is None:
+        raise SystemExit("log: unexpected snapshot (old firmware?)")
+    return text
+
+
+def _log_lines(pending, data, last):
+    """(text to print, leftover) for `data` appended to a half line.
+
+    Lines end in "\\n" (the RTT backend writes CRLF; the CR is dropped). An
+    incomplete last line is kept for the next chunk, unless `last` says to
+    print it as it is.
+    """
+    pending += data
+    lines, sep, pending = pending.rpartition(b"\n")
+    if not sep and last and pending:
+        lines, sep, pending = pending, b"\n", b""
+    if not sep:
+        return b"", pending
+    return lines.replace(b"\r", b"") + b"\n", pending
+
+
+async def cmd_log(addr, peek=False, follow=False):
+    """Print the device's SEGGER RTT log buffer (debug command 0x1E).
+
+    The firmware serves its unread RTT window 60 bytes at a time. Those
+    bytes are *consumed* by default: once printed the device forgets them,
+    so the next `log` only shows what was logged since. --peek copies the
+    window without touching the device's read pointer, so the call can be
+    repeated (and a later `log` still sees it); with --peek -f only what is
+    new since the last poll is printed, also without consuming.
+    -f/--follow keeps polling until interrupted (Ctrl-C).
+
+    The buffer runs in overwrite mode (app/prj.conf), so it always holds
+    the newest lines and its first line can be a fragment of one whose
+    start was overwritten - that partial line is printed as it is.
+    """
+    async with connect(addr) as c:
+        pending = b""
+
+        def emit(data, last=False):
+            nonlocal pending
+            text, pending = _log_lines(pending, data, last)
+            if text:
+                sys.stdout.write(text.decode(errors="replace"))
+                sys.stdout.flush()
+
+        async def pull(first_mode, next_mode, stop):
+            """Fetch chunks (0 = consume, 1 = restart peek, 2 = continue);
+            True when the window was drained."""
+            mode = first_mode
+            for _ in range(LOG_MAX_CHUNKS):
+                if stop():
+                    return False
+                text = await _log_chunk(c, mode)
+                if not text:
+                    return True
+                emit(text)
+                mode = next_mode
+            return False
+
+        first = 1 if peek else 0
+        cont = 2 if peek else 0
+        with _sigint_graceful() as stop:
+            if follow:
+                if peek:
+                    await pull(first, cont, stop)  # window, then follow it
+                while not stop():
+                    if await pull(cont, cont, stop):
+                        await asyncio.sleep(0.2)
+            else:
+                if not await pull(first, cont, stop) and not stop():
+                    print("log: more is buffered (run log again)",
+                          file=sys.stderr)
+                emit(b"", last=True)
+
+
 async def cmd_ls(addr):
     async with connect(addr) as c:
         start = 0
@@ -590,12 +712,20 @@ def main():
             "tone", "mute", "rate", "tonefreq",
         "tonestart", "tonestop", "fsformat", "sid", "sidname", "chip",
         "sidstop", "ls", "glitch", "blemode", "filedelete",
-        "engine", "threads",
+        "engine", "threads", "log",
         ],
     )
     ap.add_argument(
         "--addr", default=None,
         help="BLE address; default: $SIDCLOCK_ADDR or a scan by name",
+    )
+    ap.add_argument(
+        "--peek", action="store_true",
+        help="'log': print the buffer without consuming it (repeatable)",
+    )
+    ap.add_argument(
+        "-f", "--follow", action="store_true",
+        help="'log': keep printing new lines until interrupted",
     )
     ap.add_argument(
         "value", nargs="?", type=str, default=None,
@@ -628,9 +758,12 @@ def main():
         "filedelete": cmd_filedelete,
         "engine": cmd_engine,
         "threads": cmd_threads,
+        "log": cmd_log,
     }[args.command]
-    if args.command in ("sidname", "chip", "filedelete", "engine",
-                        "threads"):
+    if args.command == "log":
+        asyncio.run(fn(args.addr, args.peek, args.follow))
+    elif args.command in ("sidname", "chip", "filedelete", "engine",
+                          "threads"):
         asyncio.run(fn(args.addr, args.value))
     elif args.command == "set-time":
         asyncio.run(fn(args.addr, args.value))

@@ -129,6 +129,9 @@ Do not break these without discussing it in the PR/commit:
   `sidclock_ble.py status/monitor` print it, `glitch reset|fwd` injects a
   fake glitch, `blemode rw|ro|off` switches the BLE mode (R/W only) and
   `filedelete <name>` removes tunes (`.sid`/`.len`/`.stil` only).
+  `log [--peek] [-f]` drains the RTT log buffer over BLE (debug command
+  `0x1E`, 60 bytes per snapshot read); the buffer is in overwrite mode so
+  it always holds the newest lines.
 - The bring-up test commands (`click`, `beep`, `tone`, `rate`, `tonefreq`,
   `tonestart`, `tonestop`) exist only in `SIDCLOCK_DEBUG=1` builds; release
   images reject the opcodes and the BLE tool reports that in one line.

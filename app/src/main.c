@@ -21,6 +21,7 @@
  */
 
 #include <zephyr/kernel.h>
+#include <zephyr/irq.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/display.h>
 #include <zephyr/drivers/i2c.h>
@@ -42,6 +43,7 @@
 #include <zephyr/storage/flash_map.h>
 #include <zephyr/fs/fs.h>
 #include <zephyr/fs/littlefs.h>
+#include <SEGGER_RTT.h>
 #include <string.h>
 #include <stdio.h>
 
@@ -467,6 +469,61 @@ static void stacks_cb(struct thread_analyzer_info *info)
 	}
 	stacks_name[stacks_n][k] = '\0';
 	stacks_n++;
+}
+
+/* Log drain (debug command 0x1E): the log backend writes the LOG_* lines
+ * into the SEGGER RTT up-buffer (channel 0) and nothing on the device ever
+ * reads it back, so without a debug probe those lines are invisible. This
+ * serves them to the BLE snapshot read instead: up to 60 bytes of text at
+ * [36..95], byte count in [35], [34] = marker. Modes:
+ *   0x1E            consume: the read pointer advances, the bytes are gone
+ *   0x1E 0x01       peek: start again at the oldest unread byte
+ *   0x1E 0x02       peek: continue after the previous peek chunk
+ * A peek never touches the read pointer, so a later consume still sees the
+ * window; if the writer ran past the cursor, the next chunk re-syncs to the
+ * oldest unread byte. The backend pairs every RTT write with the RTT lock,
+ * which is Zephyr's irq_lock (CONFIG_SEGGER_RTT_CUSTOM_LOCKING), so a copy
+ * under the same lock can never catch a half-written line. */
+#define LOG_CHUNK 60U
+static int8_t log_req = -1;   /* pending 0x1E mode, -1 = none */
+static uint16_t log_peek_off; /* peek cursor (offset in the RTT buffer) */
+
+static unsigned rtt_log_read(unsigned mode, uint8_t *dst, unsigned want)
+{
+	const SEGGER_RTT_BUFFER_UP *up = &_SEGGER_RTT.aUp[0];
+	unsigned key, size, rd, wr, len, cur, off, n, first;
+
+	if (mode == 0U) {
+		/* up-buffer read: advances RdOff, so the bytes are gone.
+		 * (SEGGER_RTT_Read() would read the down-buffer instead.) */
+		return SEGGER_RTT_ReadUpBuffer(0, dst, want);
+	}
+
+	key = irq_lock();
+	size = up->SizeOfBuffer;
+	rd = up->RdOff;
+	wr = up->WrOff;
+	/* unread bytes: RdOff == WrOff means empty (one byte stays unused) */
+	len = (wr >= rd) ? (wr - rd) : (wr + size - rd);
+	cur = (mode == 1U) ? rd : (unsigned)log_peek_off;
+	off = (cur >= rd) ? (cur - rd) : (cur + size - rd);
+	if (off > len) {
+		cur = rd; /* the writer ran past the cursor: re-sync */
+		off = 0U;
+	}
+	n = MIN(len - off, want);
+	first = MIN(n, size - cur);
+	memcpy(dst, up->pBuffer + cur, first);
+	if (n > first) {
+		memcpy(dst + first, up->pBuffer, n - first);
+	}
+	cur += n;
+	if (cur >= size) {
+		cur -= size;
+	}
+	log_peek_off = (uint16_t)cur;
+	irq_unlock(key);
+	return n;
 }
 
 /*
@@ -1335,9 +1392,24 @@ static ssize_t ble_dbg_read(struct bt_conn *conn,
 	audio_diag(ble_dbg + 34, sizeof(ble_dbg) - 34U);
 	sid_player_info(ble_dbg + 72, sizeof(ble_dbg) - 72U);
 
+	/* log drain (command 0x1E): replace the diag block with the next
+	 * 60-byte chunk of RTT log text; [35] = byte count. Served inline -
+	 * a copy under the RTT lock is cheap (unlike the thread walk). */
+	bool log_ready = log_req >= 0;
+
+	if (log_ready) {
+		unsigned n = rtt_log_read((unsigned)log_req, ble_dbg + 36,
+					  LOG_CHUNK);
+
+		memset(ble_dbg + 36 + n, 0, LOG_CHUNK - n);
+		ble_dbg[34] = 0x1EU;
+		ble_dbg[35] = (uint8_t)n;
+		log_req = -1;
+	}
+
 	/* pending /home listing (command 0x13): replace the diag block with
 	 * "name\n" entries; [95] = next page index or 0xFF when done */
-	if (ls_start >= 0) {
+	if (ls_start >= 0 && !log_ready) {
 		int next = home_list((uint16_t)ls_start, ble_dbg + 34, 61);
 
 		ble_dbg[95] = (next < 0 || next > 254) ? 0xFFU : (uint8_t)next;
@@ -1348,7 +1420,7 @@ static ssize_t ble_dbg_read(struct bt_conn *conn,
 		ls_start = -1;
 	}
 
-	if (stacks_valid && ls_start < 0) {
+	if (stacks_valid && !log_ready && ls_start < 0) {
 		/* stack telemetry (command 0x1D): [34] marker, [35] page |
 		 * 0x80, [36..51] up to 4 x (size, free) u16 LE pairs and
 		 * [52..95] the matching 11-byte names, 4 threads per page */
@@ -1414,6 +1486,7 @@ static ssize_t ble_dbg_write(struct bt_conn *conn,
 	      (len == 2U && p[0] == 0x15U) ||
 	      (len == 3U && p[0] == 0x13U) ||
 	      (len == 2U && p[0] == 0x1DU) ||
+	      (len == 2U && p[0] == 0x1EU) ||
 	      (len >= 2U && len <= 21U && p[0] == 0x11U) ||
 	      (len >= 2U && len <= 21U && p[0] == 0x16U) ||
 #ifdef SID_ENGINE_DUAL
@@ -1594,6 +1667,15 @@ static ssize_t ble_dbg_write(struct bt_conn *conn,
 		stacks_pending = true;
 		stacks_valid = false;
 		LOG_INF("stack telemetry armed (page %u)", stacks_page);
+		break;
+	case 0x1E:
+		/* Log drain: bare opcode (or 0) consumes a chunk; 1 starts a
+		 * peek at the oldest unread byte and 2 continues it. The
+		 * snapshot read serves the bytes (see rtt_log_read). */
+		if (len == 2U && p[1] > 2U) {
+			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+		}
+		log_req = (len == 2U) ? (int8_t)p[1] : 0;
 		break;
 	case 0x0F:
 		sid_player_stop();

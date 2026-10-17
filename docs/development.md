@@ -48,6 +48,11 @@ path. After any reset the wall clock is unset - run
   snapshot; `status`, `monitor` and `ls` cover the rest. The debug
   characteristic layout and commands are in
   [ble-services.md](ble-services.md).
+- **Firmware log**: `tools/sidclock_ble.py log` drains the SEGGER RTT
+  buffer over BLE (the same `LOG_*` lines a probe would show, and no probe
+  is attached during normal development). `log --peek` reads the buffer
+  without consuming it, `log -f` follows; the buffer keeps its newest 2 KB
+  (8 KB in debug builds) by overwriting the oldest unread bytes.
 - **UI problems**: the display driver has power-state control; a fully
   blank panel with a running app usually means a missing panel re-init
   after sleep, not a dead driver.

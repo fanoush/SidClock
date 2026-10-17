@@ -2,11 +2,33 @@
 
 ## 1.0.7
 
+**Host tools**
+
+- `tools/sidclock_ble.py log` prints the device's SEGGER RTT log buffer:
+  the `LOG_*` lines that until now needed a debug probe (the SWD pads are
+  under the back-cover foil, so in practice they were invisible). The lines
+  are consumed by default, `--peek` prints the buffer without consuming it
+  (so it can be repeated, and a later `log` still sees it) and `-f` follows;
+  `--peek -f` watches new lines without ever consuming them. Verified on
+  hardware.
+- Ctrl-C now stops `log -f` and `monitor`: the first SIGINT was swallowed
+  (asyncio cancels the main task and bleak's D-Bus read absorbs it), which
+  left the tool running *and* the BLE link up, so the device stopped
+  advertising and the next run reported "device not found" until the link
+  was dropped by hand. The poll loops now leave through the normal
+  disconnect path; a second Ctrl-C still forces the way out.
+
 **Internal**
 
 - `threads` (BLE debug command `1D`) now reports the thread name with each
   stack high-water mark, 4 threads per page, so a tight stack can be
   attributed without recognising its size. Verified on hardware.
+- The log buffer runs in overwrite mode
+  (`CONFIG_LOG_BACKEND_RTT_MODE_OVERWRITE`): with nothing reading RTT back,
+  DROP kept only the oldest lines and threw every new one away; overwrite
+  keeps the newest window (its first line can be the tail of a line whose
+  start is gone - printed as it is). Debug command `1E` serves it to the
+  BLE snapshot read, 60 bytes at a time.
 
 ## 1.0.6
 
