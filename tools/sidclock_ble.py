@@ -36,6 +36,10 @@ Developer/debug commands (see docs/ble-services.md; behaviour may change):
   threads   per-thread stack high-water marks in creation order
             (overflow hunt - flags threads with <256 B free)
 
+The bring-up tests (click, beep, tone, rate, tonefreq, tonestart,
+tonestop) exist only in debug builds (SIDCLOCK_DEBUG=1 ./build.sh); a
+release build rejects them and this tool says so.
+
 Uploading SID tunes (any name, played in file name order by the device):
   smpmgr --ble <addr> file upload <local.sid> /home/<name>.sid
   tools/sid_add.py <local.sid>     # generates .len from HVSC and uploads
@@ -124,6 +128,20 @@ async def connect(addr):
             await c.disconnect()
         except Exception:
             pass  # link already gone; nothing left to clean up
+
+
+async def dbg_write(c, payload, what, test_only=False):
+    """Write a debug command; report a rejection as one line.
+
+    The bring-up test commands only exist in debug builds
+    (SIDCLOCK_DEBUG=1 ./build.sh), so a release device rejects them.
+    """
+    try:
+        await c.write_gatt_char(DBG_CHAR, payload, response=True)
+    except BleakError as e:
+        hint = (" - the bring-up test commands need a debug build "
+                "(SIDCLOCK_DEBUG=1 ./build.sh)") if test_only else ""
+        raise SystemExit(f"{what}: rejected by the device ({e}){hint}")
 
 
 async def resolve_addr(explicit):
@@ -324,7 +342,7 @@ async def cmd_tone(addr, code):
         0x50: "1 s steady test tone",
     }.get(code, f"code 0x{code:02x}")
     async with connect(addr) as c:
-        await c.write_gatt_char(DBG_CHAR, bytes([code]), response=True)
+        await dbg_write(c, bytes([code]), label, test_only=code in (1, 2, 0x50))
         print(f"triggered: {label}")
 
 
@@ -335,14 +353,14 @@ async def cmd_rate(addr, hz=None):
         if not 1000 <= hz <= 96000:
             raise SystemExit("rate must be 1000..96000 Hz")
         async with connect(addr) as c:
-            await c.write_gatt_char(DBG_CHAR,
-                                    bytes([0x09]) + hz.to_bytes(4, "little"),
-                                    response=True)
+            await dbg_write(c,
+                            bytes([0x09]) + hz.to_bytes(4, "little"),
+                            "rate", test_only=True)
             raw = await c.read_gatt_char(DBG_CHAR)
             print(f"sample rate set to {_rate_of(raw)} Hz")
         return
     async with connect(addr) as c:
-        await c.write_gatt_char(DBG_CHAR, bytes([0x07]), response=True)
+        await dbg_write(c, bytes([0x07]), "rate", test_only=True)
         raw = await c.read_gatt_char(DBG_CHAR)
         print(f"sample rate now {_rate_of(raw)} Hz (step {raw[10] + 1})")
 
@@ -350,7 +368,7 @@ async def cmd_rate(addr, hz=None):
 async def cmd_tonefreq(addr, hz=None):
     if hz is None:
         async with connect(addr) as c:
-            await c.write_gatt_char(DBG_CHAR, bytes([0x08]), response=True)
+            await dbg_write(c, bytes([0x08]), "tonefreq", test_only=True)
             raw = await c.read_gatt_char(DBG_CHAR)
             hz = TONES[raw[11]]
         rate = _rate_of(raw)
@@ -362,9 +380,9 @@ async def cmd_tonefreq(addr, hz=None):
     if not 100 <= hz <= 30000:
         raise SystemExit("tone must be 100..30000 Hz")
     async with connect(addr) as c:
-        await c.write_gatt_char(DBG_CHAR,
-                                bytes([0x0A]) + hz.to_bytes(4, "little"),
-                                response=True)
+        await dbg_write(c,
+                        bytes([0x0A]) + hz.to_bytes(4, "little"),
+                        "tonefreq", test_only=True)
         raw = await c.read_gatt_char(DBG_CHAR)
     rate = _rate_of(raw)
     warn = ("  (ALIASED - above Nyquist for this rate)" if hz * 2 >= rate
@@ -377,15 +395,15 @@ async def cmd_tonestart(addr, hz=None):
     if not 100 <= hz <= 30000:
         raise SystemExit("tone must be 100..30000 Hz")
     async with connect(addr) as c:
-        await c.write_gatt_char(DBG_CHAR,
-                                bytes([0x0B]) + hz.to_bytes(4, "little"),
-                                response=True)
+        await dbg_write(c,
+                        bytes([0x0B]) + hz.to_bytes(4, "little"),
+                        "tonestart", test_only=True)
     print(f"steady {hz} Hz tone started - stop with: tonestop")
 
 
 async def cmd_tonestop(addr):
     async with connect(addr) as c:
-        await c.write_gatt_char(DBG_CHAR, bytes([0x0C]), response=True)
+        await dbg_write(c, bytes([0x0C]), "tonestop", test_only=True)
     print("tone stopped")
 
 

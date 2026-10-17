@@ -27,6 +27,19 @@ Two weekday fixes; the date itself was always right.
   waiting out the 30 s default. `tools/backup_ble.py` ignores the same
   disconnect error.
 
+**Internal**
+
+- RAM: about 15 KB of the 188 KB is freed. The 8 KB system heap is
+  disabled (`CONFIG_HEAP_MEM_POOL_SIZE=0`, verified: nothing in the image
+  calls `malloc`/`k_malloc`/`operator new`) and the release RTT log buffer
+  drops from 8 KB to 2 KB. Per-block budget: `docs/architecture.md`.
+- New debug build: `SIDCLOCK_DEBUG=1 app/build.sh` compiles the bring-up
+  test commands back in (test tones, sample-rate/tone ladders, raw MCKFREQ,
+  -0.5 KB RAM and their BLE opcodes) and applies `app/prj_debug.conf` for
+  the 8 KB log buffer. Release builds reject those opcodes;
+  `tools/sidclock_ble.py` reports the rejection in one line instead of a
+  traceback. Debug images show `-dbg` in the on-display version string.
+
 ## 1.0.5
 
 SID engine: exact ADSR envelope timing restored while keeping the render

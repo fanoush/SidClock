@@ -6,12 +6,21 @@
 bootloader/fetch-sdk.sh          # once (or after changing the pinned revs)
 bootloader/build.sh              # bootloader (rtt: ./build.sh rtt)
 app/build.sh                     # application + MCUboot signature
+SIDCLOCK_DEBUG=1 app/build.sh    # + bring-up test commands, 8 KB RTT log buffer
 ```
 
 The SDK location comes from `$SIDCLOCK_SDK` or a repo-root `local.conf`
 (gitignored). Both scripts are safe to rerun; the app build is incremental
 (ninja), the bootloader build cleans its build directory for reproducible
 output.
+
+`app/build.sh` builds the **release** configuration by default: the bring-up
+test commands (test tones, sample-rate/tone ladders, raw MCKFREQ) are
+compiled out - the debug BLE opcodes behind them are rejected - and the RTT
+log buffer is 2 KB. `SIDCLOCK_DEBUG=1` builds the **debug** configuration
+instead: those commands exist again and `app/prj_debug.conf` raises the RTT
+buffer to 8 KB; the on-display version shows `-dbg`. The flag is passed on
+every build, so a debug build never leaks into the next release build.
 
 `app/build.sh` reuses/generates `app/sidclock.pem` for the MCUboot header if
 it is missing. The bootloader checks hashes only, so the key content does
@@ -48,8 +57,9 @@ path. After any reset the wall clock is unset - run
 - Zephyr coding style, 4-space tabs, 80-column comments. `main.c` is
   intentionally a single module for the UI today; if you split it, keep
   the screen functions independent of static state where practical.
-- No dynamic allocation in the application path; the heap is only used by
-  Zephyr internals. Static buffers are sized for the display band
+- No dynamic allocation in the application path; `CONFIG_HEAP_MEM_POOL_SIZE=0`
+  and the linked image contains no `malloc`/`k_malloc` caller, so nothing
+  reserves the system heap. Static buffers are sized for the display band
   (448x16x2 bytes) and the audio double buffer.
 - Store config changes by setting the `*_dirty` flags; the main loop
   throttles the flash writes.

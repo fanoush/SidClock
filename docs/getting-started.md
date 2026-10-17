@@ -53,6 +53,9 @@ builds a debug bootloader with SEGGER RTT logging instead.
 The default build links both SID engines (cRSID plus the legacy
 cSID-light); `SIDCLOCK_SID_ENGINE=crsid` or `=csid` builds single-engine
 images for A/B comparison (their display version shows `-crsid`/`-csid`).
+`SIDCLOCK_DEBUG=1 app/build.sh` builds the debug configuration instead of
+the release one: the bring-up test commands come back and the RTT log
+buffer is bigger (the display version shows `-dbg`).
 
 ## 3. First flash (SWD)
 

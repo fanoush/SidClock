@@ -84,8 +84,16 @@ static uint8_t next_buf;
 
 static volatile bool stream_running;
 static volatile bool muted;
-static volatile uint16_t tone_left; /* tone buffers still to play */
 static volatile uint32_t last_sound_ms;
+
+/*
+ * Bring-up test signals (audio_click/beep/tone, the rate and tone ladders):
+ * debug builds only (SIDCLOCK_DEBUG=1 ./build.sh). Release images have no
+ * test-tone generator at all, which also drops the 256-entry sine table
+ * (512 B) and everything that feeds it.
+ */
+#ifdef SIDCLOCK_DEBUG
+static volatile uint16_t tone_left; /* tone buffers still to play */
 
 /* steady tone (tonestart/tonestop and the 10 s tonefreq tone) */
 static volatile bool tone_hold;
@@ -94,6 +102,7 @@ static int32_t tone_hold_ramp; /* 0..256 gain ramp */
 static uint32_t tone_hold_hz;
 static uint32_t tone_hold_until; /* k_uptime deadline; 0 = until stopped */
 static uint32_t tone_hold_phase;
+#endif
 
 /* SID mode: the fill pulls samples from the emulator instead of tones */
 static volatile bool sid_mode;
@@ -116,6 +125,12 @@ static uint32_t hw_rate(void)
 	return (cfg_rate * HW_RATE_NUM + HW_RATE_DEN / 2U) / HW_RATE_DEN;
 }
 
+/*
+ * Bring-up ladders and the sine table: debug builds only (see the test
+ * signal block above). The release image keeps cfg_rate/mck_override and
+ * the SID path; only the test generators disappear.
+ */
+#ifdef SIDCLOCK_DEBUG
 /* sample-rate ladder for finding the amplifier's turn-on point (the lower
  * rates are out of the amplifier's accepted bit-clock window and removed
  * at the user's request - anything can be set directly instead).
@@ -153,6 +168,7 @@ static void sine_init(void)
 		im = im_next;
 	}
 }
+#endif /* SIDCLOCK_DEBUG */
 
 static bool hfxo_start(void)
 {
@@ -202,6 +218,7 @@ static void fill_zeros(int32_t *dst)
 	memset(dst, 0, AUDIO_BUF_BYTES);
 }
 
+#ifdef SIDCLOCK_DEBUG
 /* Continuous, phase-continuous steady tone into the staging buffer, with a
  * short fade in/out (a full-amplitude onset thumps the speaker and the
  * amplifier's level detection). */
@@ -232,6 +249,7 @@ static void fill_hold_tone(void)
 		}
 	}
 }
+#endif /* SIDCLOCK_DEBUG */
 
 static void fill_buffer(int32_t *dst)
 {
@@ -264,12 +282,14 @@ static void fill_buffer(int32_t *dst)
 		}
 		pack(dst);
 		last_sound_ms = k_uptime_get_32();
+#ifdef SIDCLOCK_DEBUG
 	} else if (tone_hold) {
 		fill_hold_tone();
 		pack(dst);
 	} else if (tone_left > 0U) {
 		pack(dst);
 		tone_left--;
+#endif
 	} else {
 		fill_zeros(dst);
 	}
@@ -440,6 +460,7 @@ static void audio_thread(void *a, void *b, void *c)
 			continue;
 		}
 
+#ifdef SIDCLOCK_DEBUG
 		if (tone_hold) {
 			last_sound_ms = k_uptime_get_32();
 			if (tone_hold_until != 0U &&
@@ -449,6 +470,7 @@ static void audio_thread(void *a, void *b, void *c)
 				tone_hold_until = 0U;
 			}
 		}
+#endif
 
 		audio_service();
 
@@ -485,7 +507,13 @@ void audio_dbg_byte(int i, uint8_t v)
 
 int audio_init(void)
 {
+#ifdef SIDCLOCK_DEBUG
 	sine_init();
+#else
+	/* no test-tone ladder in release builds: report the rate as directly
+	 * set (the "direct" marker in the debug snapshot) */
+	dbg[10] = 0xFFU;
+#endif
 	dbg[7] = volume;
 
 	if (!device_is_ready(DEVICE_DT_GET(DT_NODELABEL(gpio1)))) {
@@ -516,6 +544,7 @@ void audio_set_volume(uint8_t vol)
 	dbg[7] = vol;
 }
 
+#ifdef SIDCLOCK_DEBUG
 /*
  * Synthesise a tone into the staging buffer and queue it for the polled
  * service (returns immediately). buf_ms is the buffer length, repeats how
@@ -698,6 +727,7 @@ void audio_tone_release(void)
 {
 	tone_stop_req = true;
 }
+#endif /* SIDCLOCK_DEBUG */
 
 /*
  * SID playback mode. The stream is forced to 22050 Hz (the emulator's rate)
@@ -725,6 +755,7 @@ void audio_sid_stop(void)
 	sid_mode = false;
 }
 
+#ifdef SIDCLOCK_DEBUG
 /* Calibration: force a raw MCKFREQ value (0 = back to computed). */
 void audio_set_mck_raw(uint32_t v)
 {
@@ -733,6 +764,7 @@ void audio_set_mck_raw(uint32_t v)
 	hw_config_variant(cfg_lrck4, cfg_fmt32, cfg_en_high);
 	stream_start();
 }
+#endif /* SIDCLOCK_DEBUG */
 
 void audio_read_hw(uint8_t *out, size_t len)
 {

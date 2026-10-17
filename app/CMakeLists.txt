@@ -74,3 +74,18 @@ if(NOT DEFINED SIDCLOCK_VERSION)
     set(SIDCLOCK_VERSION "dev")
 endif()
 target_compile_definitions(app PRIVATE SIDCLOCK_VERSION="${SIDCLOCK_VERSION}")
+
+# Debug build (build.sh: SIDCLOCK_DEBUG=1 ./build.sh): compiles the bring-up
+# test commands (test tones, rate/tone ladders, raw MCKFREQ) back in and
+# selects the larger RTT log buffer via app/prj_debug.conf. Release builds
+# leave them out (-0.5 KB RAM, and no test surface on a shipped unit) and
+# show no suffix; debug images show "-dbg" next to the version. The signed
+# image version stays the same either way, so OTA compares like-for-like.
+if(SIDCLOCK_DEBUG)
+    set(SIDCLOCK_DEBUG_SUFFIX "-dbg")
+    target_compile_definitions(app PRIVATE SIDCLOCK_DEBUG=1)
+else()
+    set(SIDCLOCK_DEBUG_SUFFIX "")
+endif()
+message(STATUS "SidClock debug build: ${SIDCLOCK_DEBUG_SUFFIX}")
+target_compile_definitions(app PRIVATE SIDCLOCK_DEBUG_SUFFIX="${SIDCLOCK_DEBUG_SUFFIX}")

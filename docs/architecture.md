@@ -91,10 +91,33 @@ Standard services (Battery, Current Time, Environmental Sensing) plus
 MCUmgr/SMP (image + OS + filesystem groups) and a custom debug
 characteristic. See [ble-services.md](ble-services.md).
 
+## RAM budget
+
+188 KB and no dynamic allocation to fall back on, so this table is the map
+to check before adding a buffer. Measured from the release ELF
+(`nm -S` + `zephyr.map`, 1.0.6, 177 KB used):
+
+| Block | ~RAM | What is in it |
+|---|---:|---|
+| SID playback | 85 KB | 77 KB is the cRSID C64/state block (both engines share it), 7 KB the I2S DMA double buffer + render scratch + audio thread |
+| Display + UI (`main.c`) | 36 KB | `rot_buf` and `band_buf` are 14 KB each (448x16x2), the STIL/comment buffer 3 KB, the rest UI/alarm/sensor state |
+| BLE host + controller | 26 KB | net_buf pools, controller PDU receive buffer (DLE 251), RX stub + controller stacks, connection/GATT state |
+| MCUmgr (OTA) | 14 KB | 8 KB SMP packet pool (4x2048) + 4 KB workqueue stack + img/fs/os groups |
+| Kernel | 9 KB | main/idle/interrupt stacks, system work queue, thread objects |
+| Logging + RTT | 5 KB | 2 KB RTT buffer in release builds (8 KB with `SIDCLOCK_DEBUG`), log core |
+| LittleFS, drivers, alarms, configs | ~4 KB | filesystem object + caches, SPI/ADC/GPIOTE/I2S drivers |
+
+`threads` (BLE debug command) reports per-thread stack high-water marks -
+the cheapest way to claw stack back. Debug-only RAM sits behind
+`SIDCLOCK_DEBUG`; see [development.md](development.md).
+
 ## Design decisions
 
 - **No dynamic allocation** in hot paths; fixed buffers sized for the
-  display band (448x16x2 bytes) and the audio double buffer.
+  display band (448x16x2 bytes) and the audio double buffer. The whole
+  system heap is disabled (`CONFIG_HEAP_MEM_POOL_SIZE=0`) - the linked
+  image has no `malloc`/`k_malloc` caller - which leaves ~15 KB of RAM
+  unused for future features.
 - **Software rotation** instead of panel MADCTL (the panel's MADCTL
   produced mirrored/transposed output on this unit).
 - **Visible-time marquee**: the SID comment scrolls only while the SID

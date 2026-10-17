@@ -16,6 +16,17 @@
 # single-engine images for A/B comparison; those show -crsid/-csid in the
 # on-display version string, the signed image version is the same.
 #
+# Debug build:
+#
+#   SIDCLOCK_DEBUG=1 ./build.sh
+#
+# compiles the bring-up test commands back in (test tones, rate/tone
+# ladders, raw MCKFREQ) and applies app/prj_debug.conf (8 KB SEGGER RTT log
+# buffer instead of the release 2 KB). Debug images show -dbg in the
+# on-display version string; the signed image version stays the same. The
+# flag is passed to CMake on every build, so a debug build does not leak
+# into the next release build.
+#
 # Result:
 #   build/zephyr/zephyr.signed.bin   <- upload over BLE with smpmgr
 #
@@ -29,6 +40,14 @@ SDK="${SIDCLOCK_SDK:-$ROOT/.sdk}"
 
 VERSION="1.0.6"
 
+# Always passed explicitly: the CMake cache would otherwise keep an earlier
+# build's value (same caveat as SIDCLOCK_SID_ENGINE below).
+if [ "${SIDCLOCK_DEBUG:-0}" = "1" ]; then
+    DEBUG_ARGS=(-DSIDCLOCK_DEBUG=1 -DEXTRA_CONF_FILE="$HERE/prj_debug.conf")
+else
+    DEBUG_ARGS=(-DSIDCLOCK_DEBUG=0 -DEXTRA_CONF_FILE=)
+fi
+
 export ZEPHYR_BASE="$SDK/sdk/zephyr"
 export ZEPHYR_TOOLCHAIN_VARIANT=zephyr
 export ZEPHYR_SDK_INSTALL_DIR="$SDK/tools/zephyr-sdk-0.17.0"
@@ -41,6 +60,7 @@ cmake -GNinja \
     -DZEPHYR_MODULES="$SDK/sdk/mcuboot;$SDK/sdk/modules/hal/nordic;$SDK/sdk/modules/hal/cmsis;$SDK/sdk/modules/crypto/tinycrypt;$SDK/sdk/modules/debug/segger;$SDK/sdk/modules/lib/zcbor;$SDK/sdk/modules/fs/littlefs" \
     -DSIDCLOCK_VERSION="$VERSION" \
     -DSIDCLOCK_SID_ENGINE="${SIDCLOCK_SID_ENGINE:-dual}" \
+    "${DEBUG_ARGS[@]}" \
     -DDTC_OVERLAY_FILE="$HERE/app.overlay" \
     -DPYTHON_EXECUTABLE="$(command -v python3)"
 

@@ -18,7 +18,10 @@ and command set are documented here but may change between releases.
 ## Debug commands
 
 Writes are a single opcode byte, optionally followed by little-endian
-arguments:
+arguments. Opcodes `01`, `02`, `07`-`0C`, `10` and `50` are bring-up test
+signals: they are only compiled into **debug builds**
+(`SIDCLOCK_DEBUG=1 ./build.sh`), and a release build answers them with
+`VALUE_NOT_ALLOWED`.
 
 | Bytes | Effect |
 |---|---|
@@ -105,7 +108,9 @@ tools/sidclock_ble.py ls             # list /home (paged listing command)
 
 Developer commands (`audio`, `click`, `beep`, `tone`, `mute`, `rate`,
 `tonefreq`, `tonestart`, `tonestop`, `chip`, `fsformat`) are documented in
-the CLI's `--help`.
+the CLI's `--help`. The test-signal ones need a debug build
+(`SIDCLOCK_DEBUG=1 ./build.sh`); against a release device the CLI reports
+the rejection in one line instead of a traceback.
 
 ## Files and OTA
 

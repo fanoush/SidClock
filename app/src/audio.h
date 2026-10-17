@@ -22,6 +22,12 @@ void audio_dbg_byte(int i, uint8_t v);
 /* Hang-triage heartbeat, called once per audio-thread loop (see main.c). */
 void dbg_heartbeat_audio(void);
 
+/*
+ * Bring-up test signals: compiled in for debug builds only
+ * (SIDCLOCK_DEBUG=1 ./build.sh). Release images have no test-tone
+ * generator, and the debug commands behind these are rejected.
+ */
+#ifdef SIDCLOCK_DEBUG
 void audio_click(void);
 void audio_beep(void);
 void audio_long_tone(void);
@@ -40,12 +46,13 @@ void audio_set_tone(uint32_t hz);
 void audio_tone_hold(uint32_t hz, uint32_t seconds);
 void audio_tone_release(void);
 
+/* Calibration: raw MCKFREQ override (0 restores the computed value). */
+void audio_set_mck_raw(uint32_t v);
+#endif /* SIDCLOCK_DEBUG */
+
 /* SID emulator playback mode (see sid_player.h). */
 void audio_sid_start(void);
 void audio_sid_stop(void);
-
-/* Calibration: raw MCKFREQ override (0 restores the computed value). */
-void audio_set_mck_raw(uint32_t v);
 
 /*
  * Debug snapshot for the BLE debug characteristic:

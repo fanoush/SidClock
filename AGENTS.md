@@ -58,6 +58,7 @@ docs/        the documents above
 ```sh
 bootloader/fetch-sdk.sh                 # one-time pinned dependency fetch
 app/build.sh                            # -> app/build/zephyr/zephyr.signed.bin
+SIDCLOCK_DEBUG=1 app/build.sh           # bench build: test commands + 8 KB RTT buffer
 smpmgr --ble <addr> upgrade app/build/zephyr/zephyr.signed.bin
 tools/sidclock_ble.py set-time          # after every reset (no RTC)
 tools/sidclock_ble.py status            # quick health check
@@ -80,8 +81,10 @@ If `smpmgr` is missing: `tools/smpmgr/install.sh`.
 
 Do not break these without discussing it in the PR/commit:
 
-- **No dynamic allocation** in app paths; static buffers only. RAM usage
-  is high (~90%); check the map file before adding buffers.
+- **No dynamic allocation** in app paths; static buffers only. The system
+  heap is off (`CONFIG_HEAP_MEM_POOL_SIZE=0`) because nothing in the linked
+  image calls `malloc`/`k_malloc`; RAM sits at ~92 % with ~15 KB free. Per
+  block breakdown: `docs/architecture.md` ("RAM budget").
 - **Software rotation**: the panel stays in native portrait; windows are
   transposed in the display driver. The logical UI is 448x368 landscape;
   the idle face can be portrait.
@@ -126,6 +129,9 @@ Do not break these without discussing it in the PR/commit:
   `sidclock_ble.py status/monitor` print it, `glitch reset|fwd` injects a
   fake glitch, `blemode rw|ro|off` switches the BLE mode (R/W only) and
   `filedelete <name>` removes tunes (`.sid`/`.len`/`.stil` only).
+- The bring-up test commands (`click`, `beep`, `tone`, `rate`, `tonefreq`,
+  `tonestart`, `tonestop`) exist only in `SIDCLOCK_DEBUG=1` builds; release
+  images reject the opcodes and the BLE tool reports that in one line.
 - Every BLE write handler must check `ble_mode == BLE_MODE_RW` - the CTS
   and debug handlers gate at the top; new write paths that forget it
   silently bypass R/O.

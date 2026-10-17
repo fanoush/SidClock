@@ -64,6 +64,12 @@ LOG_MODULE_REGISTER(sidclock, LOG_LEVEL_INF);
 #ifndef SID_ENGINE_SUFFIX
 #define SID_ENGINE_SUFFIX ""
 #endif
+/* Debug-build tag (set by CMake): "-dbg" for SIDCLOCK_DEBUG=1 builds, so a
+ * bench image with the test commands enabled cannot be mistaken for a
+ * release one (the signed image version stays the same). */
+#ifndef SIDCLOCK_DEBUG_SUFFIX
+#define SIDCLOCK_DEBUG_SUFFIX ""
+#endif
 
 #define SCR_W 448
 #define SCR_H 368
@@ -1403,6 +1409,10 @@ static ssize_t ble_dbg_write(struct bt_conn *conn,
 	}
 
 	switch (p[0]) {
+	/* Bring-up test signals (test tones, rate/tone ladders, raw MCKFREQ):
+	 * compiled in for debug builds only (SIDCLOCK_DEBUG=1 ./build.sh).
+	 * Release builds fall through to default and reject the codes. */
+#ifdef SIDCLOCK_DEBUG
 	case 0x0B:
 		if (len != 5U) {
 			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
@@ -1434,6 +1444,7 @@ static ssize_t ble_dbg_write(struct bt_conn *conn,
 	case 0x02:
 		audio_beep();
 		break;
+#endif /* SIDCLOCK_DEBUG */
 	case 0x03:
 		sound_set(!sound_on);
 		break;
@@ -1572,6 +1583,7 @@ static ssize_t ble_dbg_write(struct bt_conn *conn,
 		sid_player_stop();
 		audio_sid_stop();
 		break;
+#ifdef SIDCLOCK_DEBUG
 	case 0x10:
 		if (len != 5U) {
 			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
@@ -1580,6 +1592,7 @@ static ssize_t ble_dbg_write(struct bt_conn *conn,
 				  ((uint32_t)p[3] << 16) |
 				  ((uint32_t)p[4] << 24));
 		break;
+#endif /* SIDCLOCK_DEBUG */
 	case 0x14: {
 		/* Developer test: fake a timebase glitch. 0 = counter reset
 		 * (anchor pushed ahead of the counter), 1 = forward jump.
@@ -1608,6 +1621,7 @@ static ssize_t ble_dbg_write(struct bt_conn *conn,
 		ble_mode = (uint8_t)(p[1] % 3U);
 		ble_apply_mode();
 		break;
+#ifdef SIDCLOCK_DEBUG
 	case 0x07:
 		audio_rate_next();
 		break;
@@ -1617,6 +1631,7 @@ static ssize_t ble_dbg_write(struct bt_conn *conn,
 	case 0x50:
 		audio_long_tone();
 		break;
+#endif /* SIDCLOCK_DEBUG */
 	default:
 		return BT_GATT_ERR(BT_ATT_ERR_VALUE_NOT_ALLOWED);
 	}
@@ -2004,7 +2019,7 @@ static void redraw_clock(void)
 static void draw_header(void)
 {
 	redraw_clock();
-	draw_text_cached(TC_VER, 8, 52, "v" SIDCLOCK_VERSION SID_ENGINE_SUFFIX, COL_CYAN, COL_BG);
+	draw_text_cached(TC_VER, 8, 52, "v" SIDCLOCK_VERSION SID_ENGINE_SUFFIX SIDCLOCK_DEBUG_SUFFIX, COL_CYAN, COL_BG);
 	draw_battery();
 }
 
