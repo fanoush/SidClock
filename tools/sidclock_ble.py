@@ -34,7 +34,8 @@ Developer/debug commands (see docs/ble-services.md; behaviour may change):
   blemode   BLE access mode: rw (default) | ro (no writes / no OTA) |
             off (advertising off) - only accepted while in rw
   threads   per-thread stack high-water marks (name, size, free) in
-            creation order - flags threads with <256 B free
+            creation order - peak use since boot, not the current depth;
+            flags threads with <256 B free
 
 The bring-up tests (click, beep, tone, rate, tonefreq, tonestart,
 tonestop) exist only in debug builds (SIDCLOCK_DEBUG=1 ./build.sh); a

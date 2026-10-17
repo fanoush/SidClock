@@ -56,6 +56,13 @@ uptime source, and byte [128] reports the BLE access mode. Bytes [129..139]
 carry crash telemetry: boot counter, hwinfo reset-cause flags (LE), audio
 and main thread heartbeats (u16 LE each, a stalled one names the hung
 thread) and the active SID engine (0 = new, 1 = legacy, 0xFF = none).
+
+The thread telemetry (`1D`) reports **peaks, not current depth**: stacks are
+filled with 0xAA when a thread starts (`CONFIG_INIT_STACKS`), and the
+listing counts the bytes that are still untouched, so `used` is the deepest
+the stack has been since boot and never decreases. A real overflow trips
+the hardware stack guard (a reset, recorded in the crash telemetry) before
+it could show up here as 0 free.
 Every read is passive: it must not disturb the running I2S bit clock.
 
 A 30 s independent watchdog (fed from the main loop) reboots instead of
