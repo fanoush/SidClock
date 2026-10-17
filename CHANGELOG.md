@@ -13,6 +13,15 @@ Two weekday fixes; the date itself was always right.
 - REPEAT alarms used the same off-by-two index, so they rang two days
   off the selected weekday (a Sunday alarm went off on Friday).
 
+**Host tools**
+
+- `tools/sidclock_ble.py` no longer prints a traceback when the device
+  drops the BLE link as a command finishes (it also exits cleanly on
+  Ctrl-C during `monitor`), and a device that is not advertising now
+  reports one line after a 3 s discovery/connect timeout instead of
+  waiting out the 30 s default. `tools/backup_ble.py` ignores the same
+  disconnect error.
+
 ## 1.0.5
 
 SID engine: exact ADSR envelope timing restored while keeping the render

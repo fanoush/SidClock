@@ -39,6 +39,21 @@ from datetime import datetime
 
 from bleak import BleakClient, BleakScanner
 
+
+class _QuietClient(BleakClient):
+    """BleakClient that ignores the error BlueZ can raise on disconnect.
+
+    When the walk ends (or the device resets) the link often drops before
+    bleak disconnects it; that exception would only add a traceback after
+    all the work is already done and saved.
+    """
+
+    async def __aexit__(self, *exc):
+        try:
+            await super().__aexit__(*exc)
+        except Exception:
+            pass
+
 SMPMGR = (os.environ.get("SMPMGR")
           or shutil.which("smpmgr")
           or os.path.expanduser("~/.local/bin/smpmgr"))
@@ -122,7 +137,7 @@ async def gatt_backup(d, adv, outdir):
     gatt = []
     lines = [f"GATT tree of {d.address} {d.name!r}",
              f"backed up {datetime.now().isoformat()}", ""]
-    async with BleakClient(d, timeout=30) as c:
+    async with _QuietClient(d, timeout=30) as c:
         for s in c.services:
             svc = {"uuid": s.uuid, "description": s.description, "chars": []}
             lines.append(f"service {s.uuid}  {s.description}")

@@ -2,7 +2,8 @@
 """Talk to a SidClock device over BLE.
 
 Device address (in order): --addr, $SIDCLOCK_ADDR, or a scan for a device
-advertising as "SidClock".
+advertising as "SidClock". Discovery/connect gives up after 3 s and reports
+one line; a link that drops when a command finishes is not an error.
 
 User commands:
   status    read battery level, device time and ambient light level
@@ -48,18 +49,22 @@ Examples:
 
 import argparse
 import asyncio
+import contextlib
 import os
 import struct
 import sys
 import time
 
 from bleak import BleakClient, BleakScanner
+from bleak.exc import BleakDeviceNotFoundError, BleakError
+
 TONES = [1000, 2000, 4000, 8000, 10000, 12000, 15000, 18000,
          20000, 22000, 24000, 26000, 28000, 30000]
 BATTERY_CHAR = "00002a19-0000-1000-8000-00805f9b34fb"  # BAS Battery Level
 CTS_CHAR = "00002a2b-0000-1000-8000-00805f9b34fb"      # CTS Current Time
 ILLUMINANCE_CHAR = "00002afb-0000-1000-8000-00805f9b34fb"  # ESS Illuminance
 DBG_CHAR = "73696463-6c6f-4b02-9c1d-77ce3f41a5c0"      # SidClock debug
+CONNECT_TIMEOUT = 3.0  # s; fail fast when the device is not advertising
 
 
 def lux_u24(raw):
@@ -90,6 +95,37 @@ def time_str(raw):
     return f"{year:04d}-{mon:02d}-{day:02d} {hh:02d}:{mm:02d}:{ss:02d} (dow {dow})"
 
 
+@contextlib.asynccontextmanager
+async def connect(addr):
+    """Connect to the device, then leave quietly.
+
+    Discovery + connect give up after CONNECT_TIMEOUT seconds with a
+    one-line message instead of a traceback (a device that is off, not
+    advertising, or set to BLE R/O / OFF), and the error bleak raises when
+    the device has already dropped the link on the way out - a reset, BLE
+    OFF, or simply the end of the command - is swallowed.
+    """
+    c = BleakClient(addr, timeout=CONNECT_TIMEOUT)
+
+    try:
+        await c.connect()
+    except BleakDeviceNotFoundError:
+        raise SystemExit(
+            f"device not found: {addr} - powered on and advertising? "
+            "(BLE access must be R/W)"
+        )
+    except (BleakError, OSError, TimeoutError) as e:
+        raise SystemExit(f"could not connect to {addr}: {e}")
+
+    try:
+        yield c
+    finally:
+        try:
+            await c.disconnect()
+        except Exception:
+            pass  # link already gone; nothing left to clean up
+
+
 async def resolve_addr(explicit):
     """--addr / $SIDCLOCK_ADDR / scan for the advertised name."""
     if explicit:
@@ -110,7 +146,7 @@ async def resolve_addr(explicit):
 
 
 async def cmd_status(addr):
-    async with BleakClient(addr) as c:
+    async with connect(addr) as c:
         batt = await c.read_gatt_char(BATTERY_CHAR)
         ct = await c.read_gatt_char(CTS_CHAR)
         lux = await c.read_gatt_char(ILLUMINANCE_CHAR)
@@ -135,7 +171,7 @@ async def cmd_set_time(addr, tz=None):
         t = time.gmtime(time.time() + float(tz) * 3600)
     else:
         t = time.localtime()
-    async with BleakClient(addr) as c:
+    async with connect(addr) as c:
         payload = time_payload(t)
         await c.write_gatt_char(CTS_CHAR, payload, response=True)
         back = await c.read_gatt_char(CTS_CHAR)
@@ -144,7 +180,7 @@ async def cmd_set_time(addr, tz=None):
 
 
 async def cmd_monitor(addr):
-    async with BleakClient(addr) as c:
+    async with connect(addr) as c:
         print("polling battery + lux + clock guard every 2 s - Ctrl-C to stop",
               flush=True)
         while True:
@@ -172,7 +208,7 @@ async def cmd_blemode(addr, mode=None):
             "off": 2}.get((mode or "rw").lower())
     if code is None:
         raise SystemExit("ble mode: rw | ro | off")
-    async with BleakClient(addr) as c:
+    async with connect(addr) as c:
         before = await c.read_gatt_char(DBG_CHAR)
         try:
             await c.write_gatt_char(DBG_CHAR, bytes([0x15, code]),
@@ -197,7 +233,7 @@ async def cmd_glitch(addr, mode=None):
         (mode or "reset").lower())
     if code is None:
         raise SystemExit("glitch mode: reset | fwd")
-    async with BleakClient(addr) as c:
+    async with connect(addr) as c:
         clock_before = await c.read_gatt_char(CTS_CHAR)
         before = await c.read_gatt_char(DBG_CHAR)
         await c.write_gatt_char(DBG_CHAR, bytes([0x14, code]), response=True)
@@ -241,7 +277,7 @@ def _rate_of(raw):
 
 
 async def cmd_audio(addr):
-    async with BleakClient(addr) as c:
+    async with connect(addr) as c:
         raw = await c.read_gatt_char(DBG_CHAR)
         print(f"ready {raw[0]}  init_rc {raw[1]}  enabled {raw[6]}  "
               f"volume {raw[7]}  asleep {raw[5]}")
@@ -287,7 +323,7 @@ async def cmd_tone(addr, code):
         0x0F: "stop SID",
         0x50: "1 s steady test tone",
     }.get(code, f"code 0x{code:02x}")
-    async with BleakClient(addr) as c:
+    async with connect(addr) as c:
         await c.write_gatt_char(DBG_CHAR, bytes([code]), response=True)
         print(f"triggered: {label}")
 
@@ -298,14 +334,14 @@ async def cmd_rate(addr, hz=None):
     if hz is not None:
         if not 1000 <= hz <= 96000:
             raise SystemExit("rate must be 1000..96000 Hz")
-        async with BleakClient(addr) as c:
+        async with connect(addr) as c:
             await c.write_gatt_char(DBG_CHAR,
                                     bytes([0x09]) + hz.to_bytes(4, "little"),
                                     response=True)
             raw = await c.read_gatt_char(DBG_CHAR)
             print(f"sample rate set to {_rate_of(raw)} Hz")
         return
-    async with BleakClient(addr) as c:
+    async with connect(addr) as c:
         await c.write_gatt_char(DBG_CHAR, bytes([0x07]), response=True)
         raw = await c.read_gatt_char(DBG_CHAR)
         print(f"sample rate now {_rate_of(raw)} Hz (step {raw[10] + 1})")
@@ -313,7 +349,7 @@ async def cmd_rate(addr, hz=None):
 
 async def cmd_tonefreq(addr, hz=None):
     if hz is None:
-        async with BleakClient(addr) as c:
+        async with connect(addr) as c:
             await c.write_gatt_char(DBG_CHAR, bytes([0x08]), response=True)
             raw = await c.read_gatt_char(DBG_CHAR)
             hz = TONES[raw[11]]
@@ -325,7 +361,7 @@ async def cmd_tonefreq(addr, hz=None):
 
     if not 100 <= hz <= 30000:
         raise SystemExit("tone must be 100..30000 Hz")
-    async with BleakClient(addr) as c:
+    async with connect(addr) as c:
         await c.write_gatt_char(DBG_CHAR,
                                 bytes([0x0A]) + hz.to_bytes(4, "little"),
                                 response=True)
@@ -340,7 +376,7 @@ async def cmd_tonestart(addr, hz=None):
     hz = 1000 if hz is None else hz
     if not 100 <= hz <= 30000:
         raise SystemExit("tone must be 100..30000 Hz")
-    async with BleakClient(addr) as c:
+    async with connect(addr) as c:
         await c.write_gatt_char(DBG_CHAR,
                                 bytes([0x0B]) + hz.to_bytes(4, "little"),
                                 response=True)
@@ -348,7 +384,7 @@ async def cmd_tonestart(addr, hz=None):
 
 
 async def cmd_tonestop(addr):
-    async with BleakClient(addr) as c:
+    async with connect(addr) as c:
         await c.write_gatt_char(DBG_CHAR, bytes([0x0C]), response=True)
     print("tone stopped")
 
@@ -357,7 +393,7 @@ async def cmd_sid(addr, n=None):
     n = 0 if n is None else n
     if not 0 <= n <= 9:
         raise SystemExit("SID index must be 0..9 (/home/<n>.sid)")
-    async with BleakClient(addr) as c:
+    async with connect(addr) as c:
         await c.write_gatt_char(DBG_CHAR, bytes([0x0E, n]), response=True)
         raw = await c.read_gatt_char(DBG_CHAR)
     title = bytes(raw[75:90]).split(b"\0")[0].decode(errors="replace")
@@ -373,7 +409,7 @@ async def cmd_sidname(addr, name=None):
     data = name.encode("ascii", "replace")
     if len(data) > 20:
         raise SystemExit("file name too long (max 20 chars)")
-    async with BleakClient(addr) as c:
+    async with connect(addr) as c:
         await c.write_gatt_char(DBG_CHAR, bytes([0x11]) + data, response=True)
         raw = await c.read_gatt_char(DBG_CHAR)
     title = bytes(raw[75:90]).split(b"\0")[0].decode(errors="replace")
@@ -386,7 +422,7 @@ async def cmd_engine(addr, value=None):
     """Switch the SID engine (dual-engine builds): new (cRSID) | old (cSID)."""
     if value not in ("new", "old"):
         raise SystemExit("usage: engine new|old  (cRSID / cSID-light)")
-    async with BleakClient(addr) as c:
+    async with connect(addr) as c:
         await c.write_gatt_char(DBG_CHAR, bytes([0x17, 1 if value == "old" else 0]),
                                 response=True)
         print(f"SID engine: {value}")
@@ -399,7 +435,7 @@ async def cmd_filedelete(addr, name=None):
     names = [name]
     if name.lower().endswith(".sid"):
         names += [name[:-4] + ".len", name[:-4] + ".stil"]
-    async with BleakClient(addr) as c:
+    async with connect(addr) as c:
         for i, n in enumerate(names):
             data = n.encode("ascii", "replace")
             if len(data) > 20:
@@ -422,14 +458,14 @@ async def cmd_chip(addr, mode=None):
     m = 0 if mode is None else modes.get(str(mode).lower())
     if m is None:
         raise SystemExit("chip mode: auto | 6581 | 8580")
-    async with BleakClient(addr) as c:
+    async with connect(addr) as c:
         await c.write_gatt_char(DBG_CHAR, bytes([0x12, m]), response=True)
     print(f"SID chip mode -> {('auto (PSID flag)', '6581', '8580')[m]}"
           f" (reloads the current tune)")
 
 
 async def cmd_ls(addr):
-    async with BleakClient(addr) as c:
+    async with connect(addr) as c:
         start = 0
         names = []
         for _ in range(40):
@@ -464,7 +500,7 @@ async def _poll_marker(c, marker):
 
 async def cmd_threads(addr, value=None):
     """Per-thread stack high-water marks in creation order."""
-    async with BleakClient(addr) as c:
+    async with connect(addr) as c:
         rows = []
         for page in (0, 1):
             payload = bytes([0x1D]) if page == 0 else bytes([0x1D, page])
@@ -551,4 +587,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print()  # e.g. Ctrl-C in 'monitor': exit without a traceback
+        sys.exit(130)
