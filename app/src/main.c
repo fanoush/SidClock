@@ -33,6 +33,7 @@
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/dfu/mcuboot.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/debug/thread_analyzer.h>
 #include <zephyr/init.h>
 #include <zephyr/drivers/adc.h>
 #include <zephyr/drivers/watchdog.h>
@@ -421,6 +422,33 @@ static void sid_scroll_restart(void); /* defined with the UI below */
 static int home_list(uint16_t start, uint8_t *dst, int size); /* below */
 static void home_write_dir(void); /* below */
 static int16_t ls_start = -1; /* pending /home listing request (page start) */
+
+/* Stack telemetry (debug command 0x1D [+ u8 page]): per-thread stack
+ * (size, free) pairs in creation order, 5 per page at snapshot [36..55]
+ * ([34] marker, [35] page<<7 | count). Sizes identify the threads
+ * (main/mgmt 4096, bt_rx 2048, sysworkq 1024, ...). */
+#define STACKS_MAX 10U
+static bool stacks_pending;
+static bool stacks_valid;
+static uint8_t stacks_page;
+static uint8_t stacks_n;
+static uint16_t stacks_size[STACKS_MAX];
+static uint16_t stacks_free[STACKS_MAX];
+
+static void stacks_cb(struct thread_analyzer_info *info)
+{
+	uint32_t free;
+
+	if (stacks_n >= STACKS_MAX) {
+		return;
+	}
+	free = (info->stack_used >= info->stack_size)
+		       ? 0U
+		       : (uint32_t)(info->stack_size - info->stack_used);
+	stacks_size[stacks_n] = (uint16_t)MIN(info->stack_size, 0xFFFFU);
+	stacks_free[stacks_n] = (uint16_t)MIN(free, 0xFFFFU);
+	stacks_n++;
+}
 
 /*
  * /home LittleFS (external MX25R64). Mounted WITHOUT auto-format so a dirty
@@ -1301,6 +1329,27 @@ static ssize_t ble_dbg_read(struct bt_conn *conn,
 		ls_start = -1;
 	}
 
+	if (stacks_valid && ls_start < 0) {
+		/* stack telemetry (command 0x1D): [34] marker, [35] page,
+		 * [36..] up to 5 x (size, free) u16 LE pairs, creation order */
+		uint8_t off = stacks_page * 5U;
+		uint8_t n = 0U;
+
+		ble_dbg[34] = 0x1DU;
+		ble_dbg[35] = stacks_page;
+		memset(ble_dbg + 36, 0, 20);
+		while (n < 5U && off + n < stacks_n) {
+			ble_dbg[36 + 4U * n] = (uint8_t)stacks_size[off + n];
+			ble_dbg[37 + 4U * n] =
+				(uint8_t)(stacks_size[off + n] >> 8);
+			ble_dbg[38 + 4U * n] = (uint8_t)stacks_free[off + n];
+			ble_dbg[39 + 4U * n] =
+				(uint8_t)(stacks_free[off + n] >> 8);
+			n++;
+		}
+		stacks_valid = false;
+	}
+
 	ble_dbg_time(ble_dbg + 96);
 	sys_put_le32(ble_mode, ble_dbg + 128); /* [128] mode, rest spare */
 	ble_dbg[129] = crash_log.boots; /* crash telemetry [129..139] */
@@ -1342,6 +1391,7 @@ static ssize_t ble_dbg_write(struct bt_conn *conn,
 	      (len == 2U && p[0] == 0x14U) ||
 	      (len == 2U && p[0] == 0x15U) ||
 	      (len == 3U && p[0] == 0x13U) ||
+	      (len == 2U && p[0] == 0x1DU) ||
 	      (len >= 2U && len <= 21U && p[0] == 0x11U) ||
 	      (len >= 2U && len <= 21U && p[0] == 0x16U) ||
 #ifdef SID_ENGINE_DUAL
@@ -1502,6 +1552,21 @@ static ssize_t ble_dbg_write(struct bt_conn *conn,
 			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
 		}
 		ls_start = (int16_t)((uint16_t)p[1] | ((uint16_t)p[2] << 8));
+		break;
+	case 0x1D:
+		/* Stack telemetry for the overflow hunt: latch per-thread
+		 * (size, free) pairs for the snapshot read. Optional 2nd
+		 * byte selects page 0/1 (5 threads each). */
+		if (len != 1U && len != 2U) {
+			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+		}
+		if (stacks_pending) {
+			return BT_GATT_ERR(BT_ATT_ERR_VALUE_NOT_ALLOWED);
+		}
+		stacks_page = (len == 2U) ? (p[1] & 1U) : 0U;
+		stacks_pending = true;
+		stacks_valid = false;
+		LOG_INF("stack telemetry armed (page %u)", stacks_page);
 		break;
 	case 0x0F:
 		sid_player_stop();
@@ -4814,6 +4879,15 @@ int main(void)
 		dbg_heartbeat_main();
 		if (wdt_dev != NULL) {
 			(void)wdt_feed(wdt_dev, wdt_chan);
+		}
+		/* stack telemetry (command 0x1D) */
+		if (stacks_pending) {
+			stacks_pending = false;
+			stacks_n = 0U;
+			memset(stacks_free, 0, sizeof(stacks_free));
+			thread_analyzer_run(stacks_cb, 0);
+			stacks_valid = true;
+			LOG_INF("stacks latched: %u threads", stacks_n);
 		}
 		/* the SID marquee only advances while its screen is on
 		 * show (idle face, other screens and the dark panel pause

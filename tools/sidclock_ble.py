@@ -32,6 +32,8 @@ Developer/debug commands (see docs/ble-services.md; behaviour may change):
             verify the clock guard absorbs it
   blemode   BLE access mode: rw (default) | ro (no writes / no OTA) |
             off (advertising off) - only accepted while in rw
+  threads   per-thread stack high-water marks in creation order
+            (overflow hunt - flags threads with <256 B free)
 
 Uploading SID tunes (any name, played in file name order by the device):
   smpmgr --ble <addr> file upload <local.sid> /home/<name>.sid
@@ -448,6 +450,40 @@ async def cmd_ls(addr):
     print(f"  ({len(names)} files)")
 
 
+async def _poll_marker(c, marker):
+    """Poll the snapshot until the deferred op serves its marker."""
+    for _ in range(15):
+        await asyncio.sleep(1)
+        raw = await c.read_gatt_char(DBG_CHAR)
+        if len(raw) < 50:
+            raise SystemExit("short snapshot (old firmware?)")
+        if raw[34] == marker:
+            return raw
+    raise SystemExit("op not served (retry)")
+
+
+async def cmd_threads(addr, value=None):
+    """Per-thread stack high-water marks in creation order."""
+    async with BleakClient(addr) as c:
+        rows = []
+        for page in (0, 1):
+            payload = bytes([0x1D]) if page == 0 else bytes([0x1D, page])
+            await c.write_gatt_char(DBG_CHAR, payload, response=True)
+            raw = await _poll_marker(c, 0x1D)
+            for i in range(5):
+                size = raw[36 + 4 * i] | (raw[37 + 4 * i] << 8)
+                free = raw[38 + 4 * i] | (raw[39 + 4 * i] << 8)
+                if size == 0:
+                    continue
+                rows.append((size, free))
+    print(f"threads: {len(rows)} (creation order)")
+    for i, (size, free) in enumerate(rows):
+        used = size - free
+        flag = "  <-- LOW!" if free < 256 else ""
+        print(f"  [{i}] size {size:5d}  free {free:5d}  "
+              f"used {used:5d} ({100 * used // size} %){flag}")
+
+
 def main():
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -461,7 +497,7 @@ def main():
             "tone", "mute", "rate", "tonefreq",
         "tonestart", "tonestop", "fsformat", "sid", "sidname", "chip",
         "sidstop", "ls", "glitch", "blemode", "filedelete",
-        "engine",
+        "engine", "threads",
         ],
     )
     ap.add_argument(
@@ -498,8 +534,10 @@ def main():
         "blemode": cmd_blemode,
         "filedelete": cmd_filedelete,
         "engine": cmd_engine,
+        "threads": cmd_threads,
     }[args.command]
-    if args.command in ("sidname", "chip", "filedelete", "engine"):
+    if args.command in ("sidname", "chip", "filedelete", "engine",
+                        "threads"):
         asyncio.run(fn(args.addr, args.value))
     elif args.command == "set-time":
         asyncio.run(fn(args.addr, args.value))

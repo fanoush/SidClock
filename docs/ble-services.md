@@ -41,6 +41,7 @@ arguments:
 | `15` + u8 `mode` | set the BLE access mode (`0` = R/W, `1` = R/O, `2` = OFF); only accepted in R/W |
 | `16` + name | delete `/home/<name>` - only `.sid`, `.len` and `.stil` files (config files are protected); rejected in R/O and OFF |
 | `17` + u8 engine | global SID engine, dual-engine builds only: `0` = new cRSID, `1` = legacy cSID-light (same as the main-screen button: stops, flips, restarts the current tune) |
+| `1D` [+ u8 `page`] | thread stack telemetry for the overflow hunt: latch per-thread `(size, free)` u16 pairs (creation order, 5 per page) at `[34..55]` (`[34]` marker, `[35]` page). Under 256 B free anywhere is the smoking gun. |
 | `50` | 1 s test tone |
 
 The read snapshot (132 bytes) mixes audio state (sample rate, DMA buffer
