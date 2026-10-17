@@ -107,8 +107,9 @@ to check before adding a buffer. Measured from the release ELF
 | Logging + RTT | 5 KB | 2 KB RTT buffer in release builds (8 KB with `SIDCLOCK_DEBUG`), log core |
 | LittleFS, drivers, alarms, configs | ~4 KB | filesystem object + caches, SPI/ADC/GPIOTE/I2S drivers |
 
-`threads` (BLE debug command) reports per-thread stack high-water marks -
-the cheapest way to claw stack back. Debug-only RAM sits behind
+`stacks` (BLE debug command) reports stack high-water marks - the
+interrupt stack first, then every thread - the cheapest way to claw stack
+back. Debug-only RAM sits behind
 `SIDCLOCK_DEBUG`; see [development.md](development.md).
 
 ## Design decisions

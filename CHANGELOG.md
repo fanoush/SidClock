@@ -11,6 +11,8 @@
   (so it can be repeated, and a later `log` still sees it) and `-f` follows;
   `--peek -f` watches new lines without ever consuming them. Verified on
   hardware.
+- `threads` is now `stacks` (the interrupt stack comes first, then the
+  threads); `threads` keeps working as an alias.
 - Ctrl-C now stops `log -f` and `monitor`: the first SIGINT was swallowed
   (asyncio cancels the main task and bleak's D-Bus read absorbs it), which
   left the tool running *and* the BLE link up, so the device stopped
@@ -20,9 +22,21 @@
 
 **Internal**
 
-- `threads` (BLE debug command `1D`) now reports the thread name with each
-  stack high-water mark, 4 threads per page, so a tight stack can be
-  attributed without recognising its size. Verified on hardware.
+- `stacks` (BLE debug command `1D`, was `threads`; the old name still
+  works) now reports the **interrupt stack** as its first row, then the
+  threads, so the stack shared by the BLE controller and the I2S service
+  routines is visible too - the `ISR0` line the thread analyzer used to
+  print only into the log is now a row with size/free/used. The latch
+  holds just the requested page (4 rows) and a thread handle per row
+  instead of a copy of its name (the kernel owns it, `CONFIG_THREAD_NAME`,
+  so it is read when the snapshot is built): 148 B of RAM back, and one
+  page costs 4 stack scans instead of 12. The page byte's bit 6 marks the
+  last page, so the host follows the listing instead of assuming 3 pages.
+  Verified on hardware (same numbers as the previous firmware).
+- The thread analyzer subsys is gone (`CONFIG_THREAD_ANALYZER`): the walk
+  is 20 lines in `main.c`, which also drops `CONFIG_THREAD_RUNTIME_STATS`
+  from the context-switch path; `CONFIG_INIT_STACKS`, `THREAD_MONITOR` and
+  `THREAD_STACK_INFO` are now set explicitly.
 - The log buffer runs in overwrite mode
   (`CONFIG_LOG_BACKEND_RTT_MODE_OVERWRITE`): with nothing reading RTT back,
   DROP kept only the oldest lines and threw every new one away; overwrite

@@ -34,7 +34,6 @@
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/dfu/mcuboot.h>
 #include <zephyr/logging/log.h>
-#include <zephyr/debug/thread_analyzer.h>
 #include <zephyr/init.h>
 #include <zephyr/drivers/adc.h>
 #include <zephyr/drivers/watchdog.h>
@@ -431,44 +430,100 @@ static int home_list(uint16_t start, uint8_t *dst, int size); /* below */
 static void home_write_dir(void); /* below */
 static int16_t ls_start = -1; /* pending /home listing request (page start) */
 
-/* Stack telemetry (debug command 0x1D [+ u8 page]): per-thread stack
- * (size, free) pairs plus thread names in creation order, 4 per page.
- * Snapshot [34] marker, [35] page | 0x80 (bit 7 = names present),
- * [36..51] 4 x (size, free) u16 LE, [52..95] the matching 11-byte names.
- * The bit tells an older host that these bytes are not names. */
-#define STACKS_MAX 12U
+/* Stack telemetry (debug command 0x1D [+ u8 page]): the interrupt stack
+ * first, then per-thread stack (size, free) pairs in creation order, 4
+ * rows per page. Only the requested page is latched: the 0xAA sentinel
+ * scan runs for those 4 rows instead of all ~10, and the latch keeps the
+ * thread handle rather than a copy of its name - the kernel already owns
+ * the name (thread->name), so it is read when the snapshot is built.
+ * Snapshot [34] marker, [35] page | 0x80 (bit 7 = names present) |
+ * 0x40 (bit 6 = last page), [36..51] 4 x (size, free) u16 LE,
+ * [52..95] the matching 11-byte names. Bit 7 tells an older host that
+ * these bytes are names; bit 6 tells a newer one where the list ends. */
+#define STACKS_MAX 12U /* 1 + 11 threads over 3 pages */
 #define STACKS_PER_PAGE 4U
 #define STACKS_NAME_MAX 11U /* including the terminator */
 #define STACKS_NAME_OFF 52U
+
+/* the interrupt stack array (declared the same way in thread_analyzer.c)
+ * and the kernel-internal helper behind k_thread_stack_space_get(),
+ * neither of which has a public header */
+K_KERNEL_STACK_ARRAY_DECLARE(z_interrupt_stacks, CONFIG_MP_MAX_NUM_CPUS,
+			     CONFIG_ISR_STACK_SIZE);
+extern int z_stack_space_get(const uint8_t *stack_start, size_t size,
+			     size_t *unused_ptr);
+
 static bool stacks_pending;
 static bool stacks_valid;
 static uint8_t stacks_page;
-static uint8_t stacks_n;
-static uint16_t stacks_size[STACKS_MAX];
-static uint16_t stacks_free[STACKS_MAX];
-static char stacks_name[STACKS_MAX][STACKS_NAME_MAX];
+static uint8_t stacks_latched; /* rows stored for the requested page */
+static uint8_t stacks_total;   /* rows in the whole listing */
+static uint8_t stacks_index;   /* row cursor while latching */
+static uint16_t stacks_size[STACKS_PER_PAGE];
+static uint16_t stacks_free[STACKS_PER_PAGE];
+static const struct k_thread *stacks_thread[STACKS_PER_PAGE]; /* NULL: ISR */
 
-static void stacks_cb(struct thread_analyzer_info *info)
+/* True when row idx of the listing belongs to the requested page. */
+static bool stacks_row_here(uint8_t idx)
 {
-	const char *nm = info->name != NULL ? info->name : "?";
-	uint32_t free;
-	size_t k = 0U;
+	uint8_t base = stacks_page * STACKS_PER_PAGE;
 
-	if (stacks_n >= STACKS_MAX) {
-		return;
+	return idx >= base && (uint8_t)(idx - base) < STACKS_PER_PAGE;
+}
+
+/* Store row idx of the listing (thread == NULL for the interrupt stack)
+ * in the requested page's slots; `unused` is what the kernel's 0xAA scan
+ * counts, i.e. the free high-water mark. */
+static void stacks_save(uint8_t idx, const struct k_thread *thread,
+			size_t size, size_t unused)
+{
+	uint8_t slot = idx - stacks_page * STACKS_PER_PAGE;
+
+	stacks_size[slot] = (uint16_t)MIN(size, 0xFFFFU);
+	stacks_free[slot] = (uint16_t)MIN(unused, 0xFFFFU);
+	stacks_thread[slot] = thread;
+	stacks_latched = slot + 1U;
+}
+
+static void stacks_walk_cb(const struct k_thread *thread, void *user_data)
+{
+	uint8_t idx = stacks_index;
+
+	ARG_UNUSED(user_data);
+	if (idx >= STACKS_MAX) {
+		return; /* listing full: stop counting */
 	}
-	free = (info->stack_used >= info->stack_size)
-		       ? 0U
-		       : (uint32_t)(info->stack_size - info->stack_used);
-	stacks_size[stacks_n] = (uint16_t)MIN(info->stack_size, 0xFFFFU);
-	stacks_free[stacks_n] = (uint16_t)MIN(free, 0xFFFFU);
-	stacks_name[stacks_n][0] = '\0';
-	while (k < STACKS_NAME_MAX - 1U && nm[k] != '\0') {
-		stacks_name[stacks_n][k] = nm[k];
-		k++;
+	stacks_index = idx + 1U;
+	stacks_total = stacks_index;
+	if (stacks_row_here(idx)) {
+		size_t unused = 0U;
+
+		if (k_thread_stack_space_get(thread, &unused) != 0) {
+			unused = 0U;
+		}
+		stacks_save(idx, thread, thread->stack_info.size, unused);
 	}
-	stacks_name[stacks_n][k] = '\0';
-	stacks_n++;
+}
+
+/* Latch the rows of the requested page: interrupt stack, then threads in
+ * creation order (the same order the kernel's thread list uses). Only the
+ * rows on that page pay for the 0xAA sentinel scan. */
+static void stacks_latch(void)
+{
+	const uint8_t *buf = K_KERNEL_STACK_BUFFER(z_interrupt_stacks[0]);
+	size_t size = K_KERNEL_STACK_SIZEOF(z_interrupt_stacks[0]);
+	size_t unused = 0U;
+
+	stacks_latched = 0U;
+	stacks_index = 1U; /* row 0: the interrupt stack */
+	stacks_total = 1U;
+	if (z_stack_space_get(buf, size, &unused) != 0) {
+		unused = 0U;
+	}
+	if (stacks_row_here(0U)) {
+		stacks_save(0U, NULL, size, unused);
+	}
+	k_thread_foreach_unlocked(stacks_walk_cb, NULL);
 }
 
 /* Log drain (debug command 0x1E): the log backend writes the LOG_* lines
@@ -1422,23 +1477,41 @@ static ssize_t ble_dbg_read(struct bt_conn *conn,
 
 	if (stacks_valid && !log_ready && ls_start < 0) {
 		/* stack telemetry (command 0x1D): [34] marker, [35] page |
-		 * 0x80, [36..51] up to 4 x (size, free) u16 LE pairs and
-		 * [52..95] the matching 11-byte names, 4 threads per page */
-		uint8_t off = stacks_page * STACKS_PER_PAGE;
+		 * 0x80 (names) | 0x40 (last page), [36..51] up to 4 x
+		 * (size, free) u16 LE pairs and [52..95] the matching
+		 * 11-byte names, 4 rows per page. Row 0 of the listing is
+		 * the interrupt stack; its name is filled in here. */
 		uint8_t n = 0U;
 
 		ble_dbg[34] = 0x1DU;
 		ble_dbg[35] = (uint8_t)(stacks_page | 0x80U);
+		if ((stacks_page + 1U) * STACKS_PER_PAGE >= stacks_total) {
+			ble_dbg[35] |= 0x40U;
+		}
 		memset(ble_dbg + 36, 0, 60);
-		while (n < STACKS_PER_PAGE && off + n < stacks_n) {
-			ble_dbg[36 + 4U * n] = (uint8_t)stacks_size[off + n];
+		while (n < stacks_latched) {
+			const char *nm;
+			size_t k = 0U;
+
+			if (stacks_thread[n] != NULL) {
+				nm = k_thread_name_get((k_tid_t)stacks_thread[n]);
+				if (nm == NULL || nm[0] == '\0') {
+					nm = "?";
+				}
+			} else {
+				nm = "ISR0"; /* single core on this port */
+			}
+			ble_dbg[36 + 4U * n] = (uint8_t)stacks_size[n];
 			ble_dbg[37 + 4U * n] =
-				(uint8_t)(stacks_size[off + n] >> 8);
-			ble_dbg[38 + 4U * n] = (uint8_t)stacks_free[off + n];
+				(uint8_t)(stacks_size[n] >> 8);
+			ble_dbg[38 + 4U * n] = (uint8_t)stacks_free[n];
 			ble_dbg[39 + 4U * n] =
-				(uint8_t)(stacks_free[off + n] >> 8);
-			memcpy(ble_dbg + STACKS_NAME_OFF + STACKS_NAME_MAX * n,
-			       stacks_name[off + n], STACKS_NAME_MAX);
+				(uint8_t)(stacks_free[n] >> 8);
+			while (k < STACKS_NAME_MAX - 1U && nm[k] != '\0') {
+				ble_dbg[STACKS_NAME_OFF + STACKS_NAME_MAX * n + k] =
+					nm[k];
+				k++;
+			}
 			n++;
 		}
 		stacks_valid = false;
@@ -1654,9 +1727,10 @@ static ssize_t ble_dbg_write(struct bt_conn *conn,
 		ls_start = (int16_t)((uint16_t)p[1] | ((uint16_t)p[2] << 8));
 		break;
 	case 0x1D:
-		/* Stack telemetry for the overflow hunt: latch per-thread
-		 * (size, free) pairs and names for the snapshot read.
-		 * Optional 2nd byte selects page 0..2 (4 threads each). */
+		/* Stack telemetry for the overflow hunt: latch the 4 rows of
+		 * the requested page (interrupt stack + threads in creation
+		 * order) for the snapshot read. The optional 2nd byte
+		 * selects page 0..2. */
 		if (len != 1U && len != 2U) {
 			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
 		}
@@ -5010,11 +5084,10 @@ int main(void)
 		/* stack telemetry (command 0x1D) */
 		if (stacks_pending) {
 			stacks_pending = false;
-			stacks_n = 0U;
-			memset(stacks_free, 0, sizeof(stacks_free));
-			thread_analyzer_run(stacks_cb, 0);
+			stacks_latch();
 			stacks_valid = true;
-			LOG_INF("stacks latched: %u threads", stacks_n);
+			LOG_INF("stacks latched: page %u rows %u of %u",
+				stacks_page, stacks_latched, stacks_total);
 		}
 		/* the SID marquee only advances while its screen is on
 		 * show (idle face, other screens and the dark panel pause

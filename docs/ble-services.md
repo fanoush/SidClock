@@ -44,7 +44,7 @@ signals: they are only compiled into **debug builds**
 | `15` + u8 `mode` | set the BLE access mode (`0` = R/W, `1` = R/O, `2` = OFF); only accepted in R/W |
 | `16` + name | delete `/home/<name>` - only `.sid`, `.len` and `.stil` files (config files are protected); rejected in R/O and OFF |
 | `17` + u8 engine | global SID engine, dual-engine builds only: `0` = new cRSID, `1` = legacy cSID-light (same as the main-screen button: stops, flips, restarts the current tune) |
-| `1D` [+ u8 `page`] | thread stack telemetry for the overflow hunt: latch per-thread `(size, free)` u16 pairs (creation order, 4 per page) at `[36..51]` and the matching 11-byte thread names at `[52..95]`; `[34]` marker, `[35]` page with bit 7 set to say the names follow (bit 7 clear = the older 5-per-page layout without names). Under 256 B free anywhere is the smoking gun. |
+| `1D` [+ u8 `page`] | stack telemetry for the overflow hunt, 4 rows per page: the **interrupt stack** first, then the threads in creation order. `(size, free)` u16 pairs at `[36..51]`, the matching 11-byte names at `[52..95]`; `[34]` marker, `[35]` page with bit 7 set to say the names follow and bit 6 set on the last page (bit 7 clear = the older 5-per-page layout without names; bit 6 clear everywhere = firmware from before the interrupt row). Only the requested page is latched, so one page costs 4 stack scans. Under 256 B free anywhere is the smoking gun. |
 | `1E` [+ u8 `mode`] | drain the SEGGER RTT log buffer - the `LOG_*` lines a debug probe would show; the next read returns up to 60 bytes of text at `[36..95]`, the byte count in `[35]`, `[34]` = marker. The bare opcode (or `mode` 0) **consumes** the chunk, so the device forgets it and a second call only shows newer lines. `mode` 1 restarts a *peek* at the oldest unread byte and 2 continues it; a peek never moves the read pointer, so it is repeatable and a later consume still sees the window. |
 | `50` | 1 s test tone |
 
@@ -58,10 +58,13 @@ carry crash telemetry: boot counter, hwinfo reset-cause flags (LE), audio
 and main thread heartbeats (u16 LE each, a stalled one names the hung
 thread) and the active SID engine (0 = new, 1 = legacy, 0xFF = none).
 
-The thread telemetry (`1D`) reports **peaks, not current depth**: stacks are
+The stack telemetry (`1D`) reports **peaks, not current depth**: stacks are
 filled with 0xAA when a thread starts (`CONFIG_INIT_STACKS`), and the
 listing counts the bytes that are still untouched, so `used` is the deepest
-the stack has been since boot and never decreases. A real overflow trips
+the stack has been since boot and never decreases. The first row is the
+interrupt stack (`ISR0`), which is where BLE controller and I2S service
+routines live; the rest are threads, named from the kernel's own copy
+(`CONFIG_THREAD_NAME`) when the snapshot is built. A real overflow trips
 the hardware stack guard (a reset, recorded in the crash telemetry) before
 it could show up here as 0 free.
 Every read is passive: it must not disturb the running I2S bit clock.

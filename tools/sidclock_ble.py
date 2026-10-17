@@ -38,9 +38,10 @@ Developer/debug commands (see docs/ble-services.md; behaviour may change):
             verify the clock guard absorbs it
   blemode   BLE access mode: rw (default) | ro (no writes / no OTA) |
             off (advertising off) - only accepted while in rw
-  threads   per-thread stack high-water marks (name, size, free) in
-            creation order - peak use since boot, not the current depth;
-            flags threads with <256 B free
+  stacks    stack high-water marks (name, size, free): the interrupt
+            stack first, then the threads in creation order - peak use
+            since boot, not the current depth; flags rows with <256 B
+            free (alias: threads)
 
 The bring-up tests (click, beep, tone, rate, tonefreq, tonestart,
 tonestop) exist only in debug builds (SIDCLOCK_DEBUG=1 ./build.sh); a
@@ -639,22 +640,20 @@ async def _poll_marker(c, marker):
     raise SystemExit("op not served (retry)")
 
 
-async def cmd_threads(addr, value=None):
-    """Per-thread stack high-water marks (name, size, free) in creation order."""
+async def cmd_stacks(addr, value=None):
+    """Stack high-water marks: the interrupt stack first, then the threads."""
     async with connect(addr) as c:
         raws = []
-        pages = 2  # firmware without thread names: 5 entries per page
-        for page in range(3):
+        for page in range(4):  # firmware caps the listing at 3 pages
             payload = bytes([0x1D]) if page == 0 else bytes([0x1D, page])
             await c.write_gatt_char(DBG_CHAR, payload, response=True)
             raw = await _poll_marker(c, 0x1D)
             raws.append(raw)
-            if page == 0:
-                pages = _stack_page_count(raw)
-            if page + 1 >= pages:
+            if not _stacks_more(raw[35], page):
                 break
     rows = _parse_stack_pages(raws)
-    print(f"threads: {len(rows)} (creation order)")
+    print(f"stacks: {len(rows)} rows (interrupt stack, then threads "
+          f"in creation order)")
     wid = max((len(name) for name, _, _ in rows), default=4)
     for i, (name, size, free) in enumerate(rows):
         used = size - free
@@ -663,23 +662,28 @@ async def cmd_threads(addr, value=None):
               f"used {used:5d} ({100 * used // size} %){flag}")
 
 
-def _stack_page_count(raw):
-    """3 snapshot pages for the named layout, 2 for the older one.
+def _stacks_more(page_byte, page):
+    """Whether another 0x1D page should be requested.
 
-    Bit 7 of the page byte in [35] is set when the firmware fills the name
-    fields, which is also what changes the entries per page from 5 to 4.
+    Bit 6 of the page byte in [35] marks the last page (firmware that has
+    the interrupt stack row); older firmware leaves it clear, and then the
+    named layout has 3 pages and the pre-name layout 2.
     """
-    return 3 if raw[35] & 0x80 else 2
+    if page_byte & 0x40:
+        return False
+    return page + 1 < (3 if page_byte & 0x80 else 2)
 
 
 def _parse_stack_pages(raws):
     """(name, size, free) rows from the 0x1D snapshot pages.
 
     Names live in bytes [52..95] as 11-byte fields, aligned with the
-    (size, free) pairs at [36..51], 4 threads per page; bit 7 of the page
-    byte in [35] marks that layout. A firmware that predates it keeps the
-    5-per-page pairs at [36..55] and leaves non-text bytes where the names
-    would be, so those rows are labelled by position instead.
+    (size, free) pairs at [36..51], 4 rows per page; bit 7 of the page
+    byte in [35] marks that layout. Row 0 of the listing is the interrupt
+    stack (named "ISR0" by the firmware); the threads follow in creation
+    order. A firmware that predates the names keeps the 5-per-page pairs
+    at [36..55] and leaves non-text bytes where the names would be, so
+    those rows are labelled by position instead.
     """
     rows = []
     for page, raw in enumerate(raws):
@@ -712,7 +716,7 @@ def main():
             "tone", "mute", "rate", "tonefreq",
         "tonestart", "tonestop", "fsformat", "sid", "sidname", "chip",
         "sidstop", "ls", "glitch", "blemode", "filedelete",
-        "engine", "threads", "log",
+        "engine", "stacks", "threads", "log",
         ],
     )
     ap.add_argument(
@@ -757,13 +761,14 @@ def main():
         "blemode": cmd_blemode,
         "filedelete": cmd_filedelete,
         "engine": cmd_engine,
-        "threads": cmd_threads,
+        "stacks": cmd_stacks,
+        "threads": cmd_stacks,  # alias for the old name
         "log": cmd_log,
     }[args.command]
     if args.command == "log":
         asyncio.run(fn(args.addr, args.peek, args.follow))
     elif args.command in ("sidname", "chip", "filedelete", "engine",
-                          "threads"):
+                          "stacks", "threads"):
         asyncio.run(fn(args.addr, args.value))
     elif args.command == "set-time":
         asyncio.run(fn(args.addr, args.value))
