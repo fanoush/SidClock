@@ -153,7 +153,9 @@ Developer commands (`audio`, `click`, `beep`, `tone`, `mute`, `rate`,
 `tonefreq`, `tonestart`, `tonestop`, `chip`, `fsformat`) are documented in
 the CLI's `--help`. The test-signal ones need a debug build
 (`SIDCLOCK_DEBUG=1 ./build.sh`); against a release device the CLI reports
-the rejection in one line instead of a traceback.
+the rejection in one line instead of a traceback. `fsformat` erases `/home`
+and asks for an explicit `yes` first (`-y` answers it, required when stdin
+is not a terminal), then prints whether the fresh filesystem mounted.
 
 ## Files and OTA
 

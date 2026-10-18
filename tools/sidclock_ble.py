@@ -33,7 +33,9 @@ Developer/debug commands (see docs/ble-services.md; behaviour may change):
   rate      get/set the I2S sample rate (Hz)
   tonefreq  step/play a test tone frequency (Hz)
   tonestart/tonestop  steady tone on/off
-  fsformat  DESTRUCTIVE: format the /home LittleFS partition
+  fsformat  DESTRUCTIVE: format the /home LittleFS partition (asks for an
+            explicit "yes"; -y skips the question and is required when stdin
+            is not a terminal)
   glitch    developer: inject a fake timebase glitch (reset | fwd) to
             verify the clock guard absorbs it
   blemode   BLE access mode: rw (default) | ro (no writes / no OTA) |
@@ -403,6 +405,45 @@ async def cmd_tone(addr, code):
         print(f"triggered: {label}")
 
 
+
+
+async def cmd_fsformat(addr, yes=False):
+    """DESTRUCTIVE: erase /home and recreate a fresh LittleFS partition."""
+    if not _confirm(
+            "fsformat erases /home: every tune, the settings, the alarms and "
+            "the saved clock are gone and cannot be recovered.", yes):
+        raise SystemExit("aborted - nothing was formatted")
+    async with connect(addr) as c:
+        await dbg_write(c, bytes([0x0D]), "format /home")
+        raw = await c.read_gatt_char(DBG_CHAR)
+    state = _fs_state(raw)
+    if state is None:
+        print("formatted (this firmware does not report the filesystem state)")
+    elif state[0]:
+        print("formatted: /home mounted")
+    else:
+        print(f"formatted, but /home is still not mounted "
+              f"(mount error -{state[1]})")
+
+
+def _confirm(question, assume_yes):
+    """Guard for destructive commands.
+
+    A stdin that is not a terminal is refused unless --yes was given, so a
+    script cannot wipe the device by accident.
+    """
+    if assume_yes:
+        return True
+    if not sys.stdin.isatty():
+        raise SystemExit(f"{question}\nrefusing without a terminal to confirm "
+                         "on - pass -y to say yes non-interactively")
+    print(question)
+    try:
+        ans = input("Type 'yes' to continue, anything else aborts: ")
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return False
+    return ans.strip().lower() in ("yes", "y")
 
 
 async def cmd_rate(addr, hz=None):
@@ -789,6 +830,10 @@ def main():
         help="'log': keep printing new lines until interrupted",
     )
     ap.add_argument(
+        "-y", "--yes", action="store_true",
+        help="answer destructive-command confirmations with yes (fsformat)",
+    )
+    ap.add_argument(
         "value", nargs="?", type=str, default=None,
         help="rate/tone in Hz, or the file name for 'sidname'",
     )
@@ -808,7 +853,7 @@ def main():
         "tonefreq": cmd_tonefreq,
         "tonestart": cmd_tonestart,
         "tonestop": cmd_tonestop,
-        "fsformat": lambda a: cmd_tone(a, 0x0D),
+        "fsformat": cmd_fsformat,
         "sid": cmd_sid,
         "sidname": cmd_sidname,
         "chip": cmd_chip,
@@ -832,6 +877,8 @@ def main():
         asyncio.run(fn(args.addr, args.value))
     elif args.command == "set-time":
         asyncio.run(fn(args.addr, args.value))
+    elif args.command == "fsformat":
+        asyncio.run(fn(args.addr, args.yes))
     elif args.command in ("glitch", "blemode"):
         asyncio.run(fn(args.addr, args.value))
     elif args.command in ("rate", "tonefreq", "tonestart", "sid"):

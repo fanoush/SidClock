@@ -89,7 +89,9 @@ with [getting-started.md](getting-started.md) (time, tunes, OTA).
 - **Bootloader does not boot** - reflash the bootloader over SWD
   (`bootloader/flash.sh`). If that fails, repeat the unlock/erase step.
 - **Corrupted `/home` filesystem** - the app never auto-formats; use the
-  `fsformat` debug command (destructive) to recreate it:
+  `fsformat` debug command (destructive) to recreate it. It asks for an
+  explicit `yes` first (`-y` answers it, and is required when stdin is not
+  a terminal; `status`/`ls` say when the filesystem is not mounted):
 
   ```sh
   tools/sidclock_ble.py fsformat

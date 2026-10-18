@@ -47,6 +47,10 @@
   the only hint buried in the boot log. `status` now prints `fs:` with the
   mount error and `ls` says the listing is empty because nothing is
   stored; `fsformat` recreates it.
+- `fsformat` states what it erases and asks for an explicit `yes` before
+  sending the format command; without a terminal it refuses unless `-y` is
+  passed, so a script cannot wipe `/home` by accident. It then reports
+  whether the fresh filesystem mounted.
 - Ctrl-C now stops `log -f` and `monitor`: the first SIGINT was swallowed
   (asyncio cancels the main task and bleak's D-Bus read absorbs it), which
   left the tool running *and* the BLE link up, so the device stopped
