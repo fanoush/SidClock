@@ -104,7 +104,7 @@ to check before adding a buffer. Measured from the release ELF
 | BLE host + controller | 26 KB | net_buf pools, controller PDU receive buffer (DLE 251), RX stub + controller stacks, connection/GATT state |
 | MCUmgr (OTA) | 14 KB | 8 KB SMP packet pool (4x2048) + 4 KB workqueue stack + img/fs/os groups |
 | Kernel | 9 KB | main/idle/interrupt stacks, system work queue, thread objects |
-| Logging + RTT | 5 KB | 2 KB RTT buffer in release builds (8 KB with `SIDCLOCK_DEBUG`), log core |
+| Logging + RTT | 11 KB | 8 KB RTT buffer in `.rtt_buff_data` (start of RAM; shared with the bootloader, so the size must match `sidclock-mcuboot.conf`), log core |
 | LittleFS, drivers, alarms, configs | ~4 KB | filesystem object + caches, SPI/ADC/GPIOTE/I2S drivers |
 
 `stacks` (BLE debug command) reports stack high-water marks - the
@@ -117,8 +117,9 @@ back. Debug-only RAM sits behind
 - **No dynamic allocation** in hot paths; fixed buffers sized for the
   display band (448x16x2 bytes) and the audio double buffer. The whole
   system heap is disabled (`CONFIG_HEAP_MEM_POOL_SIZE=0`) - the linked
-  image has no `malloc`/`k_malloc` caller - which leaves ~15 KB of RAM
-  unused for future features.
+  image has no `malloc`/`k_malloc` caller - which leaves ~9 KB of RAM
+  unused for future features (the RTT buffer took 6 KB of the headroom in
+  1.0.7: 8 KB instead of 2 KB, shared with the bootloader).
 - **Software rotation** instead of panel MADCTL (the panel's MADCTL
   produced mirrored/transposed output on this unit).
 - **Visible-time marquee**: the SID comment scrolls only while the SID

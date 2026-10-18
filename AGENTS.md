@@ -58,7 +58,7 @@ docs/        the documents above
 ```sh
 bootloader/fetch-sdk.sh                 # one-time pinned dependency fetch
 app/build.sh                            # -> app/build/zephyr/zephyr.signed.bin
-SIDCLOCK_DEBUG=1 app/build.sh           # bench build: test commands + 8 KB RTT buffer
+SIDCLOCK_DEBUG=1 app/build.sh           # bench build: bring-up test commands
 smpmgr --ble <addr> upgrade app/build/zephyr/zephyr.signed.bin
 tools/sidclock_ble.py set-time          # after every reset (no RTC)
 tools/sidclock_ble.py status            # quick health check
@@ -83,7 +83,7 @@ Do not break these without discussing it in the PR/commit:
 
 - **No dynamic allocation** in app paths; static buffers only. The system
   heap is off (`CONFIG_HEAP_MEM_POOL_SIZE=0`) because nothing in the linked
-  image calls `malloc`/`k_malloc`; RAM sits at ~92 % with ~15 KB free. Per
+  image calls `malloc`/`k_malloc`; RAM sits at ~95 % with ~9 KB free. Per
   block breakdown: `docs/architecture.md` ("RAM budget").
 - **Software rotation**: the panel stays in native portrait; windows are
   transposed in the display driver. The logical UI is 448x368 landscape;

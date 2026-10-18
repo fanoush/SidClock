@@ -21,11 +21,12 @@
 #   SIDCLOCK_DEBUG=1 ./build.sh
 #
 # compiles the bring-up test commands back in (test tones, rate/tone
-# ladders, raw MCKFREQ) and applies app/prj_debug.conf (8 KB SEGGER RTT log
-# buffer instead of the release 2 KB). Debug images show -dbg in the
-# on-display version string; the signed image version stays the same. The
-# flag is passed to CMake on every build, so a debug build does not leak
-# into the next release build.
+# ladders, raw MCKFREQ) and applies app/prj_debug.conf. The SEGGER RTT log
+# buffer is *not* a build knob: it is shared with the bootloader and its
+# size decides where the RTT control block lands in RAM (see prj.conf).
+# Debug images show -dbg in the on-display version string; the signed image
+# version stays the same. The flag is passed to CMake on every build, so a
+# debug build does not leak into the next release build.
 #
 # Result:
 #   build/zephyr/zephyr.signed.bin   <- upload over BLE with smpmgr

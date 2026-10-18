@@ -22,9 +22,9 @@ ROOT="$(cd "$HERE/.." && pwd)"
 SDK="${SIDCLOCK_SDK:-$ROOT/.sdk}"
 
 MODE="${1:-release}"
-CONF="$HERE/sidclock-mcuboot.conf"
+CONF_FILES="$HERE/signature_none.conf;$HERE/sidclock-mcuboot.conf"
 if [ "$MODE" = "rtt" ]; then
-	CONF="$HERE/sidclock-rtt.conf"
+	CONF_FILES="$CONF_FILES;$HERE/sidclock-rtt.conf"
 fi
 
 export ZEPHYR_BASE="$SDK/sdk/zephyr"
@@ -39,8 +39,8 @@ cmake -GNinja \
     -B "$HERE/build" \
     -DBOARD=nrf54l15dk/nrf54l15/cpuapp \
     -DBUILD_VERSION=v4.0.99-sidclock \
-    -DZEPHYR_MODULES="$SDK/sdk/mcuboot;$SDK/sdk/modules/hal/nordic;$SDK/sdk/modules/hal/cmsis;$SDK/sdk/modules/crypto/tinycrypt" \
-    -DEXTRA_CONF_FILE="$HERE/signature_none.conf;$CONF" \
+    -DZEPHYR_MODULES="$SDK/sdk/mcuboot;$SDK/sdk/modules/hal/nordic;$SDK/sdk/modules/hal/cmsis;$SDK/sdk/modules/crypto/tinycrypt;$SDK/sdk/modules/debug/segger" \
+    -DEXTRA_CONF_FILE="$CONF_FILES" \
     -DEXTRA_DTC_OVERLAY_FILE="$HERE/sidclock-mcuboot.overlay" \
     -DPYTHON_EXECUTABLE="$(command -v python3)"
 

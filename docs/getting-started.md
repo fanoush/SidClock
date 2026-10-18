@@ -48,14 +48,17 @@ bootloader/build.sh              # release bootloader -> bootloader/build/zephyr
 app/build.sh                     # application + MCUboot signature -> app/build/zephyr/zephyr.signed.bin
 ```
 
-Both scripts are idempotent; rerun after changes. `bootloader/build.sh rtt`
-builds a debug bootloader with SEGGER RTT logging instead.
+Both scripts are idempotent; rerun after changes. The bootloader logs its
+boot decision over SEGGER RTT into the same RAM buffer the application uses,
+so a reset's log (over BLE or on a probe) starts with the bootloader's
+lines; `bootloader/build.sh rtt` builds the verbose variant with MCUboot's
+debug-level messages.
 The default build links both SID engines (cRSID plus the legacy
 cSID-light); `SIDCLOCK_SID_ENGINE=crsid` or `=csid` builds single-engine
 images for A/B comparison (their display version shows `-crsid`/`-csid`).
 `SIDCLOCK_DEBUG=1 app/build.sh` builds the debug configuration instead of
-the release one: the bring-up test commands come back and the RTT log
-buffer is bigger (the display version shows `-dbg`).
+the release one: the bring-up test commands come back, and the display
+version shows `-dbg`.
 
 ## 3. First flash (SWD)
 

@@ -7,10 +7,10 @@ slot 0 in the internal RRAM.
 | File | Purpose |
 |---|---|
 | `fetch-sdk.sh` | downloads the pinned Zephyr/MCUboot sources + toolchain into `$SIDCLOCK_SDK` or `../.sdk` |
-| `build.sh` | builds the bootloader (`./build.sh`, or `./build.sh rtt` for the RTT-logging debug build) |
+| `build.sh` | builds the bootloader (`./build.sh`, or `./build.sh rtt` for the verbose logging build) |
 | `flash.sh` | writes the bootloader to 0x0 over SWD (build output or prebuilt) |
-| `sidclock-mcuboot.conf` | board-independent config (external NOR, sector budget, no console) |
-| `sidclock-rtt.conf` | extra config for the RTT-logging variant |
+| `sidclock-mcuboot.conf` | board-independent config (external NOR, sector budget, no console, shared RTT log buffer) |
+| `sidclock-rtt.conf` | extra config for the verbose variant (MCUboot debug messages) |
 | `sidclock-mcuboot.overlay` | partitions + SPIM00 wiring |
 | `signature_none.conf` | disables signature verification (hash check only) |
 | `prebuilt/` | ready-to-flash `sidclock-mcuboot-nrf54l15.hex` / `.bin` |
@@ -30,6 +30,22 @@ slot 0 in the internal RRAM.
 
 On a locked device, first run `tools/flash/erase.sh` (unlock + mass erase);
 see `docs/backup-unlock-flash.md`. The external flash is untouched.
+
+## Logging
+
+MCUboot logs over SEGGER RTT into the same 8 KB buffer the application
+uses. The Zephyr segger module places the control block and the up-buffer
+in `.rtt_buff_data` - the first bytes of RAM - in both images; MCUboot
+initialises it and the app finds it already valid and keeps it
+(`CONFIG_SEGGER_RTT_INIT_MODE_STRONG_CHECK`). A reset's log therefore
+begins with the bootloader's lines, visible with
+`tools/sidclock_ble.py log` or on a probe, and an OTA swap is diagnosed
+without guessing.
+
+The up-buffer size decides where the control block sits inside that region,
+so `CONFIG_SEGGER_RTT_BUFFER_SIZE_UP` must be identical here and in
+`app/prj.conf`. `./build.sh rtt` keeps the same buffer and only raises the
+log level to MCUboot's debug messages.
 
 ## Why hash-only validation?
 

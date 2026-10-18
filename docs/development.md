@@ -6,7 +6,7 @@
 bootloader/fetch-sdk.sh          # once (or after changing the pinned revs)
 bootloader/build.sh              # bootloader (rtt: ./build.sh rtt)
 app/build.sh                     # application + MCUboot signature
-SIDCLOCK_DEBUG=1 app/build.sh    # + bring-up test commands, 8 KB RTT log buffer
+SIDCLOCK_DEBUG=1 app/build.sh    # + bring-up test commands
 ```
 
 The SDK location comes from `$SIDCLOCK_SDK` or a repo-root `local.conf`
@@ -16,11 +16,13 @@ output.
 
 `app/build.sh` builds the **release** configuration by default: the bring-up
 test commands (test tones, sample-rate/tone ladders, raw MCKFREQ) are
-compiled out - the debug BLE opcodes behind them are rejected - and the RTT
-log buffer is 2 KB. `SIDCLOCK_DEBUG=1` builds the **debug** configuration
-instead: those commands exist again and `app/prj_debug.conf` raises the RTT
-buffer to 8 KB; the on-display version shows `-dbg`. The flag is passed on
-every build, so a debug build never leaks into the next release build.
+compiled out and the debug BLE opcodes behind them are rejected.
+`SIDCLOCK_DEBUG=1` builds the **debug** configuration instead: those
+commands exist again, and the on-display version shows `-dbg`. The flag is
+passed on every build, so a debug build never leaks into the next release
+build. The RTT log buffer size is not a build knob: it is the same in release
+and debug, because it has to stay in step with the bootloader's (see *RTT
+bootloader* below).
 
 `app/build.sh` reuses/generates `app/sidclock.pem` for the MCUboot header if
 it is missing. The bootloader checks hashes only, so the key content does
@@ -41,9 +43,17 @@ path. After any reset the wall clock is unset - run
 
 ## Debugging
 
-- **RTT bootloader**: build `bootloader/build.sh rtt` and flash it; MCUboot
-  logs its validation/swap decisions over SEGGER RTT. The app always logs
-  over RTT (`CONFIG_LOG_BACKEND_RTT`), no UART is wired.
+- **RTT bootloader**: the bootloader logs its validation/swap decisions
+  over SEGGER RTT into the same RAM region the application uses
+  (`.rtt_buff_data`, the first bytes of RAM): MCUboot initialises the
+  control block, the app finds it already valid and keeps it
+  (`CONFIG_SEGGER_RTT_INIT_MODE_STRONG_CHECK`), so after a reset the log
+  drain starts with the bootloader's lines. The up-buffer size decides
+  where the control block sits inside that region, so
+  `CONFIG_SEGGER_RTT_BUFFER_SIZE_UP` must be identical in `app/prj.conf`
+  and `bootloader/sidclock-mcuboot.conf`. `bootloader/build.sh rtt` only
+  raises MCUboot's log level to DBG. The app always logs over RTT
+  (`CONFIG_LOG_BACKEND_RTT`), no UART is wired.
 - **BLE status**: `tools/sidclock_ble.py audio` prints the audio/SID debug
   snapshot; `status`, `monitor` and `ls` cover the rest. The debug
   characteristic layout and commands are in
@@ -51,8 +61,9 @@ path. After any reset the wall clock is unset - run
 - **Firmware log**: `tools/sidclock_ble.py log` drains the SEGGER RTT
   buffer over BLE (the same `LOG_*` lines a probe would show, and no probe
   is attached during normal development). `log --peek` reads the buffer
-  without consuming it, `log -f` follows; the buffer keeps its newest 2 KB
-  (8 KB in debug builds) by overwriting the oldest unread bytes.
+  without consuming it, `log -f` follows; the 8 KB buffer keeps its newest
+  window by overwriting the oldest unread bytes, and after a reset it still
+  holds the lines written before the bootloader's.
 - **UI problems**: the display driver has power-state control; a fully
   blank panel with a running app usually means a missing panel re-init
   after sleep, not a dead driver.

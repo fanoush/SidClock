@@ -81,6 +81,18 @@
   keeps the newest window (its first line can be the tail of a line whose
   start is gone - printed as it is). Debug command `1E` serves it to the
   BLE snapshot read, 60 bytes at a time.
+- The RTT buffer is 8 KB in the release build too (was 2 KB) and both
+  images use the *same* region at the start of RAM (`.rtt_buff_data`):
+  MCUboot writes its boot decision there and the app keeps the initialised
+  control block instead of starting its own
+  (`CONFIG_SEGGER_RTT_INIT_MODE_STRONG_CHECK`), so a reset's log begins
+  with the bootloader's lines - previously invisible, because two build
+  bugs kept the bootloader's RTT path dead: `bootloader/build.sh` did not
+  pass the segger module (`CONFIG_USE_SEGGER_RTT` was silently demoted to
+  `n`) and `./build.sh rtt` *replaced* the base config instead of
+  extending it. The up-buffer size decides where the control block sits,
+  so it must stay identical in `app/prj.conf` and
+  `bootloader/sidclock-mcuboot.conf`; the prebuilt bootloader is rebuilt.
 - New read-only BLE debug command `1F` (`accel`) dumps the accelerometer:
   I2C scan 0x08-0x77, `WHO_AM_I` at 0x19/0x18, what the driver and the
   built-in poller each return, register rows 0x00-0x5F, single-register reads

@@ -78,7 +78,11 @@ Every read is passive: it must not disturb the running I2S bit clock.
 `LOG_*` lines a debug probe would show, without needing SWD access (the
 pads are under the back cover). `--peek` prints the window without
 consuming it and `-f` follows; both together watch new lines while leaving
-the buffer intact for a later plain `log`. The buffer runs in **overwrite**
+the buffer intact for a later plain `log`. The buffer lives at the start of
+RAM and MCUboot writes its boot decision into the same region before it
+starts the app (the app finds the control block valid and keeps it), so
+after a reset the first lines are the bootloader's - a swap that did or did
+not happen is diagnosed without a probe. The buffer runs in **overwrite**
 mode (`CONFIG_LOG_BACKEND_RTT_MODE_OVERWRITE`): nothing on the device reads
 it back, so a full buffer discards its oldest unread bytes instead of every
 new line, and it always holds the newest window - its first line can be the
