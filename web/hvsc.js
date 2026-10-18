@@ -1,0 +1,444 @@
+/*
+ * HVSC (the High Voltage SID Collection) helpers for the web remote.
+ *
+ *   - search / details / tune download through hvsc.c64.org's API
+ *   - the Songlengths.md5 and STIL.txt databases, fetched on demand and
+ *     cached in IndexedDB (5.2 MB + 3.8 MB, they only change with HVSC
+ *     releases), with a small parser for each
+ *   - the device-side `.len` / `.stil` sidecars, built exactly like
+ *     tools/sid_add.py builds them
+ *
+ * The device keeps tune names in 24-byte buffers and both the debug
+ * play-by-name and delete commands take at most 20 characters, so a
+ * longer HVSC file name is shortened for the device (the upload map
+ * remembers the original for the info panel).
+ */
+
+import { md5 } from './md5.js';
+
+const BASE = 'https://hvsc.c64.org';
+const API = `${BASE}/api/v1`;
+export const SONGLENGTHS_URL = `${BASE}/download/C64Music/DOCUMENTS/Songlengths.md5`;
+export const STIL_URL = `${BASE}/download/C64Music/DOCUMENTS/STIL.txt`;
+
+/* device .stil limits: keep in sync with tools/sid_add.py and the
+ * firmware sidecar buffer (SID_STIL_MAX = 3072 in app/src/main.c) */
+const NAME_CHARS = 24;
+const TUNE_CHARS = 200;
+const NOTE_CHARS = 160;
+const MAX_BYTES = 3000;
+
+/** Longest device file name the commands and the player accept. */
+export const DEVICE_NAME_MAX = 20;
+
+/** The name the tune will have on the device (<= 20 chars). */
+export function deviceNameFor(file) {
+  if (file.length <= DEVICE_NAME_MAX) return file;
+  const stem = file.replace(/\.sid$/i, '');
+  return `${stem.slice(0, DEVICE_NAME_MAX - 4)}.sid`;
+}
+
+/* ---------- hvsc.c64.org API ---------- */
+
+async function fetchJson(url) {
+  const res = await fetch(url, { mode: 'cors' });
+  if (!res.ok) throw new Error(`HVSC API: HTTP ${res.status}`);
+  return res.json();
+}
+
+export function searchSids(query) {
+  return fetchJson(`${API}/sids?q=${encodeURIComponent(query)}`);
+}
+
+export function getSidDetails(id) {
+  return fetchJson(`${API}/sids/${encodeURIComponent(id)}`);
+}
+
+export function downloadSid(id, onProgress) {
+  return fetchBytes(`${BASE}/download/sids/${encodeURIComponent(id)}`,
+                    onProgress);
+}
+
+async function fetchBytes(url, onProgress) {
+  const res = await fetch(url, { mode: 'cors' });
+  if (!res.ok) throw new Error(`download failed: HTTP ${res.status}`);
+  const total = Number(res.headers.get('Content-Length')) || 0;
+  if (!res.body) return new Uint8Array(await res.arrayBuffer());
+  const reader = res.body.getReader();
+  const parts = [];
+  let got = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    parts.push(value);
+    got += value.length;
+    if (onProgress) onProgress(got, total || got);
+  }
+  return concat(parts);
+}
+
+function concat(parts) {
+  let n = 0;
+  for (const p of parts) n += p.length;
+  const out = new Uint8Array(n);
+  let off = 0;
+  for (const p of parts) {
+    out.set(p, off);
+    off += p.length;
+  }
+  return out;
+}
+
+/* ---------- IndexedDB cache (falls back to memory) ---------- */
+
+const IDB_NAME = 'sidclock-web';
+const IDB_STORE = 'hvsc';
+const mem = new Map();
+let dbPromise = null;
+
+function openDb() {
+  if (!dbPromise) {
+    dbPromise = new Promise((resolve, reject) => {
+      const req = indexedDB.open(IDB_NAME, 1);
+      req.onupgradeneeded = () => req.result.createObjectStore(IDB_STORE);
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    }).catch((e) => {
+      console.warn('IndexedDB unavailable, keeping the cache in memory', e);
+      return null;
+    });
+  }
+  return dbPromise;
+}
+
+async function idbGet(key) {
+  const db = await openDb();
+  if (!db) return mem.get(key) || null;
+  return new Promise((resolve) => {
+    const tx = db.transaction(IDB_STORE, 'readonly');
+    const req = tx.objectStore(IDB_STORE).get(key);
+    req.onsuccess = () => resolve(req.result || mem.get(key) || null);
+    req.onerror = () => resolve(mem.get(key) || null);
+  });
+}
+
+async function idbPut(key, value) {
+  mem.set(key, value);
+  const db = await openDb();
+  if (!db) return;
+  await new Promise((resolve) => {
+    const tx = db.transaction(IDB_STORE, 'readwrite');
+    tx.objectStore(IDB_STORE).put(value, key);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => resolve();
+    tx.onabort = () => resolve();
+  });
+}
+
+/* documents are latin-1 (STIL.txt carries accented names) */
+const latin1 = new TextDecoder('latin1');
+
+export async function dbStatus() {
+  return {
+    songlengths: await slRecord(),
+    stil: await stilRecord(),
+  };
+}
+
+let slLoading = null;
+let stilLoading = null;
+let slRec = null;
+let stilRec = null;
+let slRecRead = false;
+let stilRecRead = false;
+
+async function slRecord() {
+  if (!slRecRead) {
+    slRec = await idbGet('songlengths');
+    slRecRead = true;
+  }
+  return slRec;
+}
+
+async function stilRecord() {
+  if (!stilRecRead) {
+    stilRec = await idbGet('stil');
+    stilRecRead = true;
+  }
+  return stilRec;
+}
+
+/** Fetch + cache Songlengths.md5; resolves once it is stored. */
+export function loadSonglengths(onProgress) {
+  if (!slLoading) {
+    slLoading = (async () => {
+      const bytes = await fetchBytes(SONGLENGTHS_URL, onProgress);
+      slRec = { text: latin1.decode(bytes), at: Date.now(), bytes: bytes.length };
+      slRecRead = true;
+      await idbPut('songlengths', slRec);
+      slCache = null;
+    })().finally(() => { slLoading = null; });
+  }
+  return slLoading;
+}
+
+/** Fetch + cache STIL.txt. */
+export function loadStil(onProgress) {
+  if (!stilLoading) {
+    stilLoading = (async () => {
+      const bytes = await fetchBytes(STIL_URL, onProgress);
+      stilRec = { text: latin1.decode(bytes), at: Date.now(), bytes: bytes.length };
+      stilRecRead = true;
+      await idbPut('stil', stilRec);
+      stilCache = null;
+    })().finally(() => { stilLoading = null; });
+  }
+  return stilLoading;
+}
+
+/* ---------- parsers (mirror tools/sid_add.py) ---------- */
+
+/** "4:27 5:38" -> [267, 338] (0 for tokens without a time). */
+export function parseLengths(v) {
+  const out = [];
+  for (const raw of v.split(/\s+/)) {
+    if (!raw) continue;
+    const tok = raw.split('(')[0];
+    if (tok.includes(':')) {
+      const [m, s] = tok.split(':');
+      // sid_add.py: int(m * 60 + s + 0.5) - truncation, not rounding
+      out.push(Math.floor(parseFloat(m) * 60 + parseFloat(s) + 0.5));
+    } else {
+      out.push(0);
+    }
+  }
+  return out;
+}
+
+/** Songlengths.md5 text -> lookups by md5 / file name / full path. */
+export function parseSonglengths(text) {
+  const byMd5 = new Map();
+  const byName = new Map();
+  const byPath = new Map();
+  let path = '?';
+  for (const raw of text.split('\n')) {
+    const line = raw.trim();
+    if (!line) continue;
+    if (line.startsWith(';')) {
+      path = line.slice(1).trim();
+      continue;
+    }
+    const eq = line.indexOf('=');
+    if (eq <= 0) continue;
+    const value = line.slice(eq + 1).trim();
+    const entry = { path, value, lengths: parseLengths(value) };
+    byMd5.set(line.slice(0, eq).toLowerCase(), entry);
+    byPath.set(path, entry);
+    const base = path.split('/').pop();
+    if (base && !byName.has(base)) byName.set(base, entry);
+  }
+  return { byMd5, byName, byPath };
+}
+
+/** STIL.txt text -> Map(path -> {names, comment, subs}) (fields wrap). */
+export function parseStil(text) {
+  const KEYS = ['TITLE', 'NAME', 'AUTHOR', 'ARTIST', 'PUBLISHER', 'COMMENT',
+                'RELEASED', 'MUSIC', 'INFO', 'COVER'];
+  const entries = new Map();
+  let cur = null;
+  let sub = 0;
+  let field = null;
+  let chunk = [];
+
+  const flush = () => {
+    if (cur === null || field === null) {
+      field = null;
+      chunk = [];
+      return;
+    }
+    let joined = chunk.map((t) => t.trim()).join(' ').trim();
+    joined = joined.replace(/^"+/, '').replace(/"+$/, '').trim();
+    const entry = entries.get(cur);
+    if (field === 'COMMENT') {
+      if (sub === 0) {
+        entry.comment = entry.comment ? `${entry.comment} ${joined}` : joined;
+      } else if (joined) {
+        entry.subs[sub] = entry.subs[sub]
+          ? `${entry.subs[sub]} ${joined}` : joined;
+      }
+    } else if (sub > 0 && joined && !entry.names[sub]) {
+      entry.names[sub] = joined;
+    }
+    field = null;
+    chunk = [];
+  };
+
+  for (const raw of text.split('\n')) {
+    const line = raw.replace(/\r$/, '');
+    const stripped = line.trim();
+    if (!stripped) {
+      flush();
+      continue;
+    }
+    if (line.startsWith('/') || line.startsWith('\\')) {
+      flush();
+      cur = stripped;
+      entries.set(cur, { names: {}, comment: '', subs: {} });
+      sub = 0;
+      continue;
+    }
+    if (stripped.startsWith('(#') && stripped.endsWith(')')) {
+      flush();
+      const n = parseInt(stripped.slice(2, -1), 10);
+      sub = Number.isNaN(n) ? 0 : n;
+      continue;
+    }
+    let matched = false;
+    for (const key of KEYS) {
+      if (stripped.startsWith(`${key}:`)) {
+        flush();
+        field = key;
+        chunk = [stripped.slice(key.length + 1)];
+        matched = true;
+        break;
+      }
+    }
+    if (!matched && field !== null) chunk.push(stripped);
+    else if (!matched) flush();
+  }
+  flush();
+  return entries;
+}
+
+/** STIL entries by path and by file name. */
+export function stilIndex(text) {
+  const byPath = parseStil(text);
+  const byName = new Map();
+  for (const [path, entry] of byPath) {
+    const base = path.split(/[\\/]/).pop();
+    if (base && !byName.has(base)) byName.set(base, entry);
+  }
+  return { byPath, byName };
+}
+
+/** Drop a trailing "(1:23)" / "(1:23-2:45)" time range from a STIL name. */
+export function stripTimeRange(s) {
+  return s.replace(/\s*\(\d+:\d+[-–]?\d*:?\d*\)\s*$/, '').trim();
+}
+
+/** The device `.stil` for a STIL entry and a tune's song count. */
+export function buildStil(entry, songs) {
+  const lines = [];
+  for (let i = 1; i <= songs; i++) {
+    lines.push(stripTimeRange(entry.names[i] || '').slice(0, NAME_CHARS));
+  }
+  const comment = (entry.comment || '').split(/\s+/).filter(Boolean).join(' ');
+  lines.push(comment.slice(0, TUNE_CHARS));
+  let used = lines.reduce((n, l) => n + l.length + 1, 0);
+  const subs = Object.keys(entry.subs || {}).map(Number)
+    .filter((n) => !Number.isNaN(n)).sort((a, b) => a - b);
+  for (const sub of subs) {
+    const text = (entry.subs[sub] || '').split(/\s+/).filter(Boolean).join(' ');
+    if (!text) continue;
+    const line = `@${sub} ${text.slice(0, NOTE_CHARS)}`;
+    if (used + line.length + 1 > MAX_BYTES) break; // device buffer is full
+    lines.push(line);
+    used += line.length + 1;
+  }
+  return `${lines.join('\n')}\n`;
+}
+
+/* ---------- parsed caches, loaded on demand ---------- */
+
+let slCache = null;
+let stilCache = null;
+
+async function songlengths() {
+  if (slCache) return slCache;
+  const rec = await slRecord();
+  if (!rec) return null;
+  slCache = parseSonglengths(rec.text);
+  return slCache;
+}
+
+async function stil() {
+  if (stilCache) return stilCache;
+  const rec = await stilRecord();
+  if (!rec) return null;
+  stilCache = stilIndex(rec.text);
+  return stilCache;
+}
+
+export async function dbLoaded() {
+  return {
+    songlengths: !!(await songlengths()),
+    stil: !!(await stil()),
+  };
+}
+
+/** Songlengths entry for a whole-file md5. */
+export async function lengthEntryForMd5(hex) {
+  const sl = await songlengths();
+  return sl ? sl.byMd5.get(hex.toLowerCase()) || null : null;
+}
+
+/** STIL entry for a full HVSC path ("/MUSICIANS/.../Tune.sid"). */
+export async function stilEntryForPath(path) {
+  const st = await stil();
+  return st ? st.byPath.get(path) || null : null;
+}
+
+/** The `.len` for a tune's bytes, or null (not in the database). */
+export async function makeLen(bytes) {
+  const entry = await lengthEntryForMd5(md5(bytes));
+  if (!entry || entry.lengths.length === 0) return null;
+  return `${entry.lengths.join(' ')}\n`;
+}
+
+/** The `.stil` for a tune's HVSC path, or null (no STIL entry). */
+export async function makeStil(path, songs) {
+  const entry = await stilEntryForPath(path);
+  return entry ? buildStil(entry, songs) : null;
+}
+
+/* ---------- what the page uploaded where ---------- */
+
+/** Remember the HVSC identity of a device file (renamed tunes). */
+export async function rememberUpload(deviceName, info) {
+  const map = (await idbGet('uploads')) || {};
+  map[deviceName] = { ...info, at: Date.now() };
+  await idbPut('uploads', map);
+}
+
+export async function uploadInfo(deviceName) {
+  const map = (await idbGet('uploads')) || {};
+  return map[deviceName] || null;
+}
+
+/**
+ * Metadata for the tune the device is playing: lengths from
+ * Songlengths, names/comment/notes from STIL, matched by device file
+ * name (via the upload map when the tune was renamed on upload).
+ * Returns null when neither database is loaded or nothing matches.
+ */
+export async function tuneInfo(deviceName) {
+  const [sl, st] = [await songlengths(), await stil()];
+  if (!sl && !st) return null;
+  const remembered = await uploadInfo(deviceName);
+  let len = null;
+  let entry = null;
+  if (remembered && remembered.path) {
+    len = sl ? sl.byPath.get(remembered.path) || null : null;
+    entry = st ? st.byPath.get(remembered.path) || null : null;
+  }
+  if (!len && sl) len = sl.byName.get(deviceName) || null;
+  if (!entry && st) entry = st.byName.get(deviceName) || null;
+  if (!len && !entry) return null;
+  return {
+    path: (len && len.path) || (remembered && remembered.path) || null,
+    lengths: len ? len.lengths : null,
+    names: entry ? entry.names : {},
+    comment: entry ? entry.comment : '',
+    subs: entry ? entry.subs : {},
+  };
+}

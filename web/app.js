@@ -11,6 +11,8 @@
  */
 
 import { SidClock, END_MODES, MODEL_MODES, CHIP_NAMES } from './ble.js';
+import { SmpClient } from './smp.js';
+import * as hvsc from './hvsc.js';
 
 const $ = (id) => document.getElementById(id);
 const sc = new SidClock();
@@ -22,6 +24,13 @@ let lastGeneration = -1;
 let noteTimer = null;
 let deviceBase = null;       // { time, at } of the last device clock read
 let deviceTimeUnset = false; // the device answered "unset" (fresh reset)
+let currentInfo = null;      // last info read (title / name / author)
+let currentState = null;     // last pushed player state
+let smp = null;              // SMP client while connected in R/W mode
+let library = null;          // names in /home, or null when unknown
+let busy = null;             // what long operation is running, if any
+let metaKey = '';            // what the HVSC info card currently shows
+let searchResults = [];      // last HVSC search
 
 /* ---------- helpers ---------- */
 
@@ -84,7 +93,12 @@ function setConnected(ok) {
     deviceTimeUnset = false;
     $('devtime').textContent = '--:--:--';
     $('devtime').classList.remove('warn');
+    smp = null;
+    library = null;
+    busy = null;
+    renderLibrary();
   }
+  refreshControls();
 }
 
 $('connect').addEventListener('click', async () => {
@@ -103,6 +117,9 @@ $('connect').addEventListener('click', async () => {
     await readClock();
     setConnected(true);
     setStatus(name, 'ok');
+    await setupSmp();
+    refreshControls();
+    refreshLibrary();
   } catch (e) {
     console.error(e);
     setStatus('not connected');
@@ -133,6 +150,7 @@ sc.onBattery = (pct) => {
 };
 
 function renderState(st) {
+  currentState = st;
   const playing = st.playing && !st.paused;
   $('play').textContent = playing ? '⏸' : '▶';
   $('play').title = playing ? 'pause' : 'play';
@@ -157,6 +175,8 @@ function renderState(st) {
   $('pos').textContent = fmtSeconds(st.elapsed);
   $('len').textContent = st.length > 0 ? fmtSeconds(st.length) : '--:--';
   $('ends').textContent = END_MODES[st.endMode] || '';
+
+  updateTrackHighlight();
 }
 
 function rebuildSubtune(songs) {
@@ -183,11 +203,13 @@ function rebuildSubtune(songs) {
 async function refreshInfo() {
   const i = await sc.readInfo();
   if (!i) return;
+  currentInfo = i;
   $('title').textContent = i.title || i.name || 'nothing loaded';
   const bits = [];
   if (i.author) bits.push(i.author);
   if (i.name) bits.push(i.name);
   $('subtitle').textContent = bits.join(' · ');
+  renderMetadata().catch((e) => console.warn('hvsc info', e));
 }
 
 /* ---------- clocks: device vs. this browser ---------- */
@@ -243,6 +265,459 @@ async function readClock() {
   }
 }
 
+/* ---------- hvsc: databases, search, upload, library, info ---------- */
+
+const fmtBytes = (n) => (n >= 1024 * 1024
+  ? `${(n / (1024 * 1024)).toFixed(1)} MB`
+  : `${Math.max(1, Math.round(n / 1024))} KB`);
+
+function throttled(fn, ms = 120) {
+  let last = 0;
+  return (...args) => {
+    const now = Date.now();
+    if (now - last < ms) return;
+    last = now;
+    fn(...args);
+  };
+}
+
+/** Button enable/disable for everything outside the transport row. */
+function refreshControls() {
+  const ready = sc.connected && !busy;
+  $('search').disabled = !!busy;
+  $('dbload').disabled = !!busy;
+  $('stilopt').disabled = !!busy;
+  $('librefresh').disabled = !ready;
+  $('metastil').disabled = !!busy;
+  for (const b of document.querySelectorAll('#results .tune button, ' +
+                                           '#lib button')) {
+    if (b.dataset.locked) {
+      b.disabled = true;
+    } else if (b.classList.contains('upload')) {
+      b.disabled = !ready || !smp;
+      b.title = smp ? '' : 'needs Bluetooth access in R/W mode';
+    } else {
+      b.disabled = !ready;
+    }
+  }
+}
+
+async function setupSmp() {
+  smp = null;
+  if (!sc.smp) return; // R/O or OFF: the SMP service is not registered
+  try {
+    smp = await new SmpClient(sc.smp).start();
+    smp.onLog = (m) => console.info(`smp: ${m}`);
+  } catch (e) {
+    console.warn('SMP setup failed', e);
+    smp = null;
+  }
+}
+
+async function refreshDbState() {
+  const st = await hvsc.dbStatus();
+  $('dbstate').textContent = [
+    st.songlengths ? `lengths ${fmtBytes(st.songlengths.bytes)}` : 'no lengths',
+    st.stil ? `stil ${fmtBytes(st.stil.bytes)}` : 'no stil',
+  ].join(' · ');
+  $('dbload').textContent = (st.songlengths && st.stil)
+    ? 'reload databases' : 'load databases';
+}
+
+/** Fetch whichever HVSC databases `which` asks for and are missing. */
+async function loadDbs(which, onProgress) {
+  const have = await hvsc.dbLoaded();
+  if (which.songlengths && !have.songlengths) {
+    await hvsc.loadSonglengths((got, total) =>
+      onProgress('songlengths.md5', got, total));
+  }
+  if (which.stil && !have.stil) {
+    await hvsc.loadStil((got, total) => onProgress('stil.txt', got, total));
+  }
+  await refreshDbState();
+}
+
+/* --- search --- */
+
+async function doSearch() {
+  const q = $('q').value.trim();
+  if (!q || busy) return;
+  $('hmsg').hidden = false;
+  $('hmsg').textContent = 'searching…';
+  try {
+    searchResults = await hvsc.searchSids(q);
+    renderResults();
+    $('hmsg').textContent = searchResults.length
+      ? `${searchResults.length} result${searchResults.length === 1 ? '' : 's'}`
+      : `no results for "${q}"`;
+  } catch (e) {
+    console.error(e);
+    $('hmsg').textContent = `search failed: ${errorText(e)}`;
+  }
+}
+
+function renderResults() {
+  const ul = $('results');
+  ul.innerHTML = '';
+  for (const res of searchResults) ul.append(tuneRow(res));
+  ul.hidden = searchResults.length === 0;
+  refreshControls();
+}
+
+function tuneRow(res) {
+  const li = document.createElement('li');
+  li.className = 'tune';
+
+  const name = document.createElement('div');
+  name.className = 'tname';
+  name.textContent = res.title || `SID ${res.id}`;
+
+  const metaBase = [res.author, res.released].filter(Boolean).join(' · ');
+  const meta = document.createElement('div');
+  meta.className = 'tmeta';
+  meta.textContent = metaBase;
+
+  const bar = document.createElement('div');
+  bar.className = 'progress';
+  const fill = document.createElement('div');
+  fill.className = 'bar';
+  bar.append(fill);
+  bar.hidden = true;
+
+  const row = document.createElement('div');
+  row.className = 'trow';
+  const state = document.createElement('span');
+  state.className = 'tstate';
+  const upload = document.createElement('button');
+  upload.type = 'button';
+  upload.className = 'btn small upload';
+  upload.textContent = 'upload';
+  row.append(state, upload);
+  li.append(name, meta, bar, row);
+
+  const ui = {
+    setState(text, cls = '') {
+      state.textContent = text;
+      state.className = `tstate ${cls}`;
+    },
+    metaNote(text) {
+      meta.textContent = metaBase ? `${metaBase} · ${text}` : text;
+    },
+    progress(what, got, total) {
+      bar.hidden = false;
+      const pct = total > 0 ? Math.min(100, (got / total) * 100) : 0;
+      fill.style.width = `${pct}%`;
+      this.setState(total > 0
+        ? `${what} ${fmtBytes(got)} / ${fmtBytes(total)}` : what);
+    },
+  };
+  upload.addEventListener('click', () => uploadTune(res, ui));
+  return li;
+}
+
+/* --- upload --- */
+
+async function uploadTune(res, ui) {
+  if (busy) return;
+  if (!sc.connected) {
+    note('connect to the device first', true);
+    return;
+  }
+  if (!smp) {
+    note('uploads need Bluetooth access in R/W mode', true);
+    return;
+  }
+  busy = `upload ${res.id}`;
+  refreshControls();
+  ui.setState('loading tune details…');
+  try {
+    const det = await hvsc.getSidDetails(res.id);
+    if (!det || !det.filename) throw new Error('HVSC returned no file name');
+    const name = hvsc.deviceNameFor(det.filename);
+    const stem = name.replace(/\.sid$/i, '');
+    const songs = det.numberOfSongs || 1;
+    const path = det.filePath ? `${det.filePath}${det.filename}` : null;
+    if (name !== det.filename) ui.metaNote(`device name: ${name}`);
+
+    const bytes = await hvsc.downloadSid(res.id, throttled((got, total) =>
+      ui.progress('downloading', got, total)));
+    const magic = String.fromCharCode(bytes[0], bytes[1], bytes[2], bytes[3]);
+    if (magic !== 'PSID' && magic !== 'RSID') {
+      throw new Error('not a PSID/RSID tune');
+    }
+
+    const wantStil = $('stilopt').checked;
+    const have = await hvsc.dbLoaded();
+    if (!have.songlengths || (wantStil && !have.stil)) {
+      ui.setState('loading HVSC databases…');
+      await loadDbs(
+        { songlengths: !have.songlengths, stil: wantStil && !have.stil },
+        throttled((what, got, total) =>
+          ui.progress(`downloading ${what}`, got, total)));
+    }
+    const lenText = await hvsc.makeLen(bytes);
+    const stilText = (wantStil && path)
+      ? await hvsc.makeStil(path, songs) : null;
+
+    await smp.uploadFile(`/home/${name}`, bytes,
+      throttled((got, total) => ui.progress('uploading tune', got, total)));
+    if (lenText) {
+      await smp.uploadFile(`/home/${stem}.len`,
+        new TextEncoder().encode(lenText),
+        throttled((got, total) => ui.progress('uploading .len', got, total)));
+    }
+    if (stilText) {
+      await smp.uploadFile(`/home/${stem}.stil`,
+        new TextEncoder().encode(stilText),
+        throttled((got, total) => ui.progress('uploading .stil', got, total)));
+    }
+    await smp.fileClose();
+    await hvsc.rememberUpload(name,
+      { file: det.filename, id: res.id, path, title: det.title });
+
+    ui.bar.hidden = true;
+    ui.setState(name === det.filename ? 'uploaded ✓'
+      : `uploaded as ${name} ✓`, 'ok');
+    note(`${name}: uploaded${lenText ? '' : ' - no .len (not in Songlengths)'}`);
+    refreshLibrary();
+  } catch (e) {
+    console.error('upload', e);
+    ui.bar.hidden = true;
+    ui.setState(`failed: ${errorText(e)}`, 'err');
+    note(errorText(e), true);
+  } finally {
+    busy = null;
+    refreshControls();
+  }
+}
+
+/* --- the device library --- */
+
+async function refreshLibrary() {
+  if (!sc.connected) {
+    library = null;
+    renderLibrary();
+    return;
+  }
+  try {
+    library = new Set(await sc.listFiles());
+    renderLibrary();
+  } catch (e) {
+    console.warn('listing failed', e);
+    library = null;
+    renderLibrary(true);
+  }
+}
+
+function renderLibrary(failed = false) {
+  const ul = $('lib');
+  ul.innerHTML = '';
+  const sids = library
+    ? [...library].filter((f) => /\.sid$/i.test(f))
+        .sort((a, b) => a.localeCompare(b))
+    : [];
+  for (const name of sids) {
+    const li = document.createElement('li');
+    li.className = 'librow';
+    const nm = document.createElement('span');
+    nm.className = 'lname';
+    nm.textContent = name;
+
+    const side = document.createElement('span');
+    side.className = 'lside';
+    const stem = name.slice(0, -4);
+    side.textContent = [library.has(`${stem}.len`) ? 'len' : '',
+                        library.has(`${stem}.stil`) ? 'stil' : '']
+      .filter(Boolean).join(' ');
+
+    const play = document.createElement('button');
+    play.type = 'button';
+    play.className = 'btn small';
+    play.textContent = 'play';
+    if (name.length > 20) {
+      play.dataset.locked = '1';
+      play.title = 'name too long for the play command';
+    } else {
+      play.addEventListener('click', () => run(sc.playFile(name), 'play file'));
+    }
+
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'btn small';
+    del.textContent = '✕';
+    if (name.length > 20) {
+      del.dataset.locked = '1';
+      del.title = 'name too long for the delete command';
+    } else {
+      del.title = 'delete from the device (with sidecars)';
+      del.addEventListener('click', () => deleteTune(name));
+    }
+    li.append(nm, side, play, del);
+    ul.append(li);
+  }
+  ul.hidden = sids.length === 0;
+  $('libinfo').textContent = failed ? 'needs R/W mode'
+    : library ? `${sids.length} tune${sids.length === 1 ? '' : 's'}`
+    : sc.connected ? 'not listed' : 'not connected';
+  refreshControls();
+}
+
+async function deleteTune(name) {
+  if (busy) return;
+  if (!window.confirm(`Delete ${name} from the device?`)) return;
+  busy = `delete ${name}`;
+  refreshControls();
+  try {
+    const missing = await sc.deleteFile(name);
+    note(`${name} deleted${missing.length ? ' (sidecars were missing)' : ''}`);
+  } catch (e) {
+    console.error(e);
+    note(commandError(e, 'delete'), true);
+  } finally {
+    busy = null;
+    refreshControls();
+    refreshLibrary();
+  }
+}
+
+/* --- HVSC info for the tune the device is playing --- */
+
+function updateTrackHighlight() {
+  const sub = currentState ? currentState.subtune + 1 : 0;
+  for (const li of $('tracks').children) {
+    const b = li.firstElementChild;
+    if (b) b.classList.toggle('cur', Number(b.dataset.sub) === sub);
+  }
+}
+
+function trackCount(info) {
+  let n = currentState && currentState.songs > 0 ? currentState.songs : 0;
+  if (info.lengths) n = Math.max(n, info.lengths.length);
+  for (const k of Object.keys(info.names || {})) {
+    const i = Number(k);
+    if (Number.isFinite(i)) n = Math.max(n, i);
+  }
+  return n;
+}
+
+function renderTracks(info) {
+  const ol = $('tracks');
+  ol.innerHTML = '';
+  const songs = trackCount(info);
+  for (let i = 1; i <= songs; i++) {
+    const li = document.createElement('li');
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'track';
+    b.dataset.sub = String(i);
+    const n = document.createElement('span');
+    n.className = 'tn';
+    n.textContent = String(i);
+    const t = document.createElement('span');
+    t.className = 'tt';
+    t.textContent = hvsc.stripTimeRange(info.names[i] || '') ||
+      `subsong ${i}`;
+    const d = document.createElement('span');
+    d.className = 'td';
+    const len = info.lengths ? info.lengths[i - 1] : 0;
+    d.textContent = len ? fmtSeconds(len) : '';
+    b.append(n, t, d);
+    b.addEventListener('click', () => run(sc.playSubtune(i), 'play subtune'));
+    li.append(b);
+    ol.append(li);
+  }
+  updateTrackHighlight();
+}
+
+async function renderMetadata(force = false) {
+  const card = $('hvscinfo');
+  const name = currentInfo ? currentInfo.name : '';
+  const have = await hvsc.dbLoaded();
+  if (!name || (!have.songlengths && !have.stil)) {
+    card.hidden = true;
+    metaKey = '';
+    return;
+  }
+  const key = [name, currentState ? currentState.songs : 0,
+               have.songlengths, have.stil].join('|');
+  if (!force && key === metaKey) {
+    updateTrackHighlight();
+    return;
+  }
+  metaKey = key;
+
+  let info = null;
+  try {
+    info = await hvsc.tuneInfo(name);
+  } catch (e) {
+    console.warn('tune info', e);
+  }
+  card.hidden = false;
+  const hint = $('metahint');
+  const stilBtn = $('metastil');
+  $('metapath').textContent = info && info.path ? info.path : '';
+  if (!info) {
+    $('tracks').innerHTML = '';
+    $('metanote').hidden = true;
+    $('metacomment').hidden = true;
+    hint.hidden = false;
+    $('metahinttext').textContent = have.stil
+      ? `no HVSC entry for ${name}`
+      : `no HVSC entry for ${name} yet - STIL.txt is not loaded`;
+    stilBtn.hidden = have.stil;
+    return;
+  }
+  renderTracks(info);
+
+  const sub = currentState ? currentState.subtune + 1 : 0;
+  const noteText = sub > 0 && info.subs ? info.subs[sub] || '' : '';
+  $('metanote').textContent = noteText ? `subsong ${sub}: ${noteText}` : '';
+  $('metanote').hidden = !noteText;
+  $('metacomment').textContent = info.comment || '';
+  $('metacomment').hidden = !info.comment;
+
+  const wantStil = !have.stil;
+  hint.hidden = !wantStil;
+  $('metahinttext').textContent = wantStil
+    ? 'subsong names and notes come from STIL.txt' : '';
+  stilBtn.hidden = !wantStil;
+}
+
+/* --- database / search / library action wiring --- */
+
+async function loadDbsFromCard(which, label) {
+  if (busy) return;
+  busy = `load ${label}`;
+  refreshControls();
+  $('hprog').hidden = false;
+  const onP = throttled((source, got, total) =>
+    showProgress($('hprogbar'), $('hproglabel'), `downloading ${source}`, got, total));
+  try {
+    await loadDbs(which, onP);
+    note(`${label} cached`);
+    await renderMetadata(true);
+  } catch (e) {
+    console.error(e);
+    note(`${label} download failed: ${errorText(e)}`, true);
+  } finally {
+    busy = null;
+    refreshControls();
+    $('hprog').hidden = true;
+    $('hprogbar').style.width = '0%';
+    $('hproglabel').textContent = '';
+  }
+}
+
+$('search').addEventListener('click', doSearch);
+$('q').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') doSearch();
+});
+$('dbload').addEventListener('click', () =>
+  loadDbsFromCard({ songlengths: true, stil: true }, 'HVSC databases'));
+$('metastil').addEventListener('click', () =>
+  loadDbsFromCard({ stil: true }, 'STIL.txt'));
+$('librefresh').addEventListener('click', () => refreshLibrary());
+
 /* ---------- theme ---------- */
 
 const THEME_KEY = 'sidclock-theme';
@@ -297,6 +772,7 @@ $('settime').addEventListener('click', async () => {
 applyTheme(document.documentElement.dataset.theme === 'light'
   ? 'light' : 'dark', false);
 tickClocks();
+refreshDbState().catch((e) => console.warn('db state', e));
 
 if (!SidClock.available) {
   $('unsupported').hidden = false;

@@ -28,6 +28,30 @@
   can go through a `cloudflared` quick tunnel (real certificate), or
   `tools/serve_web.py` for self-signed TLS without a third party - Web
   Bluetooth needs a secure context.
+- **Web remote: HVSC browser and uploads** (no firmware change). The page
+  searches hvsc.c64.org and writes tunes to the device's `/home` over
+  mcumgr SMP (`web/smp.js` is a small SMP client with a CBOR codec - file
+  upload/download/status, mcumgr buffer size from the device, frames
+  split into MTU-sized ATT writes, one timeout retry per request), so
+  uploading needs BLE R/W mode like the rest of the write path. A tune's
+  `.len` song lengths and `.stil` names/notes/comments are built in the
+  browser from HVSC's `Songlengths.md5` and `STIL.txt`, which are fetched
+  on first use and cached in IndexedDB (about 9 MB together) - the
+  parsing, truncation and size caps match `tools/sid_add.py`, and a
+  whole-file MD5 implementation (`web/md5.js`, WebCrypto has none) keys
+  the lookup. Uploaded names are shortened to the firmware's 20-character
+  command limit with the original HVSC path remembered. The page also
+  lists `/home` (debug command `13`), marks tunes that have sidecars and
+  plays/deletes them (delete drops the sidecars, `16`), and while a tune
+  plays it shows the HVSC info: song lengths, subtune names (tap to jump),
+  the current subtune's STIL note and the tune comment.
+- `tools/web-tests/`: browser test page for the web remote's libraries -
+  MD5 vectors (including padding block boundaries), CBOR encoding checked
+  byte-for-byte against `cbor2` canonical output, SMP upload/download/
+  retry/error paths against a fake device, and the `.len`/`.stil` parsers
+  against fixtures generated with `sid_add.py`; `?live` additionally
+  checks the real HVSC API and databases, `tools/web-tests/record.py`
+  runs the page headless and reports pass/fail.
 
 **Fixes**
 

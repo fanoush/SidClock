@@ -48,10 +48,11 @@ charging contacts (probe with level shifters/VTref).
 ```
 app/         Zephyr application (the main body of work)
 bootloader/  MCUboot config + scripts + prebuilt image
-tools/       host-side Python tools (BLE CLI, HVSC importer, backup, web server)
+tools/       host-side Python tools (BLE CLI, HVSC importer, backup, web server,
+             plus tools/web-tests/ - browser tests for web/)
 sids/        local tune staging (gitignored contents)
 docs/        the documents above
-web/         web remote (Web Bluetooth status/control page)
+web/         web remote (Web Bluetooth status/control + HVSC search/upload)
 ```
 
 ## Build / flash / test
@@ -153,6 +154,20 @@ Do not break these without discussing it in the PR/commit:
   `tools/flash_ota.py` (arm-only, or `--now`) or `smpmgr upgrade --slot 1`.
   A staged image is persistent and drops with `smpmgr image erase 1`.
 - BLE tooling can be flaky right after a reset; retry once.
+- The web remote's `web/hvsc.js` is the browser twin of `tools/sid_add.py`:
+  same `.len`/`.stil` rules (name/tune/note caps 24/200/160 chars, 3000
+  bytes), same truncation, keyed the same way. HVSC's `Songlengths.md5`
+  is keyed on the **whole-file** MD5 - the HVSC API's `md5` field is the
+  libsidplayfp PSID fingerprint and does *not* match it (that one is only
+  for the legacy `Songlengths.txt`). Change both implementations together.
+- The page shortens uploaded names to 20 characters (`sid_find_next` skips
+  names over 23, but play-by-name `0x20` and `filedelete` `0x16` take at
+  most 20) and remembers the original HVSC path per device name, because
+  several HVSC files can share one file name.
+- Web remote tests: `python3 tools/web-tests/record.py --out /tmp/wt.txt &`
+  then a headless Chrome on
+  `http://127.0.0.1:8901/tools/web-tests/index.html?record&live` - the
+  `?live` half needs the network and downloads the HVSC databases.
 
 ## Testing checklist (run on hardware)
 

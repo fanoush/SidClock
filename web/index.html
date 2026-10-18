@@ -90,14 +90,62 @@ try {
     </div>
   </section>
 
+  <section id="hvscinfo" class="card" hidden>
+    <div class="cardhead">
+      <span class="label">hvsc info</span>
+      <span id="metapath" class="dim path"></span>
+    </div>
+    <div id="metahint" class="metahint" hidden>
+      <span id="metahinttext"></span>
+      <button id="metastil" class="btn small" hidden>load STIL</button>
+    </div>
+    <ol id="tracks" class="tracks"></ol>
+    <p id="metanote" class="comment" hidden></p>
+    <p id="metacomment" class="comment" hidden></p>
+  </section>
+
+  <section class="card">
+    <div class="cardhead">
+      <span class="label">hvsc online</span>
+      <span id="dbstate" class="dim"></span>
+    </div>
+    <div class="dbsrow">
+      <button id="dbload" class="btn small">load databases</button>
+      <label class="chk"><input id="stilopt" type="checkbox" checked>
+        include STIL names/notes</label>
+    </div>
+    <div class="searchrow">
+      <input id="q" type="search" placeholder="title, author, year…"
+             autocomplete="off" enterkeyhint="search">
+      <button id="search" class="btn">Search</button>
+    </div>
+    <div id="hprog" class="progressline" hidden>
+      <div class="progress"><div id="hprogbar"></div></div>
+      <span id="hproglabel" class="dim"></span>
+    </div>
+    <div id="hmsg" class="dim msg" hidden></div>
+    <ul id="results" class="results" hidden></ul>
+  </section>
+
+  <section class="card">
+    <div class="cardhead">
+      <span class="label">on the device</span>
+      <span id="libinfo" class="dim"></span>
+      <button id="librefresh" class="btn small">refresh</button>
+    </div>
+    <ul id="lib" class="results"></ul>
+  </section>
+
   <p class="hint">
     The device talks to one host at a time and only accepts commands while
     Bluetooth access is <strong>R/W</strong> (shown on its main screen).
     It has no real-time clock of its own, so after a reset its clock is
     <em>unset</em> and otherwise drifts: the two clocks above show it, and
     the device one turns amber while they disagree - press <em>set
-    time</em> to copy the browser clock over. All status values are
-    pushed by the device; this page never polls.
+    time</em> to copy the browser clock over. The HVSC section searches
+    hvsc.c64.org and writes tunes straight to the device over SMP (song
+    lengths and tune info come from the HVSC databases, cached by the
+    browser) - that needs R/W mode too.
   </p>
 </main>
 

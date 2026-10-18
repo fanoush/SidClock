@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>SidClock web tests</title>
+<style>
+  body {
+    font: 13px/1.45 ui-monospace, Menlo, Consolas, monospace;
+    margin: 20px;
+    background: #101820;
+    color: #d0d8e0;
+  }
+  pre { white-space: pre-wrap; }
+  .pass { color: #7bd88f; }
+  .fail { color: #ff6b6b; }
+  .summary { color: #8fa1b3; }
+</style>
+</head>
+<body>
+<!--
+  Browser tests for the web remote's libraries (md5, SMP, HVSC parsing).
+
+  In a browser, over http (module imports need a real origin):
+
+    python3 -m http.server 8899        # from the repository root
+    # then open http://127.0.0.1:8899/tools/web-tests/index.html
+    # add ?live for the hvsc.c64.org checks (network, ~9 MB of database
+    # downloads, cached in IndexedDB)
+
+  Automatically, with a headless Chrome:
+
+    python3 tools/web-tests/record.py --out /tmp/web-tests.txt &
+    google-chrome --headless=new --disable-gpu \\
+        "http://127.0.0.1:8901/tools/web-tests/index.html?record&live"
+-->
+<pre id="out">running…</pre>
+<script type="module" src="tests.js"></script>
+</body>
+</html>

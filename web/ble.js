@@ -11,12 +11,21 @@
  * Commands are one opcode byte plus arguments, written to the debug
  * characteristic: 0x18 play/pause, 0x19/0x1A next/prev tune,
  * 0x1B/0x1C next/prev subtune, 0x21 sub play (1-based, 255 = startSong),
- * 0x20 sub+name play file at subtune, 0x0F stop.
+ * 0x20 sub+name play file at subtune, 0x0F stop, 0x13 listing page,
+ * 0x16 delete file.
  *
  * The device runs player commands in its main loop, so a command is
  * accepted immediately but takes effect a moment later - the state
- * notification is the acknowledgement.
+ * notification is the acknowledgement. Listing pages replace the diag
+ * block of the next snapshot read (names in [34..94], [95] = next page
+ * index or 0xFF when done).
+ *
+ * File transfers use mcumgr SMP (see smp.js) on the standard SMP
+ * characteristic; the device unregisters that service unless Bluetooth
+ * access is R/W.
  */
+
+import { SMP_SERVICE, SMP_CHARACTERISTIC } from './smp.js';
 
 export const SIDCLOCK_SERVICE = '73696463-6c6f-4b01-9c1d-77ce3f41a5c0';
 export const DBG_CHAR = '73696463-6c6f-4b02-9c1d-77ce3f41a5c0';
@@ -136,6 +145,7 @@ export class SidClock {
         filters: [{ namePrefix: 'SidClock' }],
         optionalServices: [
           SIDCLOCK_SERVICE,
+          SMP_SERVICE,
           BATTERY_SERVICE,
           CTS_SERVICE,
         ],
@@ -154,6 +164,8 @@ export class SidClock {
 
     this.battery = await this._optional(BATTERY_SERVICE, BATTERY_LEVEL_CHAR);
     this.cts = await this._optional(CTS_SERVICE, CTS_CHAR);
+    // SMP is only registered in R/W mode; without it, no file transfers
+    this.smp = await this._optional(SMP_SERVICE, SMP_CHARACTERISTIC);
 
     this.connected = true;
     return this.device.name || 'SidClock';
@@ -238,6 +250,54 @@ export class SidClock {
   playFile(name, sub = 0xff) {
     const data = new TextEncoder().encode(name);
     return this._cmd([0x20, sub & 0xff, ...data]);
+  }
+
+  /* ---------- /home listing and maintenance (0x13 / 0x16) ---------- */
+
+  /** The debug snapshot; a pending listing fills bytes [34..95]. */
+  async readSnapshot() {
+    return bytesOf(await this.dbg.readValue());
+  }
+
+  /** Every name in /home, fetched one 0x13 listing page at a time. */
+  async listFiles() {
+    const names = [];
+    let idx = 0;
+    for (let page = 0; page < 256; page++) {
+      await this._cmd([0x13, idx & 0xff, (idx >> 8) & 0xff]);
+      const b = await this.readSnapshot();
+      let end = 34;
+      while (end < 95 && b[end] !== 0) end++;
+      const text = new TextDecoder().decode(b.subarray(34, end));
+      for (const line of text.split('\n')) {
+        if (line) names.push(line);
+      }
+      const next = b[95];
+      if (next === 0xff || next <= idx) return names;
+      idx = next;
+    }
+    return names;
+  }
+
+  /** Delete a /home file; a .sid also drops its .len and .stil sidecars.
+   *  Returns the sidecars that were already missing. */
+  async deleteFile(name) {
+    const targets = [name];
+    if (/\.sid$/i.test(name)) {
+      targets.push(`${name.slice(0, -4)}.len`, `${name.slice(0, -4)}.stil`);
+    }
+    const missing = [];
+    for (let i = 0; i < targets.length; i++) {
+      const data = new TextEncoder().encode(targets[i]);
+      if (data.length > 20) throw new Error('file name too long (max 20)');
+      try {
+        await this._cmd([0x16, ...data]);
+      } catch (e) {
+        if (i === 0) throw e;
+        missing.push(targets[i]);
+      }
+    }
+    return missing;
   }
 
   async disconnect() {

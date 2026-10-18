@@ -48,6 +48,7 @@ See [docs/hardware.md](docs/hardware.md).
 app/          Zephyr application (UI, SID player, audio, drivers)
 bootloader/   MCUboot config + build scripts + prebuilt bootloader
 tools/        host tools: BLE CLI, tune importer, backup, flashing, smpmgr
+              (tools/web-tests/ holds the browser test page for web/)
 sids/         tune staging area (downloaded locally, never committed)
 docs/         hardware, architecture, low power, BLE, OTA, development
 web/          web remote (Web Bluetooth), served by GitHub Pages
@@ -113,6 +114,26 @@ accepts one host at a time and only accepts commands in R/W mode, and it
 pushes every status value (no polling). The page source is `web/`,
 deployed by the `pages` workflow (`web/` holds only the site); the
 protocol behind it is in [docs/ble-services.md](docs/ble-services.md).
+
+The page also does what `tools/sid_add.py` does on a PC, without
+installing anything:
+
+- **Search and upload**: search hvsc.c64.org and write a tune straight to
+  the device's `/home` over mcumgr SMP - that needs R/W mode (the device
+  unregisters the SMP service otherwise) and the browser's Web Bluetooth
+  SMP characteristic.
+- **Sidecars**: the first upload (or the *load databases* button) caches
+  HVSC's `Songlengths.md5` and `STIL.txt` in IndexedDB - about 9 MB
+  together, they only change with HVSC releases - and the page builds the
+  device's `.len` and `.stil` files with the same rules, caps and
+  truncation as `tools/sid_add.py`.
+- **Device library**: list `/home`, mark tunes that have sidecars, play or
+  delete them (a `.sid` drops its `.len`/`.stil` too).
+- **Tune info**: while a tune plays, the page shows its HVSC song lengths,
+  the subtune names (tap one to jump to that subtune), the STIL note for
+  the current subtune and the tune comment. Tunes uploaded from the page
+  are matched by their remembered HVSC path, others by file name (several
+  HVSC files can share a name, so the upload path wins).
 
 For local testing on a phone, Web Bluetooth needs `https` - plain http
 counts as a secure context only on `localhost` itself:
