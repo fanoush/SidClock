@@ -39,7 +39,10 @@
   are consumed by default, `--peek` prints the buffer without consuming it
   (so it can be repeated, and a later `log` still sees it) and `-f` follows;
   `--peek -f` watches new lines without ever consuming them. Verified on
-  hardware.
+  hardware. The window holds only the *unread* bytes and survives a warm
+  reset, so a full boot is captured with `log` (drain), reset, `log
+  --peek` - and a probe-side RTT session advances the same read pointer,
+  so the two readers take turns.
 - `threads` is now `stacks` (the interrupt stack comes first, then the
   threads); `threads` keeps working as an alias.
 - `status` and `ls` report the filesystem state: an unmounted (corrupt or

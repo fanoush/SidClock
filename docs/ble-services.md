@@ -89,6 +89,14 @@ new line, and it always holds the newest window - its first line can be the
 tail of a line whose start is gone, and that partial line is printed as it
 is. The log core's small ring does the same one stage earlier.
 
+The window (8 KB, debug builds a little more) holds only what has not been
+read yet, and it lives in RAM across a warm reset, so a boot is visible
+only while it still fits in the window. To capture a whole boot: drain it
+once (`log`), reset the device, then `log --peek` - the window then starts
+with MCUboot's banner. Draining is a real read: a debug probe running an
+RTT session advances the same read pointer, so a probe viewer left open
+leaves the BLE drain only the lines it has not seen (and vice versa).
+
 A 30 s independent watchdog (fed from the main loop) reboots instead of
 freezing: any wedged thread stops the loop directly or via a stuck lock.
 After an unexpected reboot, `tools/sidclock_ble.py audio` shows the boot
