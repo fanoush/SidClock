@@ -158,7 +158,9 @@ and re-reads the info whenever the generation byte moves. Both reads work
 in every BLE access mode; the command writes need R/W as usual.
 
 `tools/sidclock_ble.py state` prints one snapshot and `watch` follows the
-notifications - the shell counterpart of the web page.
+notifications - the shell counterpart of the [web
+remote](https://fanoush.github.io/SidClock/) (`web/`), which uses exactly
+these two characteristics plus the command writes above.
 
 ## BLE access modes
 

@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#0f141b">
+<title>SidClock remote</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="top">
+  <div class="brand">
+    <span class="logo" aria-hidden="true">◉</span>
+    <h1>SidClock</h1>
+  </div>
+  <div class="conn">
+    <span id="dot" class="dot" aria-hidden="true"></span>
+    <span id="status" class="status">not connected</span>
+    <button id="connect" class="btn primary">Connect</button>
+  </div>
+</header>
+
+<main>
+  <div id="unsupported" class="card notice" hidden>
+    <strong>Web Bluetooth is not available in this browser.</strong>
+    Use Chrome or Edge on a computer, or Chrome on Android, over https
+    (or localhost). Safari and Firefox cannot talk to the device.
+  </div>
+
+  <div id="note" class="note" hidden></div>
+
+  <section class="card">
+    <div class="cardhead">
+      <span class="label">now playing</span>
+      <span id="battery" class="battery">-- %</span>
+    </div>
+    <div id="title" class="title">nothing loaded</div>
+    <div id="subtitle" class="sub"></div>
+
+    <div class="progress"><div id="progressbar"></div></div>
+    <div class="progressrow">
+      <span id="pos">0:00</span>
+      <span id="ends" class="dim"></span>
+      <span id="len">--:--</span>
+    </div>
+
+    <div class="transport">
+      <button id="prev" class="btn" title="previous tune">⏮</button>
+      <button id="play" class="btn primary big" title="play / pause">▶</button>
+      <button id="next" class="btn" title="next tune">⏭</button>
+      <button id="stop" class="btn" title="stop">⏹</button>
+    </div>
+
+    <div class="subrow">
+      <button id="subprev" class="btn" title="previous subtune">−</button>
+      <select id="subtune" aria-label="subtune"></select>
+      <button id="subnext" class="btn" title="next subtune">+</button>
+    </div>
+
+    <div class="badges">
+      <span class="badge" id="chip">chip ?</span>
+      <span class="badge" id="engine">engine ?</span>
+      <span class="badge" id="snd">snd ?</span>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="cardhead"><span class="label">device</span></div>
+    <div class="row">
+      <span class="rowlabel">clock</span>
+      <span id="devtime" class="value">--:--:--</span>
+      <button id="settime" class="btn">set to this phone</button>
+    </div>
+    <div class="row">
+      <span class="rowlabel">light</span>
+      <span id="lux" class="value">-- lx</span>
+      <button id="refresh" class="btn">refresh</button>
+    </div>
+  </section>
+
+  <p class="hint">
+    The device talks to one host at a time and only accepts commands while
+    Bluetooth access is <strong>R/W</strong> (shown on its main screen).
+    <em>Set to this phone</em> is worth pressing after every reset - the
+    device has no real-time clock of its own and all status values are
+    pushed by the firmware, so this page never polls.
+  </p>
+</main>
+
+<footer>
+  <a href="https://github.com/fanoush/SidClock">SidClock</a> web remote ·
+  <a href="https://github.com/fanoush/SidClock/blob/main/docs/ble-services.md">protocol</a>
+</footer>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>

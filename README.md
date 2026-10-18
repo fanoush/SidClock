@@ -24,6 +24,11 @@ from the device's external flash.
 - **BLE** - Battery Service, Current Time Service, MCUmgr/SMP for
   **over-the-air updates** and filesystem transfers (upload tunes without
   unplugging anything), plus a debug/control characteristic.
+- **Web remote** - a [phone-friendly page](https://fanoush.github.io/SidClock/)
+  over Web Bluetooth (Chrome/Edge on a computer or Android): battery,
+  device clock, current tune/subtune with progress, transport controls and
+  one-press clock sync. Static files in `web/`, deployed by the `pages`
+  workflow - nothing to install.
 - **Low power** - tickless kernel, duty-cycled sensors, stream suspend,
   dark sleep mode; the design keeps the SID emulator and alarm service
   running while the panel is off.
@@ -45,6 +50,7 @@ bootloader/   MCUboot config + build scripts + prebuilt bootloader
 tools/        host tools: BLE CLI, tune importer, backup, flashing, smpmgr
 sids/         tune staging area (downloaded locally, never committed)
 docs/         hardware, architecture, low power, BLE, OTA, development
+web/          web remote (Web Bluetooth), served by GitHub Pages
 ```
 
 ## Quick start
@@ -93,6 +99,21 @@ unlocking and backups: [docs/backup-unlock-flash.md](docs/backup-unlock-flash.md
 | [docs/development.md](docs/development.md) | conventions, debugging, release process |
 | [docs/security.md](docs/security.md) | update authentication model and hardening |
 | [AGENTS.md](AGENTS.md) | orientation for AI coding agents |
+
+## Web remote
+
+[**fanoush.github.io/SidClock**](https://fanoush.github.io/SidClock/) is a
+single static page that talks to the device over Web Bluetooth: battery,
+device clock, the current tune and subtune with a progress bar,
+play/pause/stop, tune and subtune transport, and one-press clock sync.
+It runs in Chrome or Edge (desktop) and Chrome on Android; the device
+accepts one host at a time, only accepts commands in R/W mode, and it
+pushes every status value (no polling). The page source is `web/`,
+deployed by the `pages` workflow; the protocol behind it is in
+[docs/ble-services.md](docs/ble-services.md). To work on the page
+locally, serve the folder over http (Web Bluetooth needs `https` or
+`localhost`): `python3 -m http.server`, then open
+<http://localhost:8000/web/>.
 
 ## Status and limitations
 

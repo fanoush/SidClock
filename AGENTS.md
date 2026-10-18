@@ -51,6 +51,7 @@ bootloader/  MCUboot config + scripts + prebuilt image
 tools/       host-side Python tools (BLE CLI, HVSC importer, backup)
 sids/        local tune staging (gitignored contents)
 docs/        the documents above
+web/         web remote (Web Bluetooth status/control page)
 ```
 
 ## Build / flash / test
