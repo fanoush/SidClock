@@ -1,5 +1,40 @@
 # Changelog
 
+## Unreleased
+
+**New**
+
+- Player status over BLE for the upcoming web UI: two read characteristics
+  in the custom service next to the debug snapshot - a 16-byte **state**
+  value (playing/paused flags, subtune and song count, end mode, chip
+  model, elapsed and `.len` length) that **notifies** on every change and
+  once per second while a tune plays, plus an 88-byte **info** value
+  (title, file name, author) that only changes when a tune loads. A host
+  subscribes instead of polling and stays in sync with on-device button
+  presses; it re-reads the strings when the state's generation byte moves.
+  Both reads work in every BLE access mode.
+- New player commands in the debug interface: `18` play/pause,
+  `19`/`1A` next/previous tune, `1B`/`1C` next/previous subtune,
+  `20` + subtune + name (play a file at a specific subtune) and
+  `21` + subtune (jump to a subtune of the loaded tune).
+
+**Fixes**
+
+- Player commands from BLE now run in the main loop instead of the
+  Bluetooth receive workqueue. That workqueue's 2 KB stack was already at
+  96 % during a tune load and "next tune" adds a directory scan on top:
+  writing `19` overflowed it and reset the device. Running the commands
+  on the main thread (like the UI buttons) also keeps the filesystem
+  single-threaded; a command that arrives while another is still queued
+  is rejected instead of corrupting state.
+
+**Host tools**
+
+- `tools/sidclock_ble.py` gained `state` (read the player status in one
+  shot), `watch` (follow the state notifications), `playpause`, `next`,
+  `prev`, `subnext`, `subprev` and `subplay N`; `sid`/`sidname` take
+  `--sub N` to start at a specific subtune.
+
 ## 1.0.7
 
 **Fixes**

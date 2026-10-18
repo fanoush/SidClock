@@ -10,9 +10,17 @@ User commands:
   set-time  write the host's local date/time to the Current Time Service
             (optional UTC offset in hours, e.g. "set-time +2")
   monitor   poll battery + lux every 2 s until interrupted
-  sid N     play /home/N.sid (N = 0..9)
-  sidname S play /home/S by file name (e.g. Last_Ninja_2.sid)
+  sid N     play /home/N.sid (N = 0..9), optionally at subtune --sub M
+  sidname S play /home/S by file name (e.g. Last_Ninja_2.sid), same
   sidstop   stop SID playback
+  playpause toggle play/pause (a paused tune resumes where it stopped)
+  next/prev play the next/previous tune in file name order
+  subnext / subprev  step to the next/previous subtune
+  subplay N start subtune N (1-based) of the loaded tune; 255 = the
+            PSID startSong
+  state     read the player status: tune, subtune, position, modes
+  watch     follow the player state notifications until Ctrl-C (tune
+            changes, transport, position once per second)
   filedelete <name>  delete a song file from /home (a .sid also removes
             its .len/.stil sidecars; config files are protected)
   chip M    SID chip model: auto (follow PSID flags) | 6581 | 8580
@@ -84,6 +92,8 @@ BATTERY_CHAR = "00002a19-0000-1000-8000-00805f9b34fb"  # BAS Battery Level
 CTS_CHAR = "00002a2b-0000-1000-8000-00805f9b34fb"      # CTS Current Time
 ILLUMINANCE_CHAR = "00002afb-0000-1000-8000-00805f9b34fb"  # ESS Illuminance
 DBG_CHAR = "73696463-6c6f-4b02-9c1d-77ce3f41a5c0"      # SidClock debug
+PLAYER_STATE_CHAR = "73696463-6c6f-4b03-9c1d-77ce3f41a5c0"  # player state
+PLAYER_INFO_CHAR = "73696463-6c6f-4b04-9c1d-77ce3f41a5c0"   # player strings
 CONNECT_TIMEOUT = 3.0  # s; fail fast when the device is not advertising
 LOG_CHUNK = 60        # log text bytes the 0x1E command serves per read
 LOG_MAX_CHUNKS = 300  # ...so this is one 8 KB window (debug build)
@@ -349,6 +359,98 @@ def _fs_state(raw):
     return raw[137] == 0, raw[138]
 
 
+# Player-status characteristics (see docs/ble-services.md). The state char
+# (read + notify) is 16 bytes; the info char (read) is 88 bytes of
+# title[32] + file name[24] + author[32], NUL padded.
+END_MODES = ("next sub", "next tune", "loop sub")
+MODEL_MODES = ("auto", "6581", "8580")
+
+
+def _player_state(raw):
+    """Decode the 16-byte state value, or None if the read looks wrong."""
+    if len(raw) < 16:
+        return None
+    flags = raw[0]
+    return {
+        "playing": bool(flags & 0x01),
+        "paused": bool(flags & 0x02),
+        "sound": bool(flags & 0x04),
+        "legacy": bool(flags & 0x08),
+        "subtune": raw[1],  # 0-based on the wire, 1-based in every print
+        "songs": raw[2],
+        "end": raw[3],
+        "model": raw[4],
+        "chip": raw[5],
+        "gen": raw[6],
+        "elapsed": _u32(raw, 8),
+        "length": _u32(raw, 12),
+    }
+
+
+def _player_info(raw):
+    def field(off, n):
+        return bytes(raw[off:off + n]).split(b"\0")[0].decode(errors="replace")
+
+    return {"title": field(0, 32), "name": field(32, 24), "author": field(56, 32)}
+
+
+def _state_words(st):
+    if st["playing"]:
+        return "paused" if st["paused"] else "playing"
+    return "loaded (stopped)" if st["songs"] else "idle (no tune)"
+
+
+def _state_pos(st):
+    return f"{st['elapsed']} s" + (f"/{st['length']} s" if st["length"] else "")
+
+
+def _end_label(st):
+    return END_MODES[st["end"]] if st["end"] < len(END_MODES) else str(st["end"])
+
+
+def _model_label(st):
+    return MODEL_MODES[st["model"]] if st["model"] < len(MODEL_MODES) else str(st["model"])
+
+
+async def _read_char(c, uuid, what):
+    """Read a player-status characteristic; a clear line on old firmware."""
+    try:
+        return bytes(await c.read_gatt_char(uuid))
+    except (BleakError, AttributeError) as e:
+        raise SystemExit(
+            f"{what}: characteristic not found ({e}) - the device firmware "
+            "predates the player status interface"
+        )
+
+
+async def _maybe_state(c):
+    """Player state value, or None when the firmware predates the char."""
+    try:
+        return _player_state(bytes(await c.read_gatt_char(PLAYER_STATE_CHAR)))
+    except (BleakError, AttributeError):
+        return None
+
+
+async def _settle_player(c, before, timeout=2.0):
+    """Wait for a parked player command to land.
+
+    The device runs player commands in its main loop (the GATT callback's
+    stack cannot hold the tune loader), so a snapshot read right after the
+    write can still show the old tune. Wait for the generation byte to
+    move or the elapsed time to restart.
+    """
+    if before is None:
+        return
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        st = await _maybe_state(c)
+        if st is None:
+            return
+        if st["gen"] != before["gen"] or st["elapsed"] < before["elapsed"]:
+            return
+        await asyncio.sleep(0.1)
+
+
 def _rate_of(raw):
     return raw[66] | (raw[67] << 8) | (raw[68] << 16)
 
@@ -505,12 +607,20 @@ async def cmd_tonestop(addr):
     print("tone stopped")
 
 
-async def cmd_sid(addr, n=None):
+async def cmd_sid(addr, n=None, sub=None):
     n = 0 if n is None else n
     if not 0 <= n <= 9:
         raise SystemExit("SID index must be 0..9 (/home/<n>.sid)")
+    if sub is not None and not 1 <= sub <= 255:
+        raise SystemExit("subtune must be 1..255 (255 = the PSID default)")
+    if sub is None:
+        payload = bytes([0x0E, n])
+    else:
+        payload = bytes([0x20, sub]) + f"{n}.sid".encode()
     async with connect(addr) as c:
-        await c.write_gatt_char(DBG_CHAR, bytes([0x0E, n]), response=True)
+        before = await _maybe_state(c)
+        await c.write_gatt_char(DBG_CHAR, payload, response=True)
+        await _settle_player(c, before)
         raw = await c.read_gatt_char(DBG_CHAR)
     title = bytes(raw[75:90]).split(b"\0")[0].decode(errors="replace")
     rc = raw[74] - 256 if raw[74] > 127 else raw[74]
@@ -519,19 +629,104 @@ async def cmd_sid(addr, n=None):
           f"frame_calls={raw[92] | (raw[93] << 8)}")
 
 
-async def cmd_sidname(addr, name=None):
+async def cmd_sidname(addr, name=None, sub=None):
     if not name:
         raise SystemExit("usage: sidname <name.sid>  (file in /home)")
     data = name.encode("ascii", "replace")
     if len(data) > 20:
         raise SystemExit("file name too long (max 20 chars)")
+    if sub is not None and not 1 <= sub <= 255:
+        raise SystemExit("subtune must be 1..255 (255 = the PSID default)")
+    payload = (bytes([0x20, sub]) if sub is not None else bytes([0x11])) + data
     async with connect(addr) as c:
-        await c.write_gatt_char(DBG_CHAR, bytes([0x11]) + data, response=True)
+        before = await _maybe_state(c)
+        await c.write_gatt_char(DBG_CHAR, payload, response=True)
+        await _settle_player(c, before)
         raw = await c.read_gatt_char(DBG_CHAR)
     title = bytes(raw[75:90]).split(b"\0")[0].decode(errors="replace")
     rc = raw[74] - 256 if raw[74] > 127 else raw[74]
     print(f"SID '{name}': playing={raw[72]} songs={raw[73]} rc={rc} "
           f"title={title!r}")
+
+
+async def cmd_transport(addr, opcode, what):
+    """The 0x18..0x1C transport commands: bare opcode, no reply."""
+    async with connect(addr) as c:
+        await c.write_gatt_char(DBG_CHAR, bytes([opcode]), response=True)
+    print(what)
+
+
+async def cmd_subplay(addr, n=None):
+    """Start subtune N (1-based) of the loaded tune; 255 = PSID default."""
+    if n is None:
+        raise SystemExit("usage: subplay <n>  (1-based subtune, 255 = default)")
+    if not 1 <= n <= 255:
+        raise SystemExit("subtune must be 1..255 (255 = the PSID default)")
+    async with connect(addr) as c:
+        try:
+            await c.write_gatt_char(DBG_CHAR, bytes([0x21, n]), response=True)
+        except BleakError as e:
+            raise SystemExit(
+                f"subplay: rejected by the device ({e}) - is a tune loaded?"
+            )
+    print(f"subtune {n}" + (" (PSID default)" if n == 255 else ""))
+
+
+def _state_line(st):
+    return (f"{_state_words(st):16s} sub {st['subtune'] + 1}/{st['songs']}  "
+            f"pos {_state_pos(st):12s} chip {st['chip']} ({_model_label(st)})  "
+            f"end {_end_label(st)}  snd {'on' if st['sound'] else 'off'}")
+
+
+async def cmd_state(addr):
+    """One-shot read of the player state + info characteristics."""
+    async with connect(addr) as c:
+        state = _player_state(await _read_char(c, PLAYER_STATE_CHAR, "state"))
+        info = _player_info(await _read_char(c, PLAYER_INFO_CHAR, "state"))
+    if state is None:
+        raise SystemExit("state: unexpected value from the device")
+    engine = "legacy" if state["legacy"] else "cRSID"
+    print(f"player:  {_state_line(state)}")
+    print(f"engine:  {engine}")
+    if info["title"] or info["name"]:
+        print(f"tune:    {info['title'] or '-'}  [{info['name'] or '-'}]")
+        print(f"author:  {info['author'] or '-'}")
+
+
+async def cmd_watch(addr):
+    """Follow the player state notifications until Ctrl-C."""
+    async with connect(addr) as c:
+        last_gen = {"value": -1}
+        want_info = {"flag": False}
+
+        def on_state(_sender, data):
+            st = _player_state(bytes(data))
+            if st is None:
+                return
+            if st["gen"] != last_gen["value"]:
+                last_gen["value"] = st["gen"]
+                want_info["flag"] = True
+            print(f"{time.strftime('%H:%M:%S')}  {_state_line(st)}",
+                  flush=True)
+
+        try:
+            await c.start_notify(PLAYER_STATE_CHAR, on_state)
+        except (BleakError, AttributeError) as e:
+            raise SystemExit(
+                f"watch: cannot subscribe ({e}) - firmware too old?"
+            )
+        print("watching player state - Ctrl-C to stop", flush=True)
+        with _sigint_graceful() as stop:
+            while not stop():
+                if want_info["flag"]:
+                    want_info["flag"] = False
+                    raw = await _read_char(c, PLAYER_INFO_CHAR, "watch")
+                    info = _player_info(raw)
+                    print(f"          tune: {info['title']} "
+                          f"[{info['name']}] by {info['author']}", flush=True)
+                await asyncio.sleep(0.1)
+        with contextlib.suppress(Exception):
+            await c.stop_notify(PLAYER_STATE_CHAR)
 
 
 async def cmd_engine(addr, value=None):
@@ -815,11 +1010,17 @@ def main():
         "tonestart", "tonestop", "fsformat", "sid", "sidname", "chip",
         "sidstop", "ls", "glitch", "blemode", "filedelete",
         "engine", "stacks", "threads", "log", "accel",
+        "playpause", "next", "prev", "subnext", "subprev", "subplay",
+        "state", "watch",
         ],
     )
     ap.add_argument(
         "--addr", default=None,
         help="BLE address; default: $SIDCLOCK_ADDR or a scan by name",
+    )
+    ap.add_argument(
+        "--sub", type=int, default=None,
+        help="'sid'/'sidname': start at subtune N (1-based; 255 = PSID default)",
     )
     ap.add_argument(
         "--peek", action="store_true",
@@ -867,13 +1068,22 @@ def main():
         "threads": cmd_stacks,  # alias for the old name
         "log": cmd_log,
         "accel": cmd_accel,
+        "playpause": lambda a: cmd_transport(a, 0x18, "play/pause toggled"),
+        "next": lambda a: cmd_transport(a, 0x19, "next tune"),
+        "prev": lambda a: cmd_transport(a, 0x1A, "previous tune"),
+        "subnext": lambda a: cmd_transport(a, 0x1B, "next subtune"),
+        "subprev": lambda a: cmd_transport(a, 0x1C, "previous subtune"),
+        "subplay": cmd_subplay,
+        "state": cmd_state,
+        "watch": cmd_watch,
     }[args.command]
     if args.command == "log":
         asyncio.run(fn(args.addr, args.peek, args.follow))
     elif args.command == "accel":
         asyncio.run(fn(args.addr, args.value))
-    elif args.command in ("sidname", "chip", "filedelete", "engine",
-                          "stacks", "threads"):
+    elif args.command == "sidname":
+        asyncio.run(fn(args.addr, args.value, args.sub))
+    elif args.command in ("chip", "filedelete", "engine", "stacks", "threads"):
         asyncio.run(fn(args.addr, args.value))
     elif args.command == "set-time":
         asyncio.run(fn(args.addr, args.value))
@@ -881,7 +1091,11 @@ def main():
         asyncio.run(fn(args.addr, args.yes))
     elif args.command in ("glitch", "blemode"):
         asyncio.run(fn(args.addr, args.value))
-    elif args.command in ("rate", "tonefreq", "tonestart", "sid"):
+    elif args.command == "sid":
+        asyncio.run(fn(args.addr,
+                       int(args.value) if args.value is not None else None,
+                       args.sub))
+    elif args.command in ("rate", "tonefreq", "tonestart", "subplay"):
         asyncio.run(fn(args.addr,
                        int(args.value) if args.value is not None else None))
     else:

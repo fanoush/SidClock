@@ -443,6 +443,11 @@ static void sid_load_lengths(const char *name); /* defined with the UI below */
 static void sid_stil_load(const char *name); /* defined with the UI below */
 static void sid_remember_save(void); /* defined with the UI below */
 static void sid_scroll_restart(void); /* defined with the UI below */
+static void sid_step(int dir, bool first_sub); /* defined with the UI below */
+static void sid_toggle_play(void); /* defined with the UI below */
+static void sid_sub_step(int dir); /* defined with the UI below */
+static void sid_play_sub(uint8_t sub); /* defined with the UI below */
+static uint32_t sid_length_cur(void); /* defined with the UI below */
 static int home_list(uint16_t start, uint8_t *dst, int size); /* below */
 static void home_write_dir(void); /* below */
 static int16_t ls_start = -1; /* pending /home listing request (page start) */
@@ -1340,6 +1345,15 @@ BT_GATT_SERVICE_DEFINE(ess_svc,
 #define SIDCLOCK_DBG_CHR_UUID                                                  \
 	BT_UUID_DECLARE_128(BT_UUID_128_ENCODE(0x73696463, 0x6c6f, 0x4b02,     \
 					       0x9c1d, 0x77ce3f41a5c0))
+/* Player status for the web UI (same service): a small state value that
+ * notifies (see player_ble_tick) and the strings that only change when a
+ * tune loads (re-read when the state generation byte moves). */
+#define SIDCLOCK_PLAYER_STATE_CHR_UUID                                         \
+	BT_UUID_DECLARE_128(BT_UUID_128_ENCODE(0x73696463, 0x6c6f, 0x4b03,     \
+					       0x9c1d, 0x77ce3f41a5c0))
+#define SIDCLOCK_PLAYER_INFO_CHR_UUID                                          \
+	BT_UUID_DECLARE_128(BT_UUID_128_ENCODE(0x73696463, 0x6c6f, 0x4b04,     \
+					       0x9c1d, 0x77ce3f41a5c0))
 
 /* [0..19] audio status/format/timing, [20..33] I2S registers,
  * [34..95] diag, [96..127] timekeeping telemetry, [128] BLE access mode,
@@ -1566,6 +1580,28 @@ static bool name_has_ext(const char *name, const char *ext)
 	return nl > el && strcmp(name + nl - el, ext) == 0;
 }
 
+/* Player commands from the BLE write handler are parked here and run by
+ * the main loop (sid_req_take): the GATT handlers run on the BT RX
+ * workqueue, whose 2 KB stack the SID loader already used at 96 % before
+ * "next tune" added a directory scan on top - and the main loop owns the
+ * emulator, the sidecars and the filesystem anyway. */
+static volatile uint8_t sid_req_op; /* 0 = idle, else the opcode */
+static uint8_t sid_req_arg;         /* subtune / chip mode / engine */
+static char sid_req_name[24];       /* 0x11 and 0x20 file name */
+
+static int sid_req_post(uint8_t op, uint8_t arg, const char *name)
+{
+	if (sid_req_op != 0U) {
+		return -1; /* one at a time; a host retries or waits */
+	}
+	if (name != NULL) {
+		snprintf(sid_req_name, sizeof(sid_req_name), "%s", name);
+	}
+	sid_req_arg = arg;
+	sid_req_op = op;
+	return 0;
+}
+
 static ssize_t ble_dbg_write(struct bt_conn *conn,
 			     const struct bt_gatt_attr *attr, const void *buf,
 			     uint16_t len, uint16_t offset, uint8_t flags)
@@ -1587,6 +1623,9 @@ static ssize_t ble_dbg_write(struct bt_conn *conn,
 	      (len == 2U && p[0] == 0x1FU) ||
 	      (len >= 2U && len <= 21U && p[0] == 0x11U) ||
 	      (len >= 2U && len <= 21U && p[0] == 0x16U) ||
+	      (len == 2U && p[0] >= 0x18U && p[0] <= 0x1CU) ||
+	      (len >= 3U && len <= 22U && p[0] == 0x20U) ||
+	      (len == 2U && p[0] == 0x21U) ||
 #ifdef SID_ENGINE_DUAL
 	      (len == 2U && p[0] == 0x17U) ||
 #endif
@@ -1638,43 +1677,24 @@ static ssize_t ble_dbg_write(struct bt_conn *conn,
 	case 0x0D:
 		fs_storage_init(true); /* DESTRUCTIVE: formats /home if needed */
 		break;
-	case 0x0E: {
-		char path[40];
-
+	case 0x0E:
 		if (len != 2U) {
 			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
 		}
-		snprintf(sid_cur_name, sizeof(sid_cur_name), "%u.sid",
-			 p[1] % 10U);
-		snprintf(path, sizeof(path), "/home/%s", sid_cur_name);
-		if (sid_player_load(path) == 0) {
-			sid_load_lengths(sid_cur_name);
-			sid_stil_load(sid_cur_name);
-			sid_remember_save();
-			sid_player_play_default();
-			audio_sid_start();
+		if (sid_req_post(0x0E, (uint8_t)(p[1] % 10U), NULL) != 0) {
+			return BT_GATT_ERR(BT_ATT_ERR_INSUFFICIENT_RESOURCES);
 		}
 		break;
-	}
 	case 0x11: {
-		char name[24], path[40];
+		char name[24];
 
 		if (len < 2U || len > 21U) {
 			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
 		}
 		memcpy(name, p + 1, len - 1U);
 		name[len - 1U] = '\0';
-		snprintf(path, sizeof(path), "/home/%s", name);
-		if (sid_player_load(path) == 0) {
-			snprintf(sid_cur_name, sizeof(sid_cur_name), "%s",
-				 name);
-			sid_load_lengths(sid_cur_name);
-			sid_stil_load(sid_cur_name);
-			sid_remember_save();
-			sid_player_play_default();
-			audio_sid_start();
-		} else {
-			return BT_GATT_ERR(BT_ATT_ERR_VALUE_NOT_ALLOWED);
+		if (sid_req_post(0x11, 0U, name) != 0) {
+			return BT_GATT_ERR(BT_ATT_ERR_INSUFFICIENT_RESOURCES);
 		}
 		break;
 	}
@@ -1712,38 +1732,25 @@ static ssize_t ble_dbg_write(struct bt_conn *conn,
 		break;
 	}
 #ifdef SID_ENGINE_DUAL
-	case 0x17: {
-		/* Global SID engine (0 = new cRSID, 1 = legacy cSID-light),
-		 * the same action as the main-screen button: stop, flip,
-		 * restart the same tune if one was playing. */
+	case 0x17:
+		/* Global SID engine (0 = new cRSID, 1 = legacy cSID-light);
+		 * the main loop stops, flips and restarts the current tune
+		 * if one was playing (same as the main-screen button). */
 		if (len != 2U || p[1] > 1U) {
 			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
 		}
-		if (p[1] != (uint8_t)sid_player_engine_legacy()) {
-			bool was = sid_player_is_playing();
-			char path[40];
-
-			sid_player_stop();
-			audio_sid_stop();
-			sid_player_set_engine_mode((int)p[1]);
-			if (was && sid_cur_name[0] != '\0') {
-				snprintf(path, sizeof(path), "/home/%s",
-					 sid_cur_name);
-				if (sid_player_load(path) == 0) {
-					sid_player_play_default();
-					audio_sid_start();
-				}
-			}
+		if (sid_req_post(0x17, p[1], NULL) != 0) {
+			return BT_GATT_ERR(BT_ATT_ERR_INSUFFICIENT_RESOURCES);
 		}
-		LOG_INF("sid engine: %s", p[1] ? "legacy" : "new");
 		break;
-	}
 #endif
 	case 0x12:
 		if (len != 2U) {
 			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
 		}
-		sid_player_set_model(p[1] % 3U);
+		if (sid_req_post(0x12, (uint8_t)(p[1] % 3U), NULL) != 0) {
+			return BT_GATT_ERR(BT_ATT_ERR_INSUFFICIENT_RESOURCES);
+		}
 		break;
 	case 0x13:
 		if (len != 3U) {
@@ -1779,6 +1786,46 @@ static ssize_t ble_dbg_write(struct bt_conn *conn,
 	case 0x0F:
 		sid_player_stop();
 		audio_sid_stop();
+		break;
+	case 0x18:
+	case 0x19:
+	case 0x1A:
+	case 0x1B:
+	case 0x1C:
+		/* transport for the web UI (play/pause, tune and subtune
+		 * steps) - the same actions as the SID screen buttons,
+		 * parked for the main loop */
+		if (sid_req_post(p[0], 0U, NULL) != 0) {
+			return BT_GATT_ERR(BT_ATT_ERR_INSUFFICIENT_RESOURCES);
+		}
+		break;
+	case 0x20: {
+		/* play /home/<name> at subtune `sub` (1-based, like the
+		 * UI counts; 0xFF = the PSID startSong) - `11` plus a
+		 * subtune */
+		char name[24];
+
+		if (len < 3U || len > 22U) {
+			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+		}
+		memcpy(name, p + 2, len - 2U);
+		name[len - 2U] = '\0';
+		if (sid_req_post(0x20, p[1], name) != 0) {
+			return BT_GATT_ERR(BT_ATT_ERR_INSUFFICIENT_RESOURCES);
+		}
+		break;
+	}
+	case 0x21:
+		/* play subtune `sub` (1-based) of the loaded tune */
+		if (len != 2U) {
+			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+		}
+		if (sid_player_songs() <= 0) {
+			return BT_GATT_ERR(BT_ATT_ERR_VALUE_NOT_ALLOWED);
+		}
+		if (sid_req_post(0x21, p[1], NULL) != 0) {
+			return BT_GATT_ERR(BT_ATT_ERR_INSUFFICIENT_RESOURCES);
+		}
 		break;
 #ifdef SIDCLOCK_DEBUG
 	case 0x10:
@@ -1854,13 +1901,161 @@ static ssize_t ble_dbg_write(struct bt_conn *conn,
 	return len;
 }
 
+/* --- player status for the web UI ----------------------------------- */
+/*
+ * Two read characteristics next to the debug snapshot, so a host can
+ * follow the player without parsing the developer layout and without
+ * polling:
+ *
+ * state `4b03` (read + notify, 16 bytes):
+ *   [0]  flags: b0 playing, b1 paused, b2 sound on, b3 legacy engine
+ *   [1]  subtune (0-based), [2] song count, [3] end mode (0..2),
+ *   [4]  chip model mode (0 = auto, 1 = 6581, 2 = 8580), [5] chip in
+ *        use (1 = 6581, 2 = 8580), [6] info generation, [7] reserved
+ *   [8..11] elapsed s (u32 LE), [12..15] current subsong length s
+ *
+ * info `4b04` (read, 88 bytes): title[32] name[24] author[32], NUL
+ * padded. The strings only change when a tune loads - the generation
+ * byte in the state tells a subscriber when to re-read them.
+ *
+ * The state value notifies on any change and once per second while a
+ * tune plays (elapsed); a client ticks between notifications. Nothing is
+ * sent while there is no subscriber.
+ */
+static uint8_t player_state[16];
+static char player_info[88];
+static char player_info_last[88]; /* strings at the last generation bump */
+static bool player_state_sub;
+static bool player_state_dirty; /* force one notify on (re)subscribe */
+static uint8_t player_info_gen;
+
+static void player_copy(char *dst, size_t cap, const char *src)
+{
+	size_t n = strlen(src);
+
+	if (n > cap) {
+		n = cap;
+	}
+	memcpy(dst, src, n);
+}
+
+static void player_info_fill(void)
+{
+	memset(player_info, 0, sizeof(player_info));
+	player_copy(player_info, 32U, sid_player_title());
+	player_copy(player_info + 32, 24U, sid_cur_name);
+	player_copy(player_info + 56, 32U, sid_player_author());
+}
+
+/* Bump the generation byte as soon as the strings change, so even a host
+ * that only reads (never subscribes) gets a correct re-read hint. */
+static void player_info_check(void)
+{
+	player_info_fill();
+	if (memcmp(player_info, player_info_last, sizeof(player_info)) != 0) {
+		memcpy(player_info_last, player_info, sizeof(player_info));
+		player_info_gen++;
+	}
+}
+
+static void player_state_fill(void)
+{
+	uint8_t flags = 0U;
+
+	if (sid_player_is_playing()) {
+		flags |= 0x01U;
+	}
+	if (sid_player_is_paused()) {
+		flags |= 0x02U;
+	}
+	if (sound_on) {
+		flags |= 0x04U;
+	}
+#ifdef SID_ENGINE_DUAL
+	if (sid_player_engine_legacy()) {
+		flags |= 0x08U;
+	}
+#endif
+	player_state[0] = flags;
+	player_state[1] = (uint8_t)sid_player_subtune();
+	player_state[2] = (uint8_t)sid_player_songs();
+	player_state[3] = (uint8_t)sid_end_mode;
+	player_state[4] = (uint8_t)sid_player_model_mode();
+	/* the engine reports the chip as 6581/8580; the wire carries 1/2 */
+	player_state[5] = (sid_player_chip() == 8580) ? 2U : 1U;
+	player_state[6] = player_info_gen;
+	player_state[7] = 0U;
+	sys_put_le32(sid_player_elapsed_s(), player_state + 8);
+	sys_put_le32(sid_length_cur(), player_state + 12);
+}
+
+static ssize_t player_state_read(struct bt_conn *conn,
+				 const struct bt_gatt_attr *attr, void *buf,
+				 uint16_t len, uint16_t offset)
+{
+	player_info_check();
+	player_state_fill();
+	return bt_gatt_attr_read(conn, attr, buf, len, offset, player_state,
+				 sizeof(player_state));
+}
+
+static ssize_t player_info_read(struct bt_conn *conn,
+				const struct bt_gatt_attr *attr, void *buf,
+				uint16_t len, uint16_t offset)
+{
+	player_info_check();
+	return bt_gatt_attr_read(conn, attr, buf, len, offset, player_info,
+				 sizeof(player_info));
+}
+
+static void player_state_ccc_changed(const struct bt_gatt_attr *attr,
+				     uint16_t value)
+{
+	player_state_sub = (value & BT_GATT_CCC_NOTIFY) != 0U;
+	if (player_state_sub) {
+		player_state_dirty = true; /* one notify right away */
+	}
+}
+
 BT_GATT_SERVICE_DEFINE(dbg_svc,
 	BT_GATT_PRIMARY_SERVICE(SIDCLOCK_DBG_SVC_UUID),
 	BT_GATT_CHARACTERISTIC(SIDCLOCK_DBG_CHR_UUID,
 			       BT_GATT_CHRC_READ | BT_GATT_CHRC_WRITE,
 			       BT_GATT_PERM_READ | BT_GATT_PERM_WRITE,
 			       ble_dbg_read, ble_dbg_write, NULL),
+	/* attrs[4] is this value attribute (player_ble_tick notifies it) */
+	BT_GATT_CHARACTERISTIC(SIDCLOCK_PLAYER_STATE_CHR_UUID,
+			       BT_GATT_CHRC_READ | BT_GATT_CHRC_NOTIFY,
+			       BT_GATT_PERM_READ,
+			       player_state_read, NULL, NULL),
+	BT_GATT_CCC(player_state_ccc_changed,
+		    BT_GATT_PERM_READ | BT_GATT_PERM_WRITE),
+	BT_GATT_CHARACTERISTIC(SIDCLOCK_PLAYER_INFO_CHR_UUID,
+			       BT_GATT_CHRC_READ, BT_GATT_PERM_READ,
+			       player_info_read, NULL, NULL),
 );
+
+/* Push the state value when the player moved, plus a 1 Hz elapsed update
+ * while a tune plays. Called from the main loop; a no-op while nobody
+ * subscribes. */
+static void player_ble_tick(void)
+{
+	static uint8_t last[16];
+
+	if (!player_state_sub) {
+		return;
+	}
+
+	player_info_check();
+	player_state_fill();
+	if (player_state_dirty ||
+	    memcmp(player_state, last, sizeof(player_state)) != 0) {
+		player_state_dirty = false;
+		memcpy(last, player_state, sizeof(last));
+		(void)bt_gatt_notify(NULL, &dbg_svc.attrs[4], player_state,
+				     sizeof(player_state));
+	}
+}
 
 /*
  * Big 7-segment clock drawn as filled rectangles (no font scaling), moved
@@ -3469,6 +3664,122 @@ static void sid_sub_step(int dir)
 	}
 	sid_player_play(sub);
 	audio_sid_start();
+}
+
+/* Play subtune `sub`, 1-based like the UI and the BLE commands count;
+ * 0xFF = the PSID startSong. Out-of-range values clamp to the last
+ * subtune so a stale host cannot fall off the tune. */
+static void sid_play_sub(uint8_t sub)
+{
+	int songs = sid_player_songs();
+
+	if (sub == 0xFFU || songs <= 0) {
+		sid_player_play_default();
+		return;
+	}
+	if (sub == 0U) {
+		sub = 1U;
+	}
+	if ((int)sub > songs) {
+		sub = (uint8_t)songs;
+	}
+	sid_player_play((int)sub - 1);
+}
+
+/* Run one player command parked by the BLE write handler (sid_req_post):
+ * the main thread owns the emulator, the sidecars and the filesystem, so
+ * these run exactly like the equivalent button presses. */
+static void sid_req_take(void)
+{
+	uint8_t op = sid_req_op;
+	uint8_t arg = sid_req_arg;
+	char name[24];
+	char path[40];
+
+	if (op == 0U) {
+		return;
+	}
+	memcpy(name, sid_req_name, sizeof(name));
+	sid_req_op = 0U; /* released; the arguments are local now */
+
+	switch (op) {
+	case 0x0E:
+		snprintf(sid_cur_name, sizeof(sid_cur_name), "%u.sid",
+			 arg % 10U);
+		snprintf(path, sizeof(path), "/home/%s", sid_cur_name);
+		if (sid_player_load(path) != 0) {
+			LOG_WRN("sid load failed: %s", path);
+			break;
+		}
+		sid_load_lengths(sid_cur_name);
+		sid_stil_load(sid_cur_name);
+		sid_remember_save();
+		sid_player_play_default();
+		audio_sid_start();
+		break;
+	case 0x11:
+	case 0x20:
+		snprintf(path, sizeof(path), "/home/%s", name);
+		if (sid_player_load(path) != 0) {
+			LOG_WRN("sid load failed: %s", path);
+			break;
+		}
+		snprintf(sid_cur_name, sizeof(sid_cur_name), "%s", name);
+		sid_load_lengths(sid_cur_name);
+		sid_stil_load(sid_cur_name);
+		sid_remember_save();
+		if (op == 0x20) {
+			sid_play_sub(arg);
+		} else {
+			sid_player_play_default();
+		}
+		audio_sid_start();
+		break;
+	case 0x12:
+		sid_player_set_model(arg % 3U);
+		break;
+#ifdef SID_ENGINE_DUAL
+	case 0x17:
+		if (arg != (uint8_t)sid_player_engine_legacy()) {
+			bool was = sid_player_is_playing();
+
+			sid_player_stop();
+			audio_sid_stop();
+			sid_player_set_engine_mode((int)arg);
+			if (was && sid_cur_name[0] != '\0') {
+				snprintf(path, sizeof(path), "/home/%s",
+					 sid_cur_name);
+				if (sid_player_load(path) == 0) {
+					sid_player_play_default();
+					audio_sid_start();
+				}
+			}
+		}
+		LOG_INF("sid engine: %s", arg ? "legacy" : "new");
+		break;
+#endif
+	case 0x18:
+		sid_toggle_play();
+		break;
+	case 0x19:
+		sid_step(1, false);
+		break;
+	case 0x1A:
+		sid_step(-1, false);
+		break;
+	case 0x1B:
+		sid_sub_step(1);
+		break;
+	case 0x1C:
+		sid_sub_step(-1);
+		break;
+	case 0x21:
+		sid_play_sub(arg);
+		audio_sid_start();
+		break;
+	default:
+		break;
+	}
 }
 
 /* Advance when the current (sub)song passed its known length (from the
@@ -5493,6 +5804,13 @@ int main(void)
 		 * it instead of silently running it on) */
 		sid_scroll_advance(display_on && !idle_mode &&
 				   ui_scr == SCR_SID);
+
+		/* BLE player commands and status: run what the GATT write
+		 * handler parked (the BT RX workqueue cannot afford the SID
+		 * loader on its 2 KB stack), then push the state to a
+		 * subscribed host */
+		sid_req_take();
+		player_ble_tick();
 
 		if (!display_on) {
 			if (idle_mode && idle_blank) {

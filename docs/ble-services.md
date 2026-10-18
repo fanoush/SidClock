@@ -9,7 +9,9 @@ All interactions use standard services plus one custom debug service.
 | Battery `0x180F` | Battery Level `0x2A19` | read, notify | percent |
 | Current Time `0x1805` | Current Time `0x2A2B` | read, write | 10-byte little-endian; there is no RTC, the time is kept from uptime |
 | Environmental Sensing `0x181A` | Illuminance `0x2AFB` | read | uint24 little-endian, **0.01 lx** units |
-| Debug (custom) `73696463-6c6f-4b01-9c1d-77ce3f41a5c0` | `73696463-6c6f-4b02-9c1d-77ce3f41a5c0` | read, write | 132-byte status snapshot; commands below. Writes are rejected in the R/O and OFF access modes (see below). |
+| SidClock (custom) `73696463-6c6f-4b01-9c1d-77ce3f41a5c0` | `73696463-6c6f-4b02-9c1d-77ce3f41a5c0` | read, write | 132-byte debug snapshot; commands below. Writes are rejected in the R/O and OFF access modes (see below). |
+| " | `73696463-6c6f-4b03-9c1d-77ce3f41a5c0` | read, notify | **player state**, 16 bytes - notifies on change and 1 Hz while playing |
+| " | `73696463-6c6f-4b04-9c1d-77ce3f41a5c0` | read | **player strings**, 88 bytes (title/name/author) |
 | GATT `0x1801` | Service Changed `0x2A05` | indicate | standard |
 
 The debug characteristic is a **developer interface**: its snapshot layout
@@ -44,10 +46,24 @@ signals: they are only compiled into **debug builds**
 | `15` + u8 `mode` | set the BLE access mode (`0` = R/W, `1` = R/O, `2` = OFF); only accepted in R/W |
 | `16` + name | delete `/home/<name>` - only `.sid`, `.len` and `.stil` files (config files are protected); rejected in R/O and OFF |
 | `17` + u8 engine | global SID engine, dual-engine builds only: `0` = new cRSID, `1` = legacy cSID-light (same as the main-screen button: stops, flips, restarts the current tune) |
+| `18` | toggle play/pause - the SID screen's transport button (a paused tune resumes where it stopped; with nothing loaded it starts the first tune) |
+| `19` / `1A` | play the next / previous tune in file name order |
+| `1B` / `1C` | step to the next / previous subtune |
+| `20` + u8 `sub` + name | play `/home/<name>` at subtune `sub` - `11` plus a subtune (`sub` is 1-based, like the UI counts, and `255` selects the PSID startSong) |
+| `21` + u8 `sub` | play subtune `sub` (1-based) of the loaded tune; `255` = the PSID startSong. Rejected when no tune is loaded. |
 | `1D` [+ u8 `page`] | stack telemetry for the overflow hunt, 4 rows per page: the **interrupt stack** first, then the threads in creation order. `(size, free)` u16 pairs at `[36..51]`, the matching 11-byte names at `[52..95]`; `[34]` marker, `[35]` page with bit 7 set to say the names follow and bit 6 set on the last page (bit 7 clear = the older 5-per-page layout without names; bit 6 clear everywhere = firmware from before the interrupt row). Only the requested page is latched, so one page costs 4 stack scans. Under 256 B free anywhere is the smoking gun. |
 | `1E` [+ u8 `mode`] | drain the SEGGER RTT log buffer - the `LOG_*` lines a debug probe would show; the next read returns up to 60 bytes of text at `[36..95]`, the byte count in `[35]`, `[34]` = marker. The bare opcode (or `mode` 0) **consumes** the chunk, so the device forgets it and a second call only shows newer lines. `mode` 1 restarts a *peek* at the oldest unread byte and 2 continues it; a peek never moves the read pointer, so it is repeatable and a later consume still sees the window. |
 | `1F` [+ u8 `mode`] | accelerometer diagnosis into the log (**read-only** in a release image): I2C scan 0x08-0x77, `WHO_AM_I` at both possible addresses (0x19/0x18), what the Zephyr driver and the built-in poller each return, registers 0x00-0x5F as eight-byte rows, single-register reads of the control block and of the six output bytes, and a `CTRL_REG1`/`CTRL_REG4` write/read-back. This is what showed that a unit serving all zeros only needed the missing initialization: `ctrl2=30 ctrl4=88` and a moving `reg 28` row mean the chip is configured and converting, `ctrl2=00` with frozen output bytes means it is not. `SIDCLOCK_DEBUG` builds also take `mode` 1 (reboot the register file from OTP via the `CTRL_REG5` BOOT bit, then walk the ODR settings logging the output registers after each) and `mode` 2 (drop the sensor rail P1.11 for 150 ms, then bring touch, ambient light and the accelerometer back up and watch the data registers). |
 | `50` | 1 s test tone |
+
+Player commands (`0E`, `11`, `12`, `17` and `18`..`21`) are executed by
+the **main loop** a moment after the write - the same path as a button
+press. They must not run on the Bluetooth receive workqueue, whose small
+stack cannot hold the tune loader plus a directory scan, so the write
+handler only parks the request; a second command that arrives while one
+is still queued is rejected with `INSUFFICIENT_RESOURCES`. Reading the
+player state (or the snapshot) right after a write can still show the
+previous tune for that moment.
 
 The read snapshot (132 bytes) mixes audio state (sample rate, DMA buffer
 health, enable registers), SID state (playing flag, song count, title,
@@ -118,6 +134,32 @@ The register dump above is the field test for such a unit:
 registers without needing a probe. A healthy unit shows a live sample there
 (`Z = +/-9.8 m/s2`).
 
+## Player status (web UI)
+
+The custom service carries two more read characteristics so a host does not
+have to parse the developer snapshot and does not have to poll:
+
+- **state** `73696463-6c6f-4b03-9c1d-77ce3f41a5c0`, 16 bytes:
+  `[0]` flags - bit 0 playing, bit 1 paused, bit 2 sound on, bit 3 legacy
+  engine; `[1]` subtune (0-based), `[2]` song count, `[3]` end mode,
+  `[4]` chip model mode (0 = auto, 1 = 6581, 2 = 8580), `[5]` chip in use
+  (1 = 6581, 2 = 8580), `[6]` **info generation**, `[7]` reserved;
+  `[8..11]` elapsed seconds (u32 LE), `[12..15]` the current subsong
+  length from the `.len` sidecar (u32 LE, 0 = unknown).
+- **info** `73696463-6c6f-4b04-9c1d-77ce3f41a5c0`, 88 bytes: title (32),
+  file name (24), author (32), each NUL-padded. Only changes when a tune
+  loads.
+
+The state value **notifies** on any change and once per second while a
+tune plays (the elapsed field, so a client can tick between them); it
+stays in sync with on-device button presses too. Nothing is sent while
+nobody subscribes. A host subscribes to the state, reads the info once,
+and re-reads the info whenever the generation byte moves. Both reads work
+in every BLE access mode; the command writes need R/W as usual.
+
+`tools/sidclock_ble.py state` prints one snapshot and `watch` follows the
+notifications - the shell counterpart of the web page.
+
 ## BLE access modes
 
 The main screen has a `BLE R/W` / `BLE R/O` / `BLE OFF` button that
@@ -157,7 +199,12 @@ address from `--addr`, `$SIDCLOCK_ADDR`, or a scan for the advertised name:
 tools/sidclock_ble.py status         # battery, device time, lux
 tools/sidclock_ble.py set-time       # write the host clock
 tools/sidclock_ble.py sidname Last_Ninja_2.sid
+tools/sidclock_ble.py sidname Parallax.sid --sub 2   # start at subtune 2
 tools/sidclock_ble.py sidstop
+tools/sidclock_ble.py state          # tune, subtune, position, modes
+tools/sidclock_ble.py watch          # follow the state notifications
+tools/sidclock_ble.py playpause      # also: next, prev, subnext, subprev
+tools/sidclock_ble.py subplay 3      # subtune 3 of the loaded tune
 tools/sidclock_ble.py ls             # list /home (paged listing command)
 ```
 
