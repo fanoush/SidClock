@@ -48,7 +48,7 @@ charging contacts (probe with level shifters/VTref).
 ```
 app/         Zephyr application (the main body of work)
 bootloader/  MCUboot config + scripts + prebuilt image
-tools/       host-side Python tools (BLE CLI, HVSC importer, backup)
+tools/       host-side Python tools (BLE CLI, HVSC importer, backup, web server)
 sids/        local tune staging (gitignored contents)
 docs/        the documents above
 web/         web remote (Web Bluetooth status/control page)

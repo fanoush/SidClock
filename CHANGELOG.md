@@ -23,7 +23,11 @@
   is forgotten on every reset), the current tune/subtune with a progress
   bar, play/pause/stop, tune and subtune transport, one-press clock sync
   and a light/dark switch; all values are pushed by the device. Deployed
-  to GitHub Pages by the new `pages` workflow, linked from the README.
+  to GitHub Pages by the new `pages` workflow (`web/` contains only the
+  site), linked from the README. Testing from a phone on the same network
+  can go through a `cloudflared` quick tunnel (real certificate), or
+  `tools/serve_web.py` for self-signed TLS without a third party - Web
+  Bluetooth needs a secure context.
 
 **Fixes**
 

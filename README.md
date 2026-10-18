@@ -111,12 +111,21 @@ and subtune transport, one-press clock sync and a light/dark switch.
 It runs in Chrome or Edge (desktop) and Chrome on Android; the device
 accepts one host at a time and only accepts commands in R/W mode, and it
 pushes every status value (no polling). The page source is `web/`,
-deployed by the `pages` workflow; the protocol behind it is in
-[docs/ble-services.md](docs/ble-services.md).
+deployed by the `pages` workflow (`web/` holds only the site); the
+protocol behind it is in [docs/ble-services.md](docs/ble-services.md).
 
-To work on the page locally, serve the folder over http (Web Bluetooth
-needs `https` or `localhost`): `python3 -m http.server`, then open
-<http://localhost:8000/web/>.
+For local testing on a phone, Web Bluetooth needs `https` - plain http
+counts as a secure context only on `localhost` itself:
+
+```sh
+# a quick tunnel gives a real certificate (no browser warning):
+python3 -m http.server 8000                     # from the repo root
+cloudflared tunnel --url http://localhost:8000  # open <url>/web/ on the phone
+
+# or self-signed TLS, no third party involved:
+python3 tools/serve_web.py                      # open https://<this-computer>:8443/
+python3 tools/serve_web.py -v                   # log requests with their User-Agent
+```
 
 ## Status and limitations
 
