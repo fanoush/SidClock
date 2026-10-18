@@ -49,6 +49,12 @@ tools/sid_add.py sids/Last_Ninja_2.sid
 tools/sid_add.py --no-upload sids/*.sid       # sidecars only, no BLE
 ```
 
+The [web remote](../README.md#web-remote) does the same from a browser:
+search hvsc.c64.org, upload (with `.len`/`.stil` built in the page),
+list, play and delete. `web/hvsc.js` has to keep matching
+`tools/sid_add.py` - same caps, same truncation - and both are checked
+against the same fixtures in `tools/web-tests/`.
+
 Manual upload also works (sidecars are optional):
 
 ```sh

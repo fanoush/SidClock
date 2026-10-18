@@ -104,6 +104,10 @@ Before calling a change done, verify on hardware:
    then `image state-read` (slot 0 = the new hash, `confirmed=True`).
    Without `--now` the device must keep running (slot 0 unchanged).
 7. Persistence: change settings, power-cycle (reset), verify they survive.
+8. Web remote (`web/`): `tools/web-tests/` in a browser - all pass, `?live`
+   too (network; downloads the HVSC databases) - then the page itself in
+   Chrome: connect, play/pause, search + upload a tune (R/W mode), the
+   HVSC info card, and play/delete from the device library.
 
 ## Releases
 
