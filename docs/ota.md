@@ -70,15 +70,28 @@ or use any recent `smpmgr` from PyPI.
    (The image version comes from `app/build.sh`; bump `VERSION` there when
    releasing.)
 
-   Some smpmgr/mcumgr combinations report success without leaving the new
-   image marked for the next boot. If the version did not change, mark the
-   uploaded image explicitly and reset:
+   **The reset after `upgrade` boots the *old* image.** The upload only
+   writes the bytes into slot 1; asking MCUboot to boot them is a separate
+   request (`image state write`) that the *client* has to send. Zephyr's
+   `image upload` handler never marks anything by itself, and smpmgr 0.17.0
+   only sends that request when `--slot` is not 0 or `--confirm` is given -
+   with the default invocation MCUboot finds nothing pending and boots
+   slot 0 again. This is not a bootloader misconfiguration: `image
+   state-read` shows the new image sitting in slot 1, bootable, simply not
+   marked (`pending=False`). Mark it for a *test* swap (MCUboot still
+   reverts if it fails to boot; the app confirms itself on the way up, so
+   the swap sticks) and reset:
 
    ```sh
    smpmgr --ble <addr> image state-read     # note the slot-1 image hash
    smpmgr --ble <addr> image state-write <hash>
    smpmgr --ble <addr> os reset
    ```
+
+   `smpmgr --ble <addr> upgrade --confirm <bin>` is the one-command
+   variant: it marks the image permanently instead of for a test swap, so
+   MCUboot never reverts a bad image. Use it only when the SWD pads (or
+   the serial recovery path) are reachable.
 
 ## Troubleshooting
 
