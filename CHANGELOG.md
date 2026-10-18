@@ -4,17 +4,27 @@
 
 **Fixes**
 
+- The accelerometer now gets the missing initialization before the first
+  sample: `CTRL_REG3`/`CTRL_REG2` (high-pass filter), `FIFO_CTRL` bypass, a
+  `REFERENCE` read to reset the filter, `CTRL_REG6`, then `CTRL_REG1 = 0x57`
+  with `CTRL_REG4 = 0x88` (BDU, +-2g, high resolution). The Zephyr driver's
+  init clears `CTRL1`..`CTRL6` but never primes the filter, and a part whose
+  filter was never initialized answers every read with its power-on zeros -
+  which used to look exactly like a dead chip. The sequence runs once per
+  boot; the register file survives power-down, so resumes stay a single
+  `CTRL1` write. Verified on hardware: a unit that had been reading `0/0/0`
+  through a chip reboot, an ODR sweep and a sensor-rail drop now reports
+  `Z = -9.98 m/s2` through the normal driver path.
 - The accelerometer is no longer taken at face value. When the Zephyr LIS2DH
   driver returns a sample with no gravity at all (|x|+|y|+|z| < 500 mg), the
   app falls back to its own I2C poller, keeps the driver's values only once a
   real sample arrives, logs the raw bytes, and the sensor screen prints
-  `ACCEL: no sample` instead of three plausible-looking zeros - a unit whose
-  chip answers on I2C but never converts used to look exactly like a device
-  lying flat. Both read paths now report `g` with three decimals and the
+  `ACCEL: no sample` instead of three plausible-looking zeros - an
+  unconfigured or absent chip used to look exactly like a device lying flat.
+  Both read paths now report `g` with three decimals and the
   orientation/tilt thresholds are compared in that same unit, so a device
   lying flat keeps its current idle face instead of picking one from the
-  residual tilt. Verified on hardware (live `Z = +/-9.8 m/s2` on a good unit,
-  frozen output bytes on a bad one).
+  residual tilt. Verified on hardware.
 
 **Host tools**
 
@@ -64,11 +74,12 @@
   `CTRL_REG1`/`CTRL_REG4` write/read-back. `SIDCLOCK_DEBUG` builds also take
   mode 1 (reboot the register file from OTP via the `CTRL_REG5` BOOT bit,
   then sweep the ODR settings) and mode 2 (power-cycle the sensor rail and
-  bring touch/ALS back up). It is what showed that the suspect unit has the
+  bring touch/ALS back up). It is what led to the all-zero unit's root cause:
   same part as a working one (same `WHO_AM_I`, same trim/lot fingerprint),
-  accepts config writes and reports data-ready - but its six output bytes
-  never leave their power-up value, through a chip reboot, an ODR sweep and a
-  rail drop.
+  config writes sticking, data-ready tracking the ODR - only the six output
+  bytes never left their power-up value, through a chip reboot, an ODR sweep
+  and a rail drop. Applying the full initialization sequence above brought it
+  live, so the zeros were the missing filter configuration, not a dead part.
 - The periodic slot/trailer dump every 5 s is `SIDCLOCK_DEBUG`-only now: in
   a release image two lines every five seconds filled the ~2 KB log buffer
   and hid everything else. The boot-time dump stays.

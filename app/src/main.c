@@ -269,11 +269,16 @@ LOG_MODULE_REGISTER(sidclock, LOG_LEVEL_INF);
 #define ACC_ALT_ADDR   0x18     /* SA0 tied low instead of high */
 #define ACC_WHO_AM_I   0x0F
 #define ACC_CTRL_REG1  0x20
+#define ACC_CTRL_REG2  0x21     /* high-pass filter config */
+#define ACC_CTRL_REG3  0x22     /* interrupt routing */
 #define ACC_CTRL_REG4  0x23
 #define ACC_CTRL_REG5  0x24     /* bit 7: BOOT - reload from OTP */
-#define ACC_STATUS_REG 0x27
+#define ACC_CTRL_REG6  0x25
 #define ACC_REFERENCE  0x26
+#define ACC_STATUS_REG 0x27
 #define ACC_OUT_X_L    0x28
+#define ACC_FIFO_CTRL  0x2E
+#define ACC_FIFO_SRC   0x2F
 
 static const struct device *disp;
 static const struct device *accel;
@@ -4582,6 +4587,38 @@ static int abs_i(int v)
 	return v < 0 ? -v : v;
 }
 
+/*
+ * Full LIS2DH initialization before live samples: CTRL3/2, the FIFO, a
+ * REFERENCE read to reset the high-pass filter, then CTRL6 and finally
+ * CTRL1. The upstream driver only clears CTRL1..CTRL6 and never touches the
+ * filter or the FIFO, and a part whose filter was never initialized keeps
+ * answering every read with its power-on zeros.
+ */
+static void accel_config(void)
+{
+	uint8_t ref;
+
+	(void)i2c_reg_write_byte(touch_i2c.bus, ACC_ADDR, ACC_CTRL_REG3, 0x00);
+	(void)i2c_reg_write_byte(touch_i2c.bus, ACC_ADDR, ACC_CTRL_REG2, 0x1A);
+	/* BDU so a sample is never read half-updated, +-2g, high resolution:
+	 * `raw >> 4` is mg on this path */
+	(void)i2c_reg_write_byte(touch_i2c.bus, ACC_ADDR, ACC_CTRL_REG4, 0x88);
+	(void)i2c_reg_write_byte(touch_i2c.bus, ACC_ADDR, ACC_CTRL_REG5, 0x00);
+	(void)i2c_reg_write_byte(touch_i2c.bus, ACC_ADDR, ACC_FIFO_CTRL, 0x00);
+	/* Reading REFERENCE resets the high-pass filter (LIS2DH12 datasheet
+	 * rev 6 section 8.9 footnote 1 - the step the Zephyr driver itself
+	 * does on PM resume); without it the filter keeps a stale reference. */
+	(void)i2c_reg_read_byte(touch_i2c.bus, ACC_ADDR, ACC_REFERENCE, &ref);
+	/* filter off the data path (0x30), INT2 on the INT1 pad (inert: CTRL6
+	 * routes no interrupt to a pin), axes on, then 100 Hz with all three
+	 * axes */
+	(void)i2c_reg_write_byte(touch_i2c.bus, ACC_ADDR, ACC_CTRL_REG2, 0x30);
+	(void)i2c_reg_write_byte(touch_i2c.bus, ACC_ADDR, ACC_CTRL_REG3, 0x10);
+	(void)i2c_reg_write_byte(touch_i2c.bus, ACC_ADDR, ACC_CTRL_REG6, 0x00);
+	(void)i2c_reg_write_byte(touch_i2c.bus, ACC_ADDR, ACC_CTRL_REG1, 0x07);
+	(void)i2c_reg_write_byte(touch_i2c.bus, ACC_ADDR, ACC_CTRL_REG1, 0x57);
+}
+
 /* Direct-poll fallback: standard LIS2DH setup, 100 Hz, BDU, +-2g, HR */
 static int accel_direct_init(void)
 {
@@ -4609,9 +4646,7 @@ static int accel_direct_init(void)
 		return -ENODEV;
 	}
 
-	(void)i2c_reg_write_byte(touch_i2c.bus, ACC_ADDR, ACC_CTRL_REG1, 0x00);
-	(void)i2c_reg_write_byte(touch_i2c.bus, ACC_ADDR, ACC_CTRL_REG4, 0x08);
-	(void)i2c_reg_write_byte(touch_i2c.bus, ACC_ADDR, ACC_CTRL_REG1, 0x57);
+	accel_config();
 
 	/* 100 Hz: a conversion takes 10 ms, so without the wait the first
 	 * read after a resume still returns the power-on zeros. */
@@ -4647,9 +4682,9 @@ static int accel_direct_read(int mg[3])
 /*
  * A read that came back all-zero (with no error anywhere) is what makes the
  * sensor screen show 0.000 and the idle face never turn on a unit whose
- * accelerometer is not the LIS2DH12 the upstream driver assumes: the driver
- * reports data-ready but the output registers never move. Say so, once per
- * 10 s, with the raw bytes.
+ * accelerometer never got the full initialization (see accel_config()): the
+ * driver reports data-ready but the output registers never move. Say so,
+ * once per 10 s, with the raw bytes.
  */
 static void accel_zero_note(const char *src)
 {
@@ -4673,8 +4708,8 @@ static void accel_zero_note(const char *src)
 
 /*
  * Upstream driver path. False covers both a failed read and the "data ready,
- * data zero" answer of a chip the driver cannot really read - gravity is
- * always visible on some axis, so an all-zero triple is never a live sample.
+ * data zero" answer of an unconfigured chip - gravity is always visible on
+ * some axis, so an all-zero triple is never a live sample.
  */
 static bool accel_driver_read(struct sensor_value xyz[3])
 {
@@ -4693,7 +4728,8 @@ static bool accel_driver_read(struct sensor_value xyz[3])
  * A live accelerometer sample always shows gravity: at rest one axis carries
  * ~1 g, so the axes add up to roughly 1000 mg anywhere between upright and
  * flat. A chip whose output registers never move sums to nearly nothing -
- * that (rather than an exact 0.000) is what a substituted part looks like.
+ * that (rather than an exact 0.000) is what a part without the filter
+ * configuration reports.
  */
 static bool accel_live_mg(int x, int y, int z)
 {
@@ -4743,8 +4779,8 @@ static int accel_sample(int mg[3])
 /*
  * Diagnostic (BLE debug command 0x1F): put the accelerometer's identity and
  * whole register file in the log. Reads only, so it is safe to run on a
- * device in the field; the log line tells which chip answers at 0x19 when
- * the stock driver cannot serve real samples from it.
+ * device in the field; the lines show which chip answers at 0x19 and whether
+ * it is holding the configuration a live sample needs.
  */
 static void accel_dump(void)
 {
@@ -4815,6 +4851,26 @@ static void accel_dump(void)
 					&ref);
 		LOG_INF("accel: single ctrl1=%02X ctrl4=%02X ctrl5=%02X status=%02X ref=%02X",
 			r1, r4, r5, st, ref);
+	}
+
+	/* The remaining registers the init sequence touches, so a unit that
+	 * only serves zeros can be compared against a working one. */
+	{
+		uint8_t r2 = 0, r3 = 0, r6 = 0, fc = 0, fs = 0, i2 = 0;
+
+		(void)i2c_reg_read_byte(touch_i2c.bus, ACC_ADDR, ACC_CTRL_REG2,
+					&r2);
+		(void)i2c_reg_read_byte(touch_i2c.bus, ACC_ADDR, ACC_CTRL_REG3,
+					&r3);
+		(void)i2c_reg_read_byte(touch_i2c.bus, ACC_ADDR, ACC_CTRL_REG6,
+					&r6);
+		(void)i2c_reg_read_byte(touch_i2c.bus, ACC_ADDR, ACC_FIFO_CTRL,
+					&fc);
+		(void)i2c_reg_read_byte(touch_i2c.bus, ACC_ADDR, ACC_FIFO_SRC,
+					&fs);
+		(void)i2c_reg_read_byte(touch_i2c.bus, ACC_ADDR, 0x34, &i2);
+		LOG_INF("accel: single ctrl2=%02X ctrl3=%02X ctrl6=%02X fifo=%02X/%02X int2cfg=%02X",
+			r2, r3, r6, fc, fs, i2);
 	}
 
 	/* Single-register reads of the six output bytes, so a broken burst
@@ -4952,6 +5008,11 @@ static void accel_resume(void)
 	if (accel_direct) {
 		(void)accel_direct_init();
 	} else {
+		/* The chip keeps its configuration across power-down (a working
+		 * unit never needed more than this), so the filter sequence is
+		 * only applied once at boot. If a part ever does lose it, the
+		 * sample check in accel_sample() notices, falls back to the
+		 * poller and configures it again. */
 		(void)i2c_reg_write_byte(touch_i2c.bus, ACC_ADDR,
 					ACC_CTRL_REG1, 0x57);
 	}
@@ -5354,8 +5415,14 @@ int main(void)
 
 	accel = DEVICE_DT_GET(DT_NODELABEL(lis2dh));
 	LOG_INF("accel device ready: %d", device_is_ready(accel));
-	if (!device_is_ready(accel)) {
-		accel_direct_init();
+
+	/* Configure the chip before the first read. The Zephyr driver's init
+	 * clears CTRL1..CTRL6 to their boot values but never touches the
+	 * high-pass filter or the FIFO, and an unconfigured part answers
+	 * every read with its power-on zeros; accel_config() applies the
+	 * full sequence instead. The driver path is kept when it is ready,
+	 * the built-in poller takes over when it is not. */
+	if (accel_direct_init() != 0 && !device_is_ready(accel)) {
 		accel_direct = true;
 	}
 
