@@ -58,6 +58,10 @@ uptime source, and byte [128] reports the BLE access mode. Bytes [129..139]
 carry crash telemetry: boot counter, hwinfo reset-cause flags (LE), audio
 and main thread heartbeats (u16 LE each, a stalled one names the hung
 thread) and the active SID engine (0 = new, 1 = legacy, 0xFF = none).
+Byte [137] is the filesystem state (0 = `/home` mounted, 1 = not mounted)
+with the mount error code in [138]: an unmounted or corrupt LittleFS used to
+report nothing anywhere, so `status` and `ls` can now say it instead of
+showing an empty directory.
 
 The stack telemetry (`1D`) reports **peaks, not current depth**: stacks are
 filled with 0xAA when a thread starts (`CONFIG_INIT_STACKS`), and the

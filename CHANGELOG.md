@@ -25,6 +25,11 @@
   orientation/tilt thresholds are compared in that same unit, so a device
   lying flat keeps its current idle face instead of picking one from the
   residual tilt. Verified on hardware.
+- `SAVE STATE` no longer claims success on an unmounted `/home`: every
+  writer no-ops without a filesystem, so the log said "state saved" while
+  nothing was written. The save is now refused with a warning that names
+  the mount error, and the read snapshot carries the filesystem state so
+  hosts can see it too.
 
 **Host tools**
 
@@ -37,6 +42,11 @@
   hardware.
 - `threads` is now `stacks` (the interrupt stack comes first, then the
   threads); `threads` keeps working as an alias.
+- `status` and `ls` report the filesystem state: an unmounted (corrupt or
+  not formatted) LittleFS used to look like a device with no tunes, with
+  the only hint buried in the boot log. `status` now prints `fs:` with the
+  mount error and `ls` says the listing is empty because nothing is
+  stored; `fsformat` recreates it.
 - Ctrl-C now stops `log -f` and `monitor`: the first SIGINT was swallowed
   (asyncio cancels the main task and bleak's D-Bus read absorbs it), which
   left the tool running *and* the BLE link up, so the device stopped

@@ -430,6 +430,7 @@ static uint32_t alarm_fired_min = 0xFFFFFFFFU; /* wall minute already fired */
 static uint8_t volume = 26; /* ~10% default: Commando at full blast is loud */
 static bool sound_on = true;
 static bool fs_ready;
+static int fs_mount_err; /* last LittleFS mount failure, 0 when mounted */
 
 /* Active UI screen (the idle clock face is a separate mode: idle_mode) */
 enum ui_screen { SCR_MAIN = 0, SCR_SID, SCR_SENSORS, SCR_SETTINGS, SCR_ALARMS };
@@ -625,11 +626,13 @@ static void fs_storage_init(bool format)
 	sidclock_fs_mp.flags = format ? 0 : FS_MOUNT_FLAG_NO_FORMAT;
 	rc = fs_mount(&sidclock_fs_mp);
 	if (rc < 0) {
+		fs_mount_err = rc;
 		LOG_WRN("LittleFS mount failed (%d)%s", rc,
 			format ? "" :
 			" - use the 'fsformat' debug command to recreate it");
 		return;
 	}
+	fs_mount_err = 0;
 	fs_ready = true;
 	LOG_INF("LittleFS mounted at /home");
 }
@@ -1543,7 +1546,12 @@ static ssize_t ble_dbg_read(struct bt_conn *conn,
 	ble_dbg[134] = (uint8_t)crash_log.main_hb;
 	ble_dbg[135] = (uint8_t)(crash_log.main_hb >> 8);
 	ble_dbg[136] = crash_log.engine;
-	ble_dbg[137] = ble_dbg[138] = ble_dbg[139] = 0;
+	/* [137] filesystem state (0 = /home mounted, 1 = not mounted) and
+	 * [138] the mount error code, so `status`/`ls` can say that saves
+	 * are going nowhere instead of showing an empty directory */
+	ble_dbg[137] = fs_ready ? 0U : 1U;
+	ble_dbg[138] = (uint8_t)(fs_mount_err < 0 ? -fs_mount_err : 0);
+	ble_dbg[139] = 0;
 
 	return bt_gatt_attr_read(conn, attr, buf, len, offset, ble_dbg,
 				 sizeof(ble_dbg));
@@ -3764,6 +3772,13 @@ static void bri_cfg_load(void)
  * alarms and the last tune to /home in one go. */
 static void save_all_state(void)
 {
+	if (!fs_ready) {
+		/* Every writer below no-ops without a mounted filesystem, so
+		 * this used to log a successful save and then lose the lot. */
+		LOG_WRN("state NOT saved: /home not mounted (%d) - 'fsformat' recreates it",
+			fs_mount_err);
+		return;
+	}
 	home_write_dir();
 	time_cfg_save();
 	bri_cfg_dirty = false;

@@ -222,6 +222,14 @@ async def cmd_status(addr):
         mode = _ble_mode(raw)
         if mode:
             print(f"ble:     {mode}")
+        fs = _fs_state(raw)
+        if fs is not None:
+            mounted, err = fs
+            if mounted:
+                print("fs:      /home mounted")
+            else:
+                print(f"fs:      /home NOT mounted (mount error -{err}) - "
+                      "corrupt or not formatted; 'fsformat' recreates it")
 
 
 async def cmd_set_time(addr, tz=None):
@@ -330,6 +338,13 @@ def _ble_mode(raw):
     if raw is None or len(raw) < 129 or raw[128] > 2:
         return None
     return ("R/W", "R/O", "OFF")[raw[128]]
+
+
+def _fs_state(raw):
+    """(mounted, err) from snapshot [137]/[138], or None (old firmware)."""
+    if raw is None or len(raw) < 139:
+        return None
+    return raw[137] == 0, raw[138]
 
 
 def _rate_of(raw):
@@ -664,6 +679,10 @@ async def cmd_ls(addr):
     for n in names:
         print(f"  {n}")
     print(f"  ({len(names)} files)")
+    if len(raw) > 138 and raw[137]:
+        print(f"  filesystem corrupt or not formatted (mount error "
+              f"-{raw[138]}) - nothing is stored, so the listing is empty; "
+              "'fsformat' recreates it")
 
 
 async def _poll_marker(c, marker):
