@@ -82,6 +82,10 @@ Before calling a change done, verify on hardware:
 2. SID: load a tune, play/pause/subtune, chip switch, end mode, marquee.
 3. Alarms: create an ONCE alarm a minute out in idle, check ring/wake/touch.
 4. Idle: wait for the timeout, confirm auto-brightness and orientation.
+   If the idle face stops rotating or the sensor screen shows
+   `ACCEL: no sample`, `tools/sidclock_ble.py accel` (read-only) prints the
+   chip's `WHO_AM_I`, both read paths and the register file: a good unit
+   shows a live `Z = +/-9.8 m/s2`, a silent one frozen output bytes.
 5. Sleep: SLEEP button - panel dark, music continues, touch wakes, alarm
    wakes into the idle clock.
 6. BLE: `status`, `set-time`, `ls`, OTA upload and version check.

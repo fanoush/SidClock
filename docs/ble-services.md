@@ -46,6 +46,7 @@ signals: they are only compiled into **debug builds**
 | `17` + u8 engine | global SID engine, dual-engine builds only: `0` = new cRSID, `1` = legacy cSID-light (same as the main-screen button: stops, flips, restarts the current tune) |
 | `1D` [+ u8 `page`] | stack telemetry for the overflow hunt, 4 rows per page: the **interrupt stack** first, then the threads in creation order. `(size, free)` u16 pairs at `[36..51]`, the matching 11-byte names at `[52..95]`; `[34]` marker, `[35]` page with bit 7 set to say the names follow and bit 6 set on the last page (bit 7 clear = the older 5-per-page layout without names; bit 6 clear everywhere = firmware from before the interrupt row). Only the requested page is latched, so one page costs 4 stack scans. Under 256 B free anywhere is the smoking gun. |
 | `1E` [+ u8 `mode`] | drain the SEGGER RTT log buffer - the `LOG_*` lines a debug probe would show; the next read returns up to 60 bytes of text at `[36..95]`, the byte count in `[35]`, `[34]` = marker. The bare opcode (or `mode` 0) **consumes** the chunk, so the device forgets it and a second call only shows newer lines. `mode` 1 restarts a *peek* at the oldest unread byte and 2 continues it; a peek never moves the read pointer, so it is repeatable and a later consume still sees the window. |
+| `1F` [+ u8 `mode`] | accelerometer diagnosis into the log (**read-only** in a release image): I2C scan 0x08-0x77, `WHO_AM_I` at both possible addresses (0x19/0x18), what the Zephyr driver and the built-in poller each return, registers 0x00-0x5F as eight-byte rows, single-register reads of the control block and of the six output bytes, and a `CTRL_REG1`/`CTRL_REG4` write/read-back. This is what identifies a chip that answers on I2C but never converts. `SIDCLOCK_DEBUG` builds also take `mode` 1 (reboot the register file from OTP via the `CTRL_REG5` BOOT bit, then walk the ODR settings logging the output registers after each) and `mode` 2 (drop the sensor rail P1.11 for 150 ms, then bring touch, ambient light and the accelerometer back up and watch the data registers). |
 | `50` | 1 s test tone |
 
 The read snapshot (132 bytes) mixes audio state (sample rate, DMA buffer
@@ -84,6 +85,18 @@ A 30 s independent watchdog (fed from the main loop) reboots instead of
 freezing: any wedged thread stops the loop directly or via a stuck lock.
 After an unexpected reboot, `tools/sidclock_ble.py audio` shows the boot
 count, the reset cause and which heartbeat stalled.
+
+The accelerometer is read through the Zephyr LIS2DH driver, with a small
+built-in I2C poller as a fallback: when the driver returns a sample with no
+gravity (|x|+|y|+|z| < 500 mg - what a chip that acknowledges on I2C but
+never actually converts looks like) the app latches onto the poller, logs
+the raw bytes once and the sensor screen prints `ACCEL: no sample` instead
+of a plausible-looking `0.000`. Both paths report `g` with three decimals,
+so the tilt bars and the rotation thresholds see the same units. The
+register dump above is the field test for such a unit: `tools/sidclock_ble.py
+accel` shows the frozen output bytes and the chip's `WHO_AM_I` without
+needing a probe. A healthy unit shows a live sample there
+(`Z = +/-9.8 m/s2`).
 
 ## BLE access modes
 

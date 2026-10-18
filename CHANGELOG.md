@@ -2,6 +2,20 @@
 
 ## 1.0.7
 
+**Fixes**
+
+- The accelerometer is no longer taken at face value. When the Zephyr LIS2DH
+  driver returns a sample with no gravity at all (|x|+|y|+|z| < 500 mg), the
+  app falls back to its own I2C poller, keeps the driver's values only once a
+  real sample arrives, logs the raw bytes, and the sensor screen prints
+  `ACCEL: no sample` instead of three plausible-looking zeros - a unit whose
+  chip answers on I2C but never converts used to look exactly like a device
+  lying flat. Both read paths now report `g` with three decimals and the
+  orientation/tilt thresholds are compared in that same unit, so a device
+  lying flat keeps its current idle face instead of picking one from the
+  residual tilt. Verified on hardware (live `Z = +/-9.8 m/s2` on a good unit,
+  frozen output bytes on a bad one).
+
 **Host tools**
 
 - `tools/sidclock_ble.py log` prints the device's SEGGER RTT log buffer:
@@ -43,6 +57,21 @@
   keeps the newest window (its first line can be the tail of a line whose
   start is gone - printed as it is). Debug command `1E` serves it to the
   BLE snapshot read, 60 bytes at a time.
+- New read-only BLE debug command `1F` (`accel`) dumps the accelerometer:
+  I2C scan 0x08-0x77, `WHO_AM_I` at 0x19/0x18, what the driver and the
+  built-in poller each return, register rows 0x00-0x5F, single-register reads
+  of the control block and of the six output bytes, and a
+  `CTRL_REG1`/`CTRL_REG4` write/read-back. `SIDCLOCK_DEBUG` builds also take
+  mode 1 (reboot the register file from OTP via the `CTRL_REG5` BOOT bit,
+  then sweep the ODR settings) and mode 2 (power-cycle the sensor rail and
+  bring touch/ALS back up). It is what showed that the suspect unit has the
+  same part as a working one (same `WHO_AM_I`, same trim/lot fingerprint),
+  accepts config writes and reports data-ready - but its six output bytes
+  never leave their power-up value, through a chip reboot, an ODR sweep and a
+  rail drop.
+- The periodic slot/trailer dump every 5 s is `SIDCLOCK_DEBUG`-only now: in
+  a release image two lines every five seconds filled the ~2 KB log buffer
+  and hid everything else. The boot-time dump stays.
 
 ## 1.0.6
 

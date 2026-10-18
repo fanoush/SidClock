@@ -266,13 +266,24 @@ LOG_MODULE_REGISTER(sidclock, LOG_LEVEL_INF);
 
 /* LIS2DH registers (direct fallback path) */
 #define ACC_ADDR       0x19
+#define ACC_ALT_ADDR   0x18     /* SA0 tied low instead of high */
 #define ACC_WHO_AM_I   0x0F
 #define ACC_CTRL_REG1  0x20
 #define ACC_CTRL_REG4  0x23
+#define ACC_CTRL_REG5  0x24     /* bit 7: BOOT - reload from OTP */
+#define ACC_STATUS_REG 0x27
+#define ACC_REFERENCE  0x26
 #define ACC_OUT_X_L    0x28
 
 static const struct device *disp;
 static const struct device *accel;
+
+/* accelerometer register dump, requested over BLE (debug command 0x1F) */
+static void accel_dump(void);
+#ifdef SIDCLOCK_DEBUG
+static void accel_revive(void);
+static void accel_rail_cycle(void);
+#endif
 
 static const struct i2c_dt_spec touch_i2c =
 	I2C_DT_SPEC_GET(DT_NODELABEL(ft3168));
@@ -1560,6 +1571,7 @@ static ssize_t ble_dbg_write(struct bt_conn *conn,
 	      (len == 3U && p[0] == 0x13U) ||
 	      (len == 2U && p[0] == 0x1DU) ||
 	      (len == 2U && p[0] == 0x1EU) ||
+	      (len == 2U && p[0] == 0x1FU) ||
 	      (len >= 2U && len <= 21U && p[0] == 0x11U) ||
 	      (len >= 2U && len <= 21U && p[0] == 0x16U) ||
 #ifdef SID_ENGINE_DUAL
@@ -1792,6 +1804,24 @@ static ssize_t ble_dbg_write(struct bt_conn *conn,
 		}
 		ble_mode = (uint8_t)(p[1] % 3U);
 		ble_apply_mode();
+		break;
+	case 0x1F:
+		/* Accelerometer diagnosis into the log: a read-only register
+		 * dump, so a release image can always identify the chip. Bench
+		 * builds also take a mode byte: 0x1F 01 reboots the chip and
+		 * sweeps ODR settings, 0x1F 02 power-cycles the sensor rail
+		 * (touch/ALS are brought back up afterwards). */
+#ifdef SIDCLOCK_DEBUG
+		if (len == 2U && p[1] == 1U) {
+			accel_revive();
+			break;
+		}
+		if (len == 2U && p[1] == 2U) {
+			accel_rail_cycle();
+			break;
+		}
+#endif
+		accel_dump();
 		break;
 #ifdef SIDCLOCK_DEBUG
 	case 0x07:
@@ -4555,11 +4585,25 @@ static int abs_i(int v)
 /* Direct-poll fallback: standard LIS2DH setup, 100 Hz, BDU, +-2g, HR */
 static int accel_direct_init(void)
 {
+	static uint32_t probe_last;
+	static int probe_ret = -1;
+	static uint8_t probe_who;
 	uint8_t who = 0;
+	uint32_t now;
 	int ret;
 
 	ret = i2c_reg_read_byte(touch_i2c.bus, ACC_ADDR, ACC_WHO_AM_I, &who);
-	LOG_INF("accel probe 0x%02X: ret=%d WHO_AM_I=0x%02X", ACC_ADDR, ret, who);
+
+	/* Rate limited: this also runs on every idle orientation check. */
+	now = k_uptime_get_32();
+	if (ret != probe_ret || who != probe_who ||
+	    now - probe_last >= 30000U) {
+		probe_last = now;
+		probe_ret = ret;
+		probe_who = who;
+		LOG_INF("accel probe 0x%02X: ret=%d WHO_AM_I=0x%02X",
+			ACC_ADDR, ret, who);
+	}
 
 	if (ret < 0 || who != 0x33) {
 		return -ENODEV;
@@ -4568,17 +4612,28 @@ static int accel_direct_init(void)
 	(void)i2c_reg_write_byte(touch_i2c.bus, ACC_ADDR, ACC_CTRL_REG1, 0x00);
 	(void)i2c_reg_write_byte(touch_i2c.bus, ACC_ADDR, ACC_CTRL_REG4, 0x08);
 	(void)i2c_reg_write_byte(touch_i2c.bus, ACC_ADDR, ACC_CTRL_REG1, 0x57);
+
+	/* 100 Hz: a conversion takes 10 ms, so without the wait the first
+	 * read after a resume still returns the power-on zeros. */
+	k_sleep(K_MSEC(20));
 	return 0;
 }
 
-static void accel_direct_read(int mg[3])
+/* The six output bytes, auto-increment set in the sub-address. */
+static int accel_raw_read(uint8_t b[6])
 {
-	uint8_t b[6];
 	uint8_t r = ACC_OUT_X_L | 0x80;
 
-	if (i2c_write_read(touch_i2c.bus, ACC_ADDR, &r, 1, b, 6) < 0) {
+	return i2c_write_read(touch_i2c.bus, ACC_ADDR, &r, 1, b, 6);
+}
+
+static int accel_direct_read(int mg[3])
+{
+	uint8_t b[6];
+
+	if (accel_raw_read(b) < 0) {
 		mg[0] = mg[1] = mg[2] = 0;
-		return;
+		return -EIO;
 	}
 
 	for (int i = 0; i < 3; i++) {
@@ -4586,7 +4641,305 @@ static void accel_direct_read(int mg[3])
 
 		mg[i] = raw >> 4; /* HR mode, +-2g: 1 mg/LSB */
 	}
+	return 0;
 }
+
+/*
+ * A read that came back all-zero (with no error anywhere) is what makes the
+ * sensor screen show 0.000 and the idle face never turn on a unit whose
+ * accelerometer is not the LIS2DH12 the upstream driver assumes: the driver
+ * reports data-ready but the output registers never move. Say so, once per
+ * 10 s, with the raw bytes.
+ */
+static void accel_zero_note(const char *src)
+{
+	static uint32_t last;
+	uint8_t b[6];
+	uint32_t now = k_uptime_get_32();
+
+	if (now - last < 10000U) {
+		return;
+	}
+	last = now;
+
+	if (accel_raw_read(b) == 0) {
+		LOG_WRN("accel: %s sample shows no gravity, raw %02X%02X %02X%02X %02X%02X",
+			src, b[0], b[1], b[2], b[3], b[4], b[5]);
+	} else {
+		LOG_WRN("accel: %s sample shows no gravity, raw read failed",
+			src);
+	}
+}
+
+/*
+ * Upstream driver path. False covers both a failed read and the "data ready,
+ * data zero" answer of a chip the driver cannot really read - gravity is
+ * always visible on some axis, so an all-zero triple is never a live sample.
+ */
+static bool accel_driver_read(struct sensor_value xyz[3])
+{
+	if (!device_is_ready(accel) ||
+	    sensor_sample_fetch(accel) != 0 ||
+	    sensor_channel_get(accel, SENSOR_CHAN_ACCEL_X, &xyz[0]) != 0 ||
+	    sensor_channel_get(accel, SENSOR_CHAN_ACCEL_Y, &xyz[1]) != 0 ||
+	    sensor_channel_get(accel, SENSOR_CHAN_ACCEL_Z, &xyz[2]) != 0) {
+		return false;
+	}
+
+	return true;
+}
+
+/*
+ * A live accelerometer sample always shows gravity: at rest one axis carries
+ * ~1 g, so the axes add up to roughly 1000 mg anywhere between upright and
+ * flat. A chip whose output registers never move sums to nearly nothing -
+ * that (rather than an exact 0.000) is what a substituted part looks like.
+ */
+static bool accel_live_mg(int x, int y, int z)
+{
+	return abs_i(x) + abs_i(y) + abs_i(z) >= 500;
+}
+
+/*
+ * One accelerometer sample in mg (1 g = 1000), from whichever path can
+ * serve a live one: the upstream driver when it returns real data, else the
+ * direct poller (after resyncing the chip). Returns 0 on success.
+ */
+static int accel_sample(int mg[3])
+{
+	if (!accel_direct) {
+		struct sensor_value xyz[3];
+
+		if (accel_driver_read(xyz)) {
+			for (int i = 0; i < 3; i++) {
+				/* m/s2 -> mg: 9810 milli-m/s2 is 1 g */
+				int v = xyz[i].val1 * 1000 + xyz[i].val2 / 1000;
+
+				mg[i] = v * 100 / 981;
+			}
+			if (accel_live_mg(mg[0], mg[1], mg[2])) {
+				return 0;
+			}
+			accel_zero_note("driver");
+		}
+
+		/* upstream driver cannot serve a live sample -> own poller */
+		if (accel_direct_init() != 0) {
+			return -1;
+		}
+		accel_direct = true;
+	}
+
+	if (accel_direct_read(mg) != 0) {
+		return -1;
+	}
+	if (!accel_live_mg(mg[0], mg[1], mg[2])) {
+		accel_zero_note("direct");
+		return -1;
+	}
+	return 0;
+}
+
+/*
+ * Diagnostic (BLE debug command 0x1F): put the accelerometer's identity and
+ * whole register file in the log. Reads only, so it is safe to run on a
+ * device in the field; the log line tells which chip answers at 0x19 when
+ * the stock driver cannot serve real samples from it.
+ */
+static void accel_dump(void)
+{
+	uint8_t b[8];
+
+	for (uint8_t a = 0x08; a < 0x78; a++) {
+		if (i2c_write(touch_i2c.bus, NULL, 0, a) == 0) {
+			LOG_INF("accel: i2c device at 0x%02X", a);
+		}
+	}
+
+	for (uint8_t a = ACC_ALT_ADDR; a <= ACC_ADDR; a++) {
+		uint8_t who = 0;
+		int ret = i2c_reg_read_byte(touch_i2c.bus, a, ACC_WHO_AM_I,
+					    &who);
+
+		LOG_INF("accel: addr 0x%02X who_am_i ret=%d 0x%02X",
+			a, ret, who);
+	}
+
+	LOG_INF("accel: driver ready=%d direct=%d",
+		device_is_ready(accel), accel_direct);
+
+	if (!accel_direct) {
+		struct sensor_value xyz[3];
+
+		if (accel_driver_read(xyz)) {
+			LOG_INF("accel: driver %d.%06d %d.%06d %d.%06d m/s2",
+				xyz[0].val1, abs_i(xyz[0].val2),
+				xyz[1].val1, abs_i(xyz[1].val2),
+				xyz[2].val1, abs_i(xyz[2].val2));
+		} else {
+			LOG_INF("accel: driver sample unusable");
+		}
+	} else {
+		int mg[3];
+
+		(void)accel_direct_read(mg);
+		LOG_INF("accel: direct %d %d %d mg", mg[0], mg[1], mg[2]);
+	}
+
+	for (uint8_t r = 0; r < 0x60U; r += 8U) {
+		uint8_t a = (uint8_t)(r | 0x80);
+
+		if (i2c_write_read(touch_i2c.bus, ACC_ADDR, &a, 1, b, 8) < 0) {
+			LOG_INF("accel: reg 0x%02X read failed", r);
+			continue;
+		}
+		LOG_INF("accel: reg %02X: %02X %02X %02X %02X %02X %02X %02X %02X",
+			r, b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]);
+	}
+
+	/* Single-register reads of the control block, to compare with the
+	 * burst rows above (a part whose auto-increment misbehaves would
+	 * show the same value eight times, or zeros). */
+	{
+		uint8_t r1 = 0, r4 = 0, r5 = 0, st = 0, ref = 0;
+
+		(void)i2c_reg_read_byte(touch_i2c.bus, ACC_ADDR, ACC_CTRL_REG1,
+					&r1);
+		(void)i2c_reg_read_byte(touch_i2c.bus, ACC_ADDR, ACC_CTRL_REG4,
+					&r4);
+		(void)i2c_reg_read_byte(touch_i2c.bus, ACC_ADDR, ACC_CTRL_REG5,
+					&r5);
+		(void)i2c_reg_read_byte(touch_i2c.bus, ACC_ADDR, ACC_STATUS_REG,
+					&st);
+		(void)i2c_reg_read_byte(touch_i2c.bus, ACC_ADDR, ACC_REFERENCE,
+					&ref);
+		LOG_INF("accel: single ctrl1=%02X ctrl4=%02X ctrl5=%02X status=%02X ref=%02X",
+			r1, r4, r5, st, ref);
+	}
+
+	/* Single-register reads of the six output bytes, so a broken burst
+	 * cannot be mistaken for a frozen sensor. */
+	{
+		uint8_t o[6];
+
+		for (uint8_t i = 0; i < 6; i++) {
+			(void)i2c_reg_read_byte(touch_i2c.bus, ACC_ADDR,
+						ACC_OUT_X_L + i, &o[i]);
+		}
+		LOG_INF("accel: single out X=%02X%02X Y=%02X%02X Z=%02X%02X",
+			o[1], o[0], o[3], o[2], o[5], o[4]);
+	}
+
+	/* Do control writes stick at all? (0x57 = 100 Hz, 0x08 = +-2g HR) */
+	(void)i2c_reg_write_byte(touch_i2c.bus, ACC_ADDR, ACC_CTRL_REG1,
+				 0x57);
+	(void)i2c_reg_read_byte(touch_i2c.bus, ACC_ADDR, ACC_CTRL_REG1, &b[0]);
+	(void)i2c_reg_write_byte(touch_i2c.bus, ACC_ADDR, ACC_CTRL_REG4,
+				 0x08);
+	(void)i2c_reg_read_byte(touch_i2c.bus, ACC_ADDR, ACC_CTRL_REG4, &b[1]);
+	LOG_INF("accel: wrote ctrl1=57 ctrl4=08, read back %02X %02X",
+		b[0], b[1]);
+}
+
+#ifdef SIDCLOCK_DEBUG
+/*
+ * Diagnostic (BLE 0x1F 01): try to bring a silent accelerometer back.
+ * Reboots the register file from OTP (CTRL5 BOOT bit) and then walks the
+ * ODR settings, logging the data registers after each - a part that only
+ * needs a reset sequence starts producing gravity somewhere in the list.
+ */
+static void accel_revive(void)
+{
+	static const uint8_t odr[] = { 0x17, 0x27, 0x2F, 0x37, 0x47, 0x57,
+				       0x67, 0x87 };
+	uint8_t b[6];
+
+	LOG_INF("accel: revive: power down, BOOT, then ODR sweep");
+
+	(void)i2c_reg_write_byte(touch_i2c.bus, ACC_ADDR, ACC_CTRL_REG1, 0x00);
+	(void)i2c_reg_write_byte(touch_i2c.bus, ACC_ADDR, ACC_CTRL_REG4, 0x08);
+	/* BOOT: reload the register file from OTP (self-clearing). */
+	(void)i2c_reg_write_byte(touch_i2c.bus, ACC_ADDR, ACC_CTRL_REG5, 0x80);
+	k_sleep(K_MSEC(30));
+
+	for (size_t i = 0; i < ARRAY_SIZE(odr); i++) {
+		uint8_t st = 0;
+
+		(void)i2c_reg_write_byte(touch_i2c.bus, ACC_ADDR,
+					 ACC_CTRL_REG4, 0x08);
+		(void)i2c_reg_write_byte(touch_i2c.bus, ACC_ADDR,
+					 ACC_CTRL_REG1, odr[i]);
+		k_sleep(K_MSEC(60));
+		(void)i2c_reg_read_byte(touch_i2c.bus, ACC_ADDR,
+					ACC_STATUS_REG, &st);
+
+		if (accel_raw_read(b) < 0) {
+			LOG_INF("accel: odr %02X status %02X raw read failed",
+				odr[i], st);
+			continue;
+		}
+		LOG_INF("accel: odr %02X status %02X raw %02X%02X %02X%02X %02X%02X",
+			odr[i], st, b[0], b[1], b[2], b[3], b[4], b[5]);
+	}
+
+	/* leave it at 100 Hz, all axes, +-2g, high resolution */
+	(void)i2c_reg_write_byte(touch_i2c.bus, ACC_ADDR, ACC_CTRL_REG1, 0x57);
+}
+
+/*
+ * Diagnostic (BLE 0x1F 02): power-cycle the sensor rail (P1.11) and bring
+ * touch, ambient light and the accelerometer back up, watching the data
+ * registers. A latched bad power-up state - the "first boot after flashing
+ * / flat battery" case - shows up as data that starts moving here.
+ */
+static void accel_rail_cycle(void)
+{
+	const struct device *p1 = DEVICE_DT_GET(DT_NODELABEL(gpio1));
+	uint8_t m1 = 0, m4 = 0, st = 0;
+	int tr, ar;
+
+	/* Marker: CTRL4 = 0x88 / CTRL1 = 0x27 are not values the app ever
+	 * writes. If they survive the rail drop the chip's supply was not
+	 * actually cut (P1.11 gates something else), so the cycle below is
+	 * not a power-on-reset of the accelerometer. */
+	(void)i2c_reg_write_byte(touch_i2c.bus, ACC_ADDR, ACC_CTRL_REG4, 0x88);
+	(void)i2c_reg_write_byte(touch_i2c.bus, ACC_ADDR, ACC_CTRL_REG1, 0x27);
+
+	LOG_INF("accel: power-cycling the sensor rail (P1.11 low 150 ms)");
+	(void)gpio_pin_set(p1, 11, 0);
+	k_sleep(K_MSEC(150));
+	(void)gpio_pin_set(p1, 11, 1);
+	k_sleep(K_MSEC(150));
+
+	(void)i2c_reg_read_byte(touch_i2c.bus, ACC_ADDR, ACC_CTRL_REG1, &m1);
+	(void)i2c_reg_read_byte(touch_i2c.bus, ACC_ADDR, ACC_CTRL_REG4, &m4);
+	(void)i2c_reg_read_byte(touch_i2c.bus, ACC_ADDR, ACC_STATUS_REG, &st);
+
+	tr = touch_init();
+	als_ct_init();
+	ar = accel_direct_init();
+	accel_direct = true;
+
+	for (int i = 0; i < 6; i++) {
+		uint8_t b[6];
+
+		k_sleep(K_MSEC(60));
+		if (accel_raw_read(b) < 0) {
+			LOG_INF("accel: after rail cycle %d: raw read failed", i);
+			continue;
+		}
+		LOG_INF("accel: after rail cycle %d: raw %02X%02X %02X%02X %02X%02X",
+			i, b[0], b[1], b[2], b[3], b[4], b[5]);
+	}
+
+	accel_dump();
+
+	/* This handler blocks the log drain until it returns and the release
+	 * buffer is only ~2 KB, so the summary goes last, after the dump. */
+	LOG_INF("accel: rail summary: marker ctrl1=%02X ctrl4=%02X status=%02X power-cycled=%d touch_init=%d accel_init=%d",
+		m1, m4, st, !(m1 == 0x27 && m4 == 0x88), tr, ar);
+}
+#endif /* SIDCLOCK_DEBUG */
 
 /* Accelerometer power save for idle mode: CTRL_REG1 = 0 (power down). */
 static void accel_suspend(void)
@@ -4631,18 +4984,8 @@ static int accel_orientation(void)
 	accel_resume();
 	k_sleep(K_MSEC(20)); /* let one sample settle */
 
-	if (!accel_direct) {
-		struct sensor_value x, y;
-
-		if (sensor_sample_fetch(accel) != 0 ||
-		    sensor_channel_get(accel, SENSOR_CHAN_ACCEL_X, &x) != 0 ||
-		    sensor_channel_get(accel, SENSOR_CHAN_ACCEL_Y, &y) != 0) {
-			return -1;
-		}
-		mg[0] = x.val1 * 1000 + x.val2 / 1000;
-		mg[1] = y.val1 * 1000 + y.val2 / 1000;
-	} else {
-		accel_direct_read(mg);
+	if (accel_sample(mg) != 0) {
+		return -1;
 	}
 
 	if (abs_i(mg[0]) < 350 && abs_i(mg[1]) < 350) {
@@ -4661,18 +5004,8 @@ static int accel_ui_rot(void)
 {
 	int mg[3] = { 0, 0, 0 };
 
-	if (!accel_direct) {
-		struct sensor_value x, y;
-
-		if (sensor_sample_fetch(accel) != 0 ||
-		    sensor_channel_get(accel, SENSOR_CHAN_ACCEL_X, &x) != 0 ||
-		    sensor_channel_get(accel, SENSOR_CHAN_ACCEL_Y, &y) != 0) {
-			return -1;
-		}
-		mg[0] = x.val1 * 1000 + x.val2 / 1000;
-		mg[1] = y.val1 * 1000 + y.val2 / 1000;
-	} else {
-		accel_direct_read(mg);
+	if (accel_sample(mg) != 0) {
+		return -1;
 	}
 
 	if (abs_i(mg[0]) < 350 && abs_i(mg[1]) < 350) {
@@ -4764,34 +5097,16 @@ static void show_accel(void)
 	char line[56];
 	int mg[3] = { 0, 0, 0 };
 
-	if (!accel_direct) {
-		struct sensor_value x, y, z;
+	if (accel_sample(mg) != 0) {
+		static const int zero[3] = { 0, 0, 0 };
 
-		if (sensor_sample_fetch(accel) == 0 &&
-		    sensor_channel_get(accel, SENSOR_CHAN_ACCEL_X, &x) == 0 &&
-		    sensor_channel_get(accel, SENSOR_CHAN_ACCEL_Y, &y) == 0 &&
-		    sensor_channel_get(accel, SENSOR_CHAN_ACCEL_Z, &z) == 0) {
-			mg[0] = x.val1 * 1000 + x.val2 / 1000;
-			mg[1] = y.val1 * 1000 + y.val2 / 1000;
-			mg[2] = z.val1 * 1000 + z.val2 / 1000;
-			snprintf(line, sizeof(line),
-				 "m/s2 X%+d.%02d Y%+d.%02d Z%+d.%02d",
-				 x.val1, abs_i(x.val2) / 10000,
-				 y.val1, abs_i(y.val2) / 10000,
-				 z.val1, abs_i(z.val2) / 10000);
-			draw_text_cached(TC_ACCEL, 8, 108, line, COL_CYAN, COL_BG);
-			draw_accel_bars(mg);
-			return;
-		}
-
-		/* upstream driver cannot read -> try the direct poller */
-		if (accel_direct_init() != 0) {
-			return;
-		}
-		accel_direct = true;
+		/* no live sample from either path: say so instead of a
+		 * plausible-looking 0.000 */
+		draw_text_cached(TC_ACCEL, 8, 108, "ACCEL: no sample",
+				 COL_CYAN, COL_BG);
+		draw_accel_bars(zero);
+		return;
 	}
-
-	accel_direct_read(mg);
 
 	snprintf(line, sizeof(line), "g X%+d.%03d Y%+d.%03d Z%+d.%03d",
 		 mg[0] / 1000, abs_i(mg[0]) % 1000,
@@ -5067,7 +5382,9 @@ int main(void)
 	sid_remember_load(); /* reload the last tune (stopped, metadata on) */
 
 	uint32_t t_acc = 0;
+#ifdef SIDCLOCK_DEBUG
 	uint32_t t_dump = 0;
+#endif
 	uint32_t t_batt = 0;
 	uint32_t t_sidui = 0;
 	uint32_t t_bricfg = 0;
@@ -5280,12 +5597,17 @@ int main(void)
 			battery_poll();
 		}
 
-		/* periodic view of what the bootloader ought to see */
+#ifdef SIDCLOCK_DEBUG
+		/* periodic view of what the bootloader ought to see (bench
+		 * only: in a release image this fills the ~2 KB log buffer
+		 * with two lines every five seconds and hides everything
+		 * else) */
 		if (k_uptime_get_32() - t_dump > 5000U) {
 			t_dump = k_uptime_get_32();
 			trailer_dump(FIXED_PARTITION_ID(slot0_partition), "slot0");
 			trailer_dump(FIXED_PARTITION_ID(slot1_partition), "slot1");
 		}
+#endif
 
 		k_sleep(K_MSEC(100));
 	}

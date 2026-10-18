@@ -42,6 +42,12 @@ Developer/debug commands (see docs/ble-services.md; behaviour may change):
             stack first, then the threads in creation order - peak use
             since boot, not the current depth; flags rows with <256 B
             free (alias: threads)
+  accel [dump|revive|rail]
+            dump the accelerometer: WHO_AM_I at 0x18/0x19, what the
+            Zephyr driver and the built-in poller return, then registers
+            0x00-0x5F. "revive" reboots the chip and sweeps ODR settings;
+            "rail" power-cycles the sensor rail and brings touch/ALS back
+            (revive/rail only exist in SIDCLOCK_DEBUG builds)
 
 The bring-up tests (click, beep, tone, rate, tonefreq, tonestart,
 tonestop) exist only in debug builds (SIDCLOCK_DEBUG=1 ./build.sh); a
@@ -551,6 +557,20 @@ def _log_lines(pending, data, last):
     return lines.replace(b"\r", b"") + b"\n", pending
 
 
+async def _pull_log(c, emit, first_mode=0, next_mode=0, stop=lambda: False):
+    """Feed the device's RTT window to `emit`; True when it was drained."""
+    mode = first_mode
+    for _ in range(LOG_MAX_CHUNKS):
+        if stop():
+            return False
+        text = await _log_chunk(c, mode)
+        if not text:
+            return True
+        emit(text)
+        mode = next_mode
+    return False
+
+
 async def cmd_log(addr, peek=False, follow=False):
     """Print the device's SEGGER RTT log buffer (debug command 0x1E).
 
@@ -579,16 +599,7 @@ async def cmd_log(addr, peek=False, follow=False):
         async def pull(first_mode, next_mode, stop):
             """Fetch chunks (0 = consume, 1 = restart peek, 2 = continue);
             True when the window was drained."""
-            mode = first_mode
-            for _ in range(LOG_MAX_CHUNKS):
-                if stop():
-                    return False
-                text = await _log_chunk(c, mode)
-                if not text:
-                    return True
-                emit(text)
-                mode = next_mode
-            return False
+            return await _pull_log(c, emit, first_mode, next_mode, stop)
 
         first = 1 if peek else 0
         cont = 2 if peek else 0
@@ -604,6 +615,33 @@ async def cmd_log(addr, peek=False, follow=False):
                     print("log: more is buffered (run log again)",
                           file=sys.stderr)
                 emit(b"", last=True)
+
+
+async def cmd_accel(addr, mode=None):
+    """Dump the accelerometer's register file (debug command 0x1F).
+
+    The device logs WHO_AM_I at both possible I2C addresses, what the Zephyr
+    driver and the built-in poller each return, and registers 0x00-0x5F.
+    Modes: none/dump (read only), revive (reboot the chip and sweep ODR
+    settings), rail (power-cycle the sensor rail and bring touch/ALS back).
+    revive/rail are only compiled into SIDCLOCK_DEBUG builds.
+    """
+    code = {"revive": 1, "1": 1, "rail": 2, "2": 2}.get(
+        (mode or "").lower() or "0", 0)
+    async with connect(addr) as c:
+        pending = b""
+
+        def emit(data, last=False):
+            nonlocal pending
+            text, pending = _log_lines(pending, data, last)
+            if text:
+                sys.stdout.write(text.decode(errors="replace"))
+                sys.stdout.flush()
+
+        payload = bytes([0x1F]) if code == 0 else bytes([0x1F, code])
+        await dbg_write(c, payload, "accel")
+        await _pull_log(c, emit)
+        emit(b"", last=True)
 
 
 async def cmd_ls(addr):
@@ -716,7 +754,7 @@ def main():
             "tone", "mute", "rate", "tonefreq",
         "tonestart", "tonestop", "fsformat", "sid", "sidname", "chip",
         "sidstop", "ls", "glitch", "blemode", "filedelete",
-        "engine", "stacks", "threads", "log",
+        "engine", "stacks", "threads", "log", "accel",
         ],
     )
     ap.add_argument(
@@ -764,9 +802,12 @@ def main():
         "stacks": cmd_stacks,
         "threads": cmd_stacks,  # alias for the old name
         "log": cmd_log,
+        "accel": cmd_accel,
     }[args.command]
     if args.command == "log":
         asyncio.run(fn(args.addr, args.peek, args.follow))
+    elif args.command == "accel":
+        asyncio.run(fn(args.addr, args.value))
     elif args.command in ("sidname", "chip", "filedelete", "engine",
                           "stacks", "threads"):
         asyncio.run(fn(args.addr, args.value))
