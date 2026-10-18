@@ -1,4 +1,10 @@
+/*
+ * SidClock web remote - dark by default, light via [data-theme="light"]
+ * (set on <html> by the inline head script / the theme button).
+ */
+
 :root {
+  color-scheme: dark;
   --bg: #0f141b;
   --card: #171e27;
   --card2: #1d2632;
@@ -9,6 +15,34 @@
   --accent2: #4ea1ff;
   --warn: #ffb454;
   --err: #ff6b6b;
+  --header-bg: rgba(15, 20, 27, .92);
+  --dot-off: #4a5563;
+  --track: #101720;
+  --primary-bg: #1e3a2a;
+  --primary-line: #2d5c41;
+  --primary-bg-active: #234532;
+  --note-bg: #1d2a3a;
+}
+
+[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f3f5f9;
+  --card: #ffffff;
+  --card2: #eceff5;
+  --line: #d3dae4;
+  --fg: #1a2430;
+  --dim: #5d6c7d;
+  --accent: #1f9d55;
+  --accent2: #1667c8;
+  --warn: #b26a00;
+  --err: #c02b2b;
+  --header-bg: rgba(255, 255, 255, .92);
+  --dot-off: #9aa7b5;
+  --track: #e2e7ee;
+  --primary-bg: #d9f2e2;
+  --primary-line: #9fd7b4;
+  --primary-bg-active: #c4ead3;
+  --note-bg: #e8eefb;
 }
 
 * { box-sizing: border-box; }
@@ -26,14 +60,15 @@ body {
 
 header.top {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: 8px 12px;
   padding: 12px 16px;
   position: sticky;
   top: 0;
   z-index: 10;
-  background: rgba(15, 20, 27, .92);
+  background: var(--header-bg);
   backdrop-filter: blur(6px);
   border-bottom: 1px solid var(--line);
 }
@@ -42,14 +77,23 @@ header.top {
 .brand h1 { font-size: 18px; margin: 0; font-weight: 650; }
 .logo { color: var(--accent); font-size: 15px; }
 
-.conn { display: flex; align-items: center; gap: 8px; }
-.status { font-size: 13px; color: var(--dim); max-width: 34vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.conn { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+.status {
+  font-size: 13px;
+  color: var(--dim);
+  max-width: 26vw;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .status.ok { color: var(--accent); }
 .status.busy { color: var(--warn); }
 
-.dot { width: 10px; height: 10px; border-radius: 50%; background: #4a5563; flex: none; }
+.dot { width: 10px; height: 10px; border-radius: 50%; background: var(--dot-off); flex: none; }
 .dot.ok { background: var(--accent); box-shadow: 0 0 8px var(--accent); }
 .dot.busy { background: var(--warn); }
+
+#theme { flex: none; width: 44px; padding: 0; font-size: 17px; }
 
 /* ---------- layout ---------- */
 
@@ -80,7 +124,7 @@ main { max-width: 520px; margin: 0 auto; padding-bottom: 8px; }
 
 .progress {
   height: 8px;
-  background: #101720;
+  background: var(--track);
   border-radius: 999px;
   overflow: hidden;
   margin: 12px 0 6px;
@@ -88,7 +132,7 @@ main { max-width: 520px; margin: 0 auto; padding-bottom: 8px; }
 #progressbar {
   height: 100%;
   width: 0;
-  background: linear-gradient(90deg, var(--accent), #3fa7d6);
+  background: linear-gradient(90deg, var(--accent), var(--accent2));
   transition: width .3s linear;
 }
 
@@ -118,8 +162,8 @@ main { max-width: 520px; margin: 0 auto; padding-bottom: 8px; }
 }
 .btn:active:not(:disabled) { transform: translateY(1px); }
 .btn:disabled { opacity: .35; cursor: default; }
-.btn.primary { background: #1e3a2a; border-color: #2d5c41; }
-.btn.primary:active:not(:disabled) { background: #234532; }
+.btn.primary { background: var(--primary-bg); border-color: var(--primary-line); }
+.btn.primary:active:not(:disabled) { background: var(--primary-bg-active); }
 .btn.big { font-size: 20px; }
 
 .transport {
@@ -165,7 +209,7 @@ select:disabled { opacity: .35; }
 /* ---------- device rows ---------- */
 
 .row { display: flex; align-items: center; gap: 10px; margin-top: 12px; }
-.rowlabel { color: var(--dim); font-size: 13px; width: 44px; flex: none; }
+.rowlabel { color: var(--dim); font-size: 13px; width: 58px; flex: none; }
 .value { font-variant-numeric: tabular-nums; flex: 1; }
 .value.warn { color: var(--warn); }
 
@@ -176,7 +220,7 @@ select:disabled { opacity: .35; }
   margin: 12px 16px;
   padding: 10px 14px;
   border-radius: 10px;
-  background: #1d2a3a;
+  background: var(--note-bg);
   border: 1px solid var(--line);
   font-size: 14px;
 }

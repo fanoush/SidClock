@@ -18,10 +18,12 @@
   `20` + subtune + name (play a file at a specific subtune) and
   `21` + subtune (jump to a subtune of the loaded tune).
 - **Web remote**: `web/` is a static page (no build step) that connects
-  over Web Bluetooth - battery, device clock, the current tune/subtune
-  with a progress bar, play/pause/stop, tune and subtune transport, and
-  one-press clock sync; all values are pushed by the device. Deployed to
-  GitHub Pages by the new `pages` workflow, linked from the README.
+  over Web Bluetooth - battery, the device and browser clocks side by
+  side (the device one turns amber while they disagree - no RTC, the time
+  is forgotten on every reset), the current tune/subtune with a progress
+  bar, play/pause/stop, tune and subtune transport, one-press clock sync
+  and a light/dark switch; all values are pushed by the device. Deployed
+  to GitHub Pages by the new `pages` workflow, linked from the README.
 
 **Fixes**
 

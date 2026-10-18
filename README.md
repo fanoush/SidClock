@@ -104,15 +104,18 @@ unlocking and backups: [docs/backup-unlock-flash.md](docs/backup-unlock-flash.md
 
 [**fanoush.github.io/SidClock**](https://fanoush.github.io/SidClock/) is a
 single static page that talks to the device over Web Bluetooth: battery,
-device clock, the current tune and subtune with a progress bar,
-play/pause/stop, tune and subtune transport, and one-press clock sync.
+the device and browser clocks side by side (the device one turns amber
+while they disagree - it has no RTC and forgets the time on every reset),
+the current tune and subtune with a progress bar, play/pause/stop, tune
+and subtune transport, one-press clock sync and a light/dark switch.
 It runs in Chrome or Edge (desktop) and Chrome on Android; the device
-accepts one host at a time, only accepts commands in R/W mode, and it
+accepts one host at a time and only accepts commands in R/W mode, and it
 pushes every status value (no polling). The page source is `web/`,
 deployed by the `pages` workflow; the protocol behind it is in
-[docs/ble-services.md](docs/ble-services.md). To work on the page
-locally, serve the folder over http (Web Bluetooth needs `https` or
-`localhost`): `python3 -m http.server`, then open
+[docs/ble-services.md](docs/ble-services.md).
+
+To work on the page locally, serve the folder over http (Web Bluetooth
+needs `https` or `localhost`): `python3 -m http.server`, then open
 <http://localhost:8000/web/>.
 
 ## Status and limitations

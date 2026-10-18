@@ -33,8 +33,6 @@ const BATTERY_SERVICE = 0x180f;
 const BATTERY_LEVEL_CHAR = 0x2a19;
 const CTS_SERVICE = 0x1805;
 const CTS_CHAR = 0x2a2b;
-const ESS_SERVICE = 0x181a;
-const ILLUMINANCE_CHAR = 0x2afb;
 
 const u32 = (b, o) =>
   (b[o] | (b[o + 1] << 8) | (b[o + 2] << 16) | (b[o + 3] << 24)) >>> 0;
@@ -113,13 +111,6 @@ export function timePayload(d = new Date()) {
   ]);
 }
 
-/** Illuminance is uint24 little-endian, 0.01 lx per unit. */
-export function parseLux(view) {
-  const b = bytesOf(view);
-  if (b.length < 3) return null;
-  return (b[0] | (b[1] << 8) | (b[2] << 16)) * 0.01;
-}
-
 export class SidClock {
   constructor() {
     this.device = null;
@@ -147,7 +138,6 @@ export class SidClock {
           SIDCLOCK_SERVICE,
           BATTERY_SERVICE,
           CTS_SERVICE,
-          ESS_SERVICE,
         ],
       });
       this.device.addEventListener('gattserverdisconnected', () => {
@@ -164,7 +154,6 @@ export class SidClock {
 
     this.battery = await this._optional(BATTERY_SERVICE, BATTERY_LEVEL_CHAR);
     this.cts = await this._optional(CTS_SERVICE, CTS_CHAR);
-    this.lux = await this._optional(ESS_SERVICE, ILLUMINANCE_CHAR);
 
     this.connected = true;
     return this.device.name || 'SidClock';
@@ -217,10 +206,6 @@ export class SidClock {
     if (!this.cts) throw new Error('no Current Time service');
     await this.cts.writeValue(timePayload(d));
     return this.readTime();
-  }
-
-  async readLux() {
-    return this.lux ? parseLux(await this.lux.readValue()) : null;
   }
 
   async _cmd(bytes) {

@@ -3,9 +3,19 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="color-scheme" content="dark">
-<meta name="theme-color" content="#0f141b">
+<meta name="color-scheme" content="dark light">
+<meta name="theme-color" content="#0f141b" id="theme-color">
 <title>SidClock remote</title>
+<script>
+/* apply the remembered theme before the first paint */
+try {
+  const stored = localStorage.getItem('sidclock-theme');
+  document.documentElement.dataset.theme =
+    (stored === 'light' || stored === 'dark') ? stored
+      : (matchMedia('(prefers-color-scheme: light)').matches
+        ? 'light' : 'dark');
+} catch (e) { /* no storage: dark default */ }
+</script>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -18,6 +28,7 @@
   <div class="conn">
     <span id="dot" class="dot" aria-hidden="true"></span>
     <span id="status" class="status">not connected</span>
+    <button id="theme" class="btn" title="switch theme">☀</button>
     <button id="connect" class="btn primary">Connect</button>
   </div>
 </header>
@@ -67,25 +78,26 @@
   </section>
 
   <section class="card">
-    <div class="cardhead"><span class="label">device</span></div>
+    <div class="cardhead"><span class="label">clocks</span></div>
     <div class="row">
-      <span class="rowlabel">clock</span>
+      <span class="rowlabel">device</span>
       <span id="devtime" class="value">--:--:--</span>
-      <button id="settime" class="btn">set to this phone</button>
+      <button id="settime" class="btn">set time</button>
     </div>
     <div class="row">
-      <span class="rowlabel">light</span>
-      <span id="lux" class="value">-- lx</span>
-      <button id="refresh" class="btn">refresh</button>
+      <span class="rowlabel">browser</span>
+      <span id="hosttime" class="value">--:--:--</span>
     </div>
   </section>
 
   <p class="hint">
     The device talks to one host at a time and only accepts commands while
     Bluetooth access is <strong>R/W</strong> (shown on its main screen).
-    <em>Set to this phone</em> is worth pressing after every reset - the
-    device has no real-time clock of its own and all status values are
-    pushed by the firmware, so this page never polls.
+    It has no real-time clock of its own, so after a reset its clock is
+    <em>unset</em> and otherwise drifts: the two clocks above show it, and
+    the device one turns amber while they disagree - press <em>set
+    time</em> to copy the browser clock over. All status values are
+    pushed by the device; this page never polls.
   </p>
 </main>
 

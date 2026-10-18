@@ -5,7 +5,9 @@
  * (the state characteristic pushes on every change and once per second
  * while a tune plays), so there is no polling and no timer-driven reads:
  * commands are fire-and-forget ATT writes and the pushed state is the
- * acknowledgement.
+ * acknowledgement. The exceptions are the battery percentage and the
+ * device clock, which are read once per connection (the clock is then
+ * ticked locally and compared against the browser clock).
  */
 
 import { SidClock, END_MODES, MODEL_MODES, CHIP_NAMES } from './ble.js';
@@ -14,11 +16,12 @@ const $ = (id) => document.getElementById(id);
 const sc = new SidClock();
 
 const CONTROLS = ['prev', 'play', 'next', 'stop', 'subprev', 'subnext',
-                  'subtune', 'settime', 'refresh'];
+                  'subtune', 'settime'];
 
 let lastGeneration = -1;
-let shownTime = null;    // device wall clock, ticked locally between reads
 let noteTimer = null;
+let deviceBase = null;       // { time, at } of the last device clock read
+let deviceTimeUnset = false; // the device answered "unset" (fresh reset)
 
 /* ---------- helpers ---------- */
 
@@ -77,7 +80,8 @@ function setConnected(ok) {
   if (!ok) {
     setStatus(sc.device ? 'disconnected' : 'not connected');
     $('play').textContent = '▶';
-    shownTime = null;
+    deviceBase = null;
+    deviceTimeUnset = false;
     $('devtime').textContent = '--:--:--';
     $('devtime').classList.remove('warn');
   }
@@ -96,7 +100,7 @@ $('connect').addEventListener('click', async () => {
     await sc.startUpdates();
     lastGeneration = -1;
     await refreshInfo();
-    await refreshDevice();
+    await readClock();
     setConnected(true);
     setStatus(name, 'ok');
   } catch (e) {
@@ -186,45 +190,81 @@ async function refreshInfo() {
   $('subtitle').textContent = bits.join(' · ');
 }
 
-/* ---------- device clock and light ---------- */
+/* ---------- clocks: device vs. this browser ---------- */
+
+function fmtClock(d) {
+  return d.toTimeString().slice(0, 8);
+}
+
+function deviceNow() {
+  if (!deviceBase) return null;
+  return new Date(deviceBase.time.getTime() +
+                  (performance.now() - deviceBase.at));
+}
 
 function showTime(t) {
   if (!t || t.year < 2020) {
-    shownTime = null;
-    $('devtime').textContent = 'unset';
-    $('devtime').classList.add('warn');
+    deviceBase = null;
+    deviceTimeUnset = true;
+    tickClocks();
     return;
   }
-  $('devtime').classList.remove('warn');
-  shownTime = new Date(t.year, t.month - 1, t.day,
-                      t.hours, t.minutes, t.seconds);
-  tickClock();
+  deviceTimeUnset = false;
+  deviceBase = {
+    time: new Date(t.year, t.month - 1, t.day,
+                   t.hours, t.minutes, t.seconds),
+    at: performance.now(),
+  };
+  tickClocks();
 }
 
-function tickClock() {
-  if (!shownTime) return;
-  $('devtime').textContent = shownTime.toTimeString().slice(0, 8);
-  shownTime = new Date(shownTime.getTime() + 1000);
+function tickClocks() {
+  const now = new Date();
+  $('hosttime').textContent = fmtClock(now);
+
+  const dev = deviceNow();
+  if (dev) {
+    $('devtime').textContent = fmtClock(dev);
+    // a couple of seconds of slack: clock reads truncate sub-second time
+    $('devtime').classList.toggle('warn', Math.abs(dev - now) > 2500);
+  } else {
+    $('devtime').textContent = deviceTimeUnset ? 'unset' : '--:--:--';
+    $('devtime').classList.toggle('warn', deviceTimeUnset);
+  }
 }
 
-setInterval(() => {
-  if (sc.connected && shownTime) tickClock();
-}, 1000);
+setInterval(tickClocks, 1000);
 
-async function refreshDevice() {
+async function readClock() {
   try {
     showTime(await sc.readTime());
   } catch (e) {
     console.error('time', e);
   }
-  try {
-    const lux = await sc.readLux();
-    $('lux').textContent = lux === null
-      ? 'n/a' : `${lux < 10 ? lux.toFixed(2) : lux.toFixed(1)} lx`;
-  } catch (e) {
-    console.error('lux', e);
+}
+
+/* ---------- theme ---------- */
+
+const THEME_KEY = 'sidclock-theme';
+
+function applyTheme(theme, persist) {
+  document.documentElement.dataset.theme = theme;
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.content = theme === 'light' ? '#f3f5f9' : '#0f141b';
+  $('theme').textContent = theme === 'light' ? '☾' : '☀';
+  $('theme').title = theme === 'light' ? 'switch to dark theme'
+                                       : 'switch to light theme';
+  if (persist) {
+    try {
+      localStorage.setItem(THEME_KEY, theme);
+    } catch (e) { /* private mode: only this visit */ }
   }
 }
+
+$('theme').addEventListener('click', () => {
+  applyTheme(document.documentElement.dataset.theme === 'light'
+    ? 'dark' : 'light', true);
+});
 
 /* ---------- controls ---------- */
 
@@ -252,9 +292,11 @@ $('settime').addEventListener('click', async () => {
   }
 });
 
-$('refresh').addEventListener('click', () => run(refreshDevice(), 'refresh'));
-
 /* ---------- startup ---------- */
+
+applyTheme(document.documentElement.dataset.theme === 'light'
+  ? 'light' : 'dark', false);
+tickClocks();
 
 if (!SidClock.available) {
   $('unsupported').hidden = false;
