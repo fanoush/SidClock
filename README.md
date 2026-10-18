@@ -72,7 +72,7 @@ sids/fetch-samples.sh                       # tunes + HVSC databases
 tools/sid_add.py sids/Commando.sid          # sidecars + upload
 
 # 6. Updates over the air:
-smpmgr --ble <addr> upgrade app/build/zephyr/zephyr.signed.bin
+tools/flash_ota.py --now                    # upload + arm + reboot (one boot)
 ```
 
 Detailed steps: [docs/getting-started.md](docs/getting-started.md),

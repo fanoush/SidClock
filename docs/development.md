@@ -34,12 +34,12 @@ not matter - but never commit it (it is gitignored).
 |---|---|
 | Bootloader (SWD) | `bootloader/flash.sh [image.hex]` |
 | Application (SWD) | `app/flash.sh [image.signed.bin]` |
-| Application (BLE) | `smpmgr --ble <addr> upgrade app/build/zephyr/zephyr.signed.bin` |
+| Application (BLE) | `tools/flash_ota.py --now [image.signed.bin]` |
 | Unlock + erase | `tools/flash/erase.sh` (destructive) |
 
-For day-to-day development, OTA (`smpmgr`) is fastest; SWD is the recovery
-path. After any reset the wall clock is unset - run
-`tools/sidclock_ble.py set-time`.
+For day-to-day development, OTA (`tools/flash_ota.py`, or `smpmgr` by
+hand) is fastest; SWD is the recovery path. After any reset the wall clock
+is unset - run `tools/sidclock_ble.py set-time`.
 
 ## Debugging
 
@@ -100,7 +100,9 @@ Before calling a change done, verify on hardware:
    bytes with `ctrl2=00` mean the boot configuration did not stick.
 5. Sleep: SLEEP button - panel dark, music continues, touch wakes, alarm
    wakes into the idle clock.
-6. BLE: `status`, `set-time`, `ls`, OTA upload and version check.
+6. BLE: `status`, `set-time`, `ls`; OTA with `tools/flash_ota.py --now`,
+   then `image state-read` (slot 0 = the new hash, `confirmed=True`).
+   Without `--now` the device must keep running (slot 0 unchanged).
 7. Persistence: change settings, power-cycle (reset), verify they survive.
 
 ## Releases

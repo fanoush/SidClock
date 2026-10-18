@@ -115,11 +115,14 @@ licensing notes.
 
 ```sh
 app/build.sh
-smpmgr --ble <addr> upgrade app/build/zephyr/zephyr.signed.bin
+tools/flash_ota.py --now        # upload, arm and reboot in one go
 ```
 
 The device downloads into the secondary slot on the external flash and
-MCUboot swaps it on the next reset. More details: [ota.md](ota.md).
+arms the image for a *test* swap; MCUboot applies it on the next reset.
+`--now` resets the device itself (one boot, the one that lands on the new
+image); without it the image waits for the next reset. More details:
+[ota.md](ota.md).
 
 ## Troubleshooting
 

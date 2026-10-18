@@ -7,11 +7,15 @@ SMP service:
 ```
  app receives the image over BLE
    -> writes it to slot 1 on the external flash
-     -> marks it for the next boot
+     -> the client marks it for the next boot
        -> reset
          -> MCUboot swaps slot 1 -> slot 0 and boots it
            -> the app confirms the image (or MCUboot reverts a test swap)
 ```
+
+The upload and the marking are **two separate requests**, and MCUboot can
+only swap slots on a reset - so a flash can always be split into "arm now,
+apply at the next reset" and never needs a dedicated reboot.
 
 This is **not** the Nordic legacy DFU protocol: `nrfutil dfu ble` and
 `.zip` packages do not apply here.
@@ -24,7 +28,32 @@ tools/smpmgr/install.sh        # installs smpmgr + smpclient + bleak
 
 or use any recent `smpmgr` from PyPI.
 
-## Procedure
+## Quick flash
+
+`tools/flash_ota.py` wraps the whole sequence (upload, mark, optional
+reset, verification) and resolves the device like the other tools:
+`--addr`, `$SIDCLOCK_ADDR`, or a scan for a device advertising as
+`SidClock`.
+
+```sh
+tools/flash_ota.py               # upload + arm; no reboot
+tools/flash_ota.py --now         # upload + arm + reset, then wait for the
+                                 # new image and verify that it booted
+tools/flash_ota.py -a AA:BB:CC:DD:EE:FF other.signed.bin
+```
+
+Without `--now` nothing resets the device: the image sits in slot 1,
+marked, and it comes up on the *next* reset - yours, a watchdog reset, or
+the next power cycle. That is the zero-extra-boot update path: the update
+costs no boot at all, it just applies later. `--now` costs exactly one
+boot, the one that lands on the new image.
+
+The script prints the running and target hashes, and with `--now` the slot
+and hash the device booted. It exits non-zero with a one-line message when
+the upload did not land, the device refused the mark, or the new image did
+not come back (MCUboot reverted the test swap).
+
+## Procedure (smpmgr)
 
 1. Build the image:
 
@@ -51,47 +80,51 @@ or use any recent `smpmgr` from PyPI.
    screen must show `BLE R/W` (the default after a reboot); in `BLE R/O`
    or `BLE OFF` the update service is not available.
 
-4. Upload:
+4. Upload and arm in one command:
 
    ```sh
-   smpmgr --ble <addr> upgrade app/build/zephyr/zephyr.signed.bin
+   smpmgr --ble <addr> upgrade --slot 1 app/build/zephyr/zephyr.signed.bin
    ```
 
-   The transfer runs at a boosted link rate (2M PHY, 15 ms interval,
-   251-byte data length) and takes a few seconds for a ~1 MB image.
+   `--slot 1` makes smpmgr mark the uploaded image for the next boot
+   before it resets the device (a *test* swap: MCUboot reverts an image
+   that fails to boot, and a good image confirms itself on the way up, so
+   the swap sticks). The transfer runs at a boosted link rate (2M PHY,
+   15 ms interval, 251-byte data length) and takes a few seconds for a
+   ~1 MB image.
 
-5. The device resets, MCUboot swaps the slots and the new firmware boots
-   and confirms itself. Check the running version:
+   The default `smpmgr --ble <addr> upgrade <bin>` (`--slot 0`) uploads
+   and *resets without marking*: MCUboot finds nothing pending and boots
+   the old image again, which looks exactly like a failed update. The
+   upload is not lost - the bytes are in slot 1 - it just needs the
+   marking request before a reset:
 
    ```sh
-   smpmgr --ble <addr> image state-read | grep version
+   smpmgr --ble <addr> image state-read              # note the slot-1 hash
+   smpmgr --ble <addr> image state-write <hash>      # arm it (test swap)
+   smpmgr --ble <addr> os reset                      # apply it
    ```
 
-   (The image version comes from `app/build.sh`; bump `VERSION` there when
-   releasing.)
+   Marking is persistent: it applies on the next reset, whenever that
+   happens (a power cycle counts). `smpmgr --ble <addr> image erase 1`
+   drops a staged image without touching slot 0.
 
-   **The reset after `upgrade` boots the *old* image.** The upload only
-   writes the bytes into slot 1; asking MCUboot to boot them is a separate
-   request (`image state write`) that the *client* has to send. Zephyr's
-   `image upload` handler never marks anything by itself, and smpmgr 0.17.0
-   only sends that request when `--slot` is not 0 or `--confirm` is given -
-   with the default invocation MCUboot finds nothing pending and boots
-   slot 0 again. This is not a bootloader misconfiguration: `image
-   state-read` shows the new image sitting in slot 1, bootable, simply not
-   marked (`pending=False`). Mark it for a *test* swap (MCUboot still
-   reverts if it fails to boot; the app confirms itself on the way up, so
-   the swap sticks) and reset:
+5. Check what is running:
 
    ```sh
-   smpmgr --ble <addr> image state-read     # note the slot-1 image hash
-   smpmgr --ble <addr> image state-write <hash>
-   smpmgr --ble <addr> os reset
+   smpmgr --ble <addr> image state-read
    ```
+
+   Slot 0 shows the running image with `confirmed=True` once the app has
+   come up; slot 1 holds the image it replaced. The `version` field only
+   changes when `VERSION` in `app/build.sh` is bumped, so within a release
+   the image hash is the reliable tell (the script prints the same hashes
+   in short form).
 
    `smpmgr --ble <addr> upgrade --confirm <bin>` is the one-command
-   variant: it marks the image permanently instead of for a test swap, so
-   MCUboot never reverts a bad image. Use it only when the SWD pads (or
-   the serial recovery path) are reachable.
+   variant without `--slot 1`: it marks the image **permanently** instead
+   of for a test swap, so MCUboot never reverts a bad image. Use it only
+   when the SWD pads (or the serial recovery path) are reachable.
 
 ## Troubleshooting
 
@@ -103,6 +136,22 @@ or use any recent `smpmgr` from PyPI.
 - Transfer stalls: check the battery/charger and that no central is
   connected. Retrying is safe - a partial image in slot 1 is simply
   overwritten.
+- Firmware unchanged after `upgrade`: the image was never marked (see
+  step 4). `image state-read` shows it in slot 1 with `pending=False`;
+  `image state-write <hash>` + `os reset` applies it.
+- `image state-write` fails with
+  `IMG_MGMT_ERR_IMAGE_SETTING_TEST_TO_ACTIVE_DENIED`: the hash named the
+  *active* slot, because the image being flashed is the one already
+  running (both slots hold the same hash after such an upload). Nothing to
+  apply - build a different image, or reset if a reboot is all you wanted.
+  `tools/flash_ota.py` reports this instead of failing.
+- The device came back on the old image after a reset that should have
+  applied the update: `image state-read` again. Slot 1 still `pending`
+  means MCUboot never got to swap (the reset did not happen, or it
+  rebooted before the mark was written); slot 1 no longer `pending` and
+  slot 0 old means MCUboot booted the test image, it failed, and the swap
+  was rolled back - check the boot log
+  (`tools/sidclock_ble.py log --peek`).
 - Device does not boot after a failed update: MCUboot reverts an
   unconfirmed image on the next reset. If the app no longer boots at all,
   reflash slot 0 over SWD (`app/flash.sh`).

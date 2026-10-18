@@ -57,6 +57,23 @@
   advertising and the next run reported "device not found" until the link
   was dropped by hand. The poll loops now leave through the normal
   disconnect path; a second Ctrl-C still forces the way out.
+- `tools/flash_ota.py` flashes a build over BLE and gets the image
+  *armed*: it uploads into slot 1, marks it for a test swap, and with
+  `--now` resets and waits for the device to come back, checking the
+  active image against the file's own SHA-256. Without `--now` nothing
+  reboots - the update applies on the next reset and costs no boot at
+  all. `docs/ota.md` now explains the two-step nature of the update (the
+  upload never marks anything; only `image state-write` does) and shows
+  `smpmgr upgrade --slot 1` as the one-command form of the old recipe,
+  the arm-then-apply flow, `image erase 1` to drop a staged image, and how
+  to read `image state-read` to tell what actually happened. Re-flashing
+  the image the device already runs is reported as a no-op: its hash names
+  the active slot, which Zephyr refuses to mark as a test
+  (`IMG_MGMT_ERR_IMAGE_SETTING_TEST_TO_ACTIVE_DENIED`), and there is
+  nothing to apply. Verified on hardware, both modes and both directions:
+  arm-only leaves the device running with slot 1 `pending=True` and slot 0
+  untouched; `--now` costs exactly one boot and lands on the new hash with
+  `confirmed=True`.
 
 **Internal**
 

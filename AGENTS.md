@@ -59,7 +59,8 @@ docs/        the documents above
 bootloader/fetch-sdk.sh                 # one-time pinned dependency fetch
 app/build.sh                            # -> app/build/zephyr/zephyr.signed.bin
 SIDCLOCK_DEBUG=1 app/build.sh           # bench build: bring-up test commands
-smpmgr --ble <addr> upgrade app/build/zephyr/zephyr.signed.bin
+tools/flash_ota.py                      # arm the OTA image (next reset applies it)
+tools/flash_ota.py --now                # arm + reset + verify (one boot)
 tools/sidclock_ble.py set-time          # after every reset (no RTC)
 tools/sidclock_ble.py status            # quick health check
 ```
@@ -144,6 +145,12 @@ Do not break these without discussing it in the PR/commit:
   sleep-in, including re-applying brightness.
 - `image state-read` version only changes when `VERSION` in `app/build.sh`
   is bumped.
+- OTA uploads never arm anything: Zephyr's `image upload` writes slot 1
+  and stops, and only `image state-write` (a *client* request) makes
+  MCUboot boot it. Plain `smpmgr upgrade` resets without that request, so
+  the device comes back on the old image looking like a failed update; use
+  `tools/flash_ota.py` (arm-only, or `--now`) or `smpmgr upgrade --slot 1`.
+  A staged image is persistent and drops with `smpmgr image erase 1`.
 - BLE tooling can be flaky right after a reset; retry once.
 
 ## Testing checklist (run on hardware)

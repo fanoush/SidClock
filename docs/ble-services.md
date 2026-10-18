@@ -167,4 +167,6 @@ is not a terminal), then prints whether the fresh filesystem mounted.
   MCUmgr `fs_mgmt` (`smpmgr file upload ...`). There is no directory
   listing in `fs_mgmt`; use the `13` command (`tools/sidclock_ble.py ls`)
   or download `/home/dir.txt`.
-- Firmware images are uploaded with `smpmgr upgrade` - see [ota.md](ota.md).
+- Firmware images are uploaded with `tools/flash_ota.py` (or `smpmgr
+  upgrade --slot 1`; a plain `upgrade` uploads without arming the image) -
+  see [ota.md](ota.md).
