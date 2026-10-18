@@ -84,6 +84,10 @@ function throws(fn, re) {
 const hex = (bytes) =>
   [...bytes].map((b) => b.toString(16).padStart(2, '0')).join('');
 
+/** Bytes from a hex string, for vectors captured off the wire. */
+const hexBytes = (s) => new Uint8Array(
+  s.match(/../g).map((b) => parseInt(b, 16)));
+
 function pattern(n, fn) {
   const b = new Uint8Array(n);
   for (let i = 0; i < n; i++) b[i] = fn(i) & 0xff;
@@ -178,6 +182,32 @@ await test('cbor: decode device responses', () => {
   ])), { rc: 2, err: { rc: 3, group: 8 } }, 'error response');
 });
 
+await test('cbor: indefinite lengths (what the device sends)', () => {
+  // raw bytes captured from the device: the mcumgr parameters answer to
+  // 0800000100000106a0 is bf 68"buf_size" 19 0800 69"buf_count" 04 ff -
+  // zcbor writes maps as indefinite length, which the first decoder
+  // rejected ("unsupported length encoding 31") and every upload died on
+  eq(cborDecode(hexBytes('bf686275665f73697a65190800696275665f636f756e7404ff')),
+     { buf_size: 2048, buf_count: 4 }, 'real parameters response');
+  eq(cborDecode(hexBytes('bf636f66661901cbff')), { off: 459 },
+     'real chunk-ack shape');
+  eq(cborDecode(hexBytes('9f0102ff')), [1, 2], 'indefinite array');
+  eq(Array.from(cborDecode(hexBytes('5f43616263426465ff'))), [0x61, 0x62, 0x63,
+    0x64, 0x65], 'chunked byte string');
+  eq(cborDecode(hexBytes('7f63616263626465ff')), 'abcde', 'chunked text');
+  eq(cborDecode(hexBytes(
+    'bf676d6573736167657f63616263626465ff656572726f72f5ff')),
+     { message: 'abcde', error: true }, 'indefinite values inside');
+  let err = null;
+  try {
+    // text chunk inside a byte string: not a valid encoder output
+    cborDecode(hexBytes('5f63616263ff'));
+  } catch (e) { err = e; }
+  ok(err && /mixed/.test(err.message), 'mixed chunk types rejected');
+  eq(cborDecode(hexBytes('bf636f66661901cbff') ), { off: 459 },
+     'trailing break consumed');
+});
+
 await test('cbor: one-shot hex vectors from Python', () => {
   eq(hex(cborMap([['off', cborUint(0)], ['name', cborText('x.sid')]]))
      + hex(cborMap([['name', cborText('x.sid')]])),
@@ -210,6 +240,15 @@ function respFrame(req, payload) {
   return frame;
 }
 
+/** Re-encode a definite map as the device's zcbor emits it: indefinite
+ *  length (0xbf ... 0xff). Every mock response then goes through the
+ *  decoder the same way a real one does. */
+function indefiniteMap(payload) {
+  if ((payload[0] >> 5) !== 5 || (payload[0] & 0x1f) >= 24) return payload;
+  return concatBytes([new Uint8Array([0xbf]), payload.subarray(1),
+                      new Uint8Array([0xff])]);
+}
+
 const FS_ERR_FILE_NOT_FOUND = cborMap([
   ['rc', cborUint(2)],
   ['err', cborMap([['rc', cborUint(3)], ['group', cborUint(8)]])],
@@ -224,6 +263,7 @@ class FakeSmpDevice {
     this.frames = [];
     this.requests = [];
     this.dropNext = 0;
+    this.statusMissBy = 0; // report a shorter file than uploaded
     this.notify = () => {};
   }
 
@@ -289,7 +329,8 @@ class FakeSmpDevice {
     if (op === 0 && cmd === 1) { // status
       const entry = this.files.get(name);
       if (!entry) return this.reply(frame, FS_ERR_FILE_NOT_FOUND);
-      return this.reply(frame, cborMap([['len', cborUint(entry.size)]]));
+      const size = Math.max(0, entry.size - this.statusMissBy);
+      return this.reply(frame, cborMap([['len', cborUint(size)]]));
     }
     return this.reply(frame, cborMap([]));
   }
@@ -299,7 +340,7 @@ class FakeSmpDevice {
       this.dropNext--;
       return;
     }
-    const frame = respFrame(req, payload);
+    const frame = respFrame(req, indefiniteMap(payload));
     // two notifications, like a response split over the link
     const half = Math.ceil(frame.length / 2);
     this.notify(frame.subarray(0, half));
@@ -423,6 +464,19 @@ await test('smp: lost response is retried', async () => {
   const uploads = dev.requests.filter((r) => r.group === 8 && r.cmd === 0);
   ok(uploads.length >= 2, 'request was resent');
   eq(uploads[0].msg.off, uploads[1].msg.off, 'resent from the same offset');
+});
+
+await test('smp: upload verifies the device copy', async () => {
+  const { dev, cli } = await connectedClient({ bufSize: 512 });
+  dev.statusMissBy = 100; // the device kept 100 bytes less than sent
+  const data = pattern(700, (i) => i + 1);
+  let err = null;
+  try {
+    await cli.uploadFile('/home/Short.sid', data);
+  } catch (e) { err = e; }
+  ok(err && /verify failed/.test(err.message),
+     `truncation reported: ${err && err.message}`);
+  ok(/600 of 700/.test(err && err.message), 'both sizes in the message');
 });
 
 await test('smp: device error surfaces as SmpError', async () => {

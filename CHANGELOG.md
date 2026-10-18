@@ -62,6 +62,44 @@
   on the main thread (like the UI buttons) also keeps the filesystem
   single-threaded; a command that arrives while another is still queued
   is rejected instead of corrupting state.
+- The `/home` listing no longer rebuilds `dir.txt` inside the GATT read
+  that serves it. That ran a 512-byte stack buffer, a LittleFS write and
+  a flash commit on the BT RX workqueue - on top of host frames that
+  already fill it - and a web session overflowed the 2 KB stack
+  (`ZEPHYR FATAL ERROR 2: Stack overflow on CPU 0`, "BT RX WQ") and reset
+  the device. The listing now leaves a flag and the main loop does the
+  rebuild, at most once per 2 s however often a host lists (`dir.txt` is
+  the fallback index for hosts that only have smpmgr; reads made right
+  after a listing can be one listing behind). `CONFIG_BT_RX_STACK_SIZE`
+  goes 2048 -> 2560 for margin. Measured on hardware: the `13` listing
+  takes 680 B and a `16` delete 800 B of the workqueue stack, where the
+  listing alone used 1296 B before (80 B left free of 2048), so a delete
+  now has ~1.7 KB of headroom.
+- The web remote's uploads were silently truncated at the first chunk:
+  `web/smp.js` decoded only definite-length CBOR, while the device's
+  zcbor encoder writes maps indefinite (`bf ... ff`). The mcumgr
+  parameters read failed silently (the client then used its 512-byte
+  default frame size), every chunk acknowledgement raised "CBOR:
+  unsupported length encoding 31" and the upload stopped - leaving a
+  ~459-byte tune in `/home` whose PSID header still parses, i.e. a tune
+  that plays from an empty data block: silence, with subtunes and
+  position advancing. The decoder now handles indefinite byte/text
+  strings, arrays and maps, the test device answers in zcbor's encoding
+  so every client test crosses that path, and the real captured
+  parameters reply is a test vector.
+- Uploads are now verified end to end: `web/smp.js` asks the device for
+  the file length after the last chunk and fails the upload when it does
+  not match, and `web/app.js` deletes the partial file when a tune upload
+  fails (a half-written tune used to sit in the library looking
+  complete). This is the "silent tunes" report.
+- The web remote's "load databases" never loaded them:
+  `loadDbsFromCard` called a `showProgress` helper that does not exist,
+  so the HVSC download threw on the first progress tick and `.len`/
+  `.stil` sidecars could never be generated - tunes arrived without song
+  lengths. The progress line is built in place now. The upload error path
+  also tripped over an undefined `ui.bar` and replaced the real error
+  with a TypeError; it stops the row's progress bar and reports the
+  failure plus what it did about the partial file.
 
 **Host tools**
 

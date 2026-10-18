@@ -452,6 +452,15 @@ static int home_list(uint16_t start, uint8_t *dst, int size); /* below */
 static void home_write_dir(void); /* below */
 static int16_t ls_start = -1; /* pending /home listing request (page start) */
 
+/* The /home listing asks for a dir.txt refresh; the rebuild itself (a
+ * 512-byte buffer plus a LittleFS commit) runs from the main loop, not
+ * from the GATT read that served the listing: that read runs on the BT
+ * RX workqueue, whose small stack cannot afford it (the listing alone
+ * used 1.3 KB of it and overflowed the device once). Rate-limited so a
+ * client paging through listings cannot wear the flash. */
+static volatile bool dir_dirty;
+static uint32_t dir_written_ms;
+
 /* Stack telemetry (debug command 0x1D [+ u8 page]): the interrupt stack
  * first, then per-thread stack (size, free) pairs in creation order, 4
  * rows per page. Only the requested page is latched: the 0xAA sentinel
@@ -1502,8 +1511,9 @@ static ssize_t ble_dbg_read(struct bt_conn *conn,
 
 		ble_dbg[95] = (next < 0 || next > 254) ? 0xFFU : (uint8_t)next;
 		if (ls_start == 0) {
-			/* keep the fallback dir.txt index fresh */
-			home_write_dir();
+			/* the listing wants dir.txt refreshed; the main loop
+			 * rebuilds it (see dir_dirty) */
+			dir_dirty = true;
 		}
 		ls_start = -1;
 	}
@@ -5798,6 +5808,16 @@ int main(void)
 			stacks_valid = true;
 			LOG_INF("stacks latched: page %u rows %u of %u",
 				stacks_page, stacks_latched, stacks_total);
+		}
+		/* dir.txt refresh requested by a /home listing (0x13): the
+		 * listing itself is cheap, the littlefs rebuild is not, so it
+		 * runs here instead of on the BT RX workqueue. At most one
+		 * rebuild per 2 s, however often a host lists. */
+		if (dir_dirty &&
+		    (uint32_t)(k_uptime_get_32() - dir_written_ms) >= 2000U) {
+			dir_dirty = false;
+			home_write_dir();
+			dir_written_ms = k_uptime_get_32();
 		}
 		/* the SID marquee only advances while its screen is on
 		 * show (idle face, other screens and the dark panel pause

@@ -306,8 +306,10 @@ async function setupSmp() {
   smp = null;
   if (!sc.smp) return; // R/O or OFF: the SMP service is not registered
   try {
-    smp = await new SmpClient(sc.smp).start();
-    smp.onLog = (m) => console.info(`smp: ${m}`);
+    const client = new SmpClient(sc.smp);
+    /* set before start(): it reports a failed parameters read there */
+    client.onLog = (m) => console.info(`smp: ${m}`);
+    smp = await client.start();
   } catch (e) {
     console.warn('SMP setup failed', e);
     smp = null;
@@ -410,6 +412,10 @@ function tuneRow(res) {
       this.setState(total > 0
         ? `${what} ${fmtBytes(got)} / ${fmtBytes(total)}` : what);
     },
+    stop() {
+      bar.hidden = true;
+      fill.style.width = '0%';
+    },
   };
   upload.addEventListener('click', () => uploadTune(res, ui));
   return li;
@@ -430,6 +436,7 @@ async function uploadTune(res, ui) {
   busy = `upload ${res.id}`;
   refreshControls();
   ui.setState('loading tune details…');
+  let partial = null; // device name of a tune upload that may be incomplete
   try {
     const det = await hvsc.getSidDetails(res.id);
     if (!det || !det.filename) throw new Error('HVSC returned no file name');
@@ -459,8 +466,10 @@ async function uploadTune(res, ui) {
     const stilText = (wantStil && path)
       ? await hvsc.makeStil(path, songs) : null;
 
+    partial = name; // from here on a failure can leave a half-written tune
     await smp.uploadFile(`/home/${name}`, bytes,
       throttled((got, total) => ui.progress('uploading tune', got, total)));
+    partial = null; // the tune itself is on the device (verified by size)
     if (lenText) {
       await smp.uploadFile(`/home/${stem}.len`,
         new TextEncoder().encode(lenText),
@@ -475,16 +484,28 @@ async function uploadTune(res, ui) {
     await hvsc.rememberUpload(name,
       { file: det.filename, id: res.id, path, title: det.title });
 
-    ui.bar.hidden = true;
+    ui.stop();
     ui.setState(name === det.filename ? 'uploaded ✓'
       : `uploaded as ${name} ✓`, 'ok');
     note(`${name}: uploaded${lenText ? '' : ' - no .len (not in Songlengths)'}`);
     refreshLibrary();
   } catch (e) {
     console.error('upload', e);
-    ui.bar.hidden = true;
+    ui.stop();
+    /* a failed upload leaves the first chunk on the device, and a tune
+     * with a truncated file plays as silence: remove it so the library
+     * never looks right while being wrong */
+    let cleanup = '';
+    if (partial) {
+      try {
+        await sc.deleteFile(partial);
+        cleanup = ' (the partial file was removed)';
+      } catch (e2) {
+        cleanup = ` (check ${partial}: it may be incomplete)`;
+      }
+    }
     ui.setState(`failed: ${errorText(e)}`, 'err');
-    note(errorText(e), true);
+    note(errorText(e) + cleanup, true);
   } finally {
     busy = null;
     refreshControls();
@@ -690,8 +711,13 @@ async function loadDbsFromCard(which, label) {
   busy = `load ${label}`;
   refreshControls();
   $('hprog').hidden = false;
-  const onP = throttled((source, got, total) =>
-    showProgress($('hprogbar'), $('hproglabel'), `downloading ${source}`, got, total));
+  const onP = throttled((source, got, total) => {
+    const pct = total > 0 ? Math.min(100, (got / total) * 100) : 0;
+    $('hprogbar').style.width = `${pct}%`;
+    $('hproglabel').textContent = total > 0
+      ? `downloading ${source} ${fmtBytes(got)} / ${fmtBytes(total)}`
+      : `downloading ${source}`;
+  });
   try {
     await loadDbs(which, onP);
     note(`${label} cached`);

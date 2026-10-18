@@ -106,6 +106,7 @@ function decodeItem(b, o) {
   const info = ib & 0x1f;
   let n = 0;
   let adv = 1;
+  let indef = false;
   if (info < 24) {
     n = info;
   } else if (info === 24) {
@@ -126,6 +127,15 @@ function decodeItem(b, o) {
     n = Number(new DataView(b.buffer, b.byteOffset + o + 1, 8)
       .getBigUint64(0));
     adv = 9;
+  } else if (info === 31) {
+    /* Indefinite length: strings, arrays and maps run until a 0xff
+     * break byte. The device's zcbor encoder emits maps this way (the
+     * mcumgr parameters answer is `bf 68 "buf_size" ... ff`), and a
+     * definite-only decoder dies on the very first response. */
+    if (major < 2 || major > 5) {
+      throw new Error(`CBOR: unsupported indefinite value (major ${major})`);
+    }
+    indef = true;
   } else {
     throw new Error(`CBOR: unsupported length encoding ${info}`);
   }
@@ -136,14 +146,36 @@ function decodeItem(b, o) {
     case 1:
       return [-1 - n, o + adv];
     case 2:
-      return [b.subarray(o + adv, o + adv + n), o + adv + n];
-    case 3:
-      return [new TextDecoder().decode(b.subarray(o + adv, o + adv + n)),
-              o + adv + n];
+    case 3: {
+      const isText = major === 3;
+      if (!indef) {
+        if (o + adv + n > b.length) throw new Error('CBOR: truncated value');
+        const part = b.subarray(o + adv, o + adv + n);
+        return [isText ? new TextDecoder().decode(part) : part,
+                o + adv + n];
+      }
+      const parts = [];
+      let p = o + 1;
+      for (;;) {
+        if (p >= b.length) throw new Error('CBOR: truncated value');
+        if (b[p] === 0xff) { p++; break; }
+        const [v, q] = decodeItem(b, p);
+        if (isText ? typeof v !== 'string' : !(v instanceof Uint8Array)) {
+          throw new Error('CBOR: mixed indefinite string chunks');
+        }
+        parts.push(v);
+        p = q;
+      }
+      return [isText ? parts.join('') : concat(parts), p];
+    }
     case 4: {
       const arr = [];
       let p = o + adv;
-      for (let i = 0; i < n; i++) {
+      for (let i = 0; indef || i < n; i++) {
+        if (indef) {
+          if (p >= b.length) throw new Error('CBOR: truncated value');
+          if (b[p] === 0xff) { p++; break; }
+        }
         const [v, q] = decodeItem(b, p);
         arr.push(v);
         p = q;
@@ -153,7 +185,11 @@ function decodeItem(b, o) {
     case 5: {
       const map = {};
       let p = o + adv;
-      for (let i = 0; i < n; i++) {
+      for (let i = 0; indef || i < n; i++) {
+        if (indef) {
+          if (p >= b.length) throw new Error('CBOR: truncated value');
+          if (b[p] === 0xff) { p++; break; }
+        }
         const [k, p1] = decodeItem(b, p);
         const [v, p2] = decodeItem(b, p1);
         map[String(k)] = v;
@@ -412,6 +448,14 @@ export class SmpClient {
       off = next;
       if (onProgress) onProgress(off, total);
     } while (off < total);
+    /* the device acknowledges chunks by offset, so a lost tail would
+     * otherwise look like a complete upload: ask for the length it
+     * really has before calling this done */
+    const st = await this.status(name);
+    if (!st || st.len !== total) {
+      throw new Error(`upload verify failed: ${st ? st.len : 0} of ` +
+                      `${total} bytes on the device`);
+    }
   }
 
   /** Download `name` into a Uint8Array. `onProgress(got, total)`. */
