@@ -8,10 +8,10 @@ self-signed certificate that is generated on first run. Browsers warn
 once per device - accept the warning ("Advanced" -> "Proceed") and the
 page gets a usable secure context.
 
-No certificate warning at all: serve the repository root with
-`python3 -m http.server 8000` and put a quick tunnel in front of it,
-`cloudflared tunnel --url http://localhost:8000` (open the tunnel URL
-plus /web/ on the phone).
+No certificate warning at all: serve `web/` itself with
+`python3 -m http.server 8000 --directory web` and put a quick tunnel in
+front of it, `cloudflared tunnel --url http://localhost:8000` (the tunnel
+URL then serves the page at its root - see docs/development.md).
 
     python3 tools/serve_web.py            # open https://<this-computer>:8443/
     python3 tools/serve_web.py 9443       # another port
@@ -79,7 +79,7 @@ def ensure_cert():
         subprocess.run(cmd, check=True, capture_output=True)
     except FileNotFoundError:
         sys.exit("openssl not found - install it, or use a quick tunnel:\n"
-                 "  python3 -m http.server 8000\n"
+                 "  python3 -m http.server 8000 --directory web\n"
                  "  cloudflared tunnel --url http://localhost:8000")
     except subprocess.CalledProcessError as e:
         sys.exit("openssl failed:\n" + e.stderr.decode(errors="replace"))

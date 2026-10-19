@@ -97,11 +97,15 @@ unlocking and backups: [docs/backup-unlock-flash.md](docs/backup-unlock-flash.md
 | [docs/ota.md](docs/ota.md) | over-the-air update procedure |
 | [docs/backup-unlock-flash.md](docs/backup-unlock-flash.md) | backup, SWD unlock, first flash |
 | [docs/sid-library.md](docs/sid-library.md) | tune player behavior, sidecars, HVSC pipeline |
-| [docs/development.md](docs/development.md) | conventions, debugging, release process |
+| [docs/development.md](docs/development.md) | conventions, debugging, web remote deployment, release process |
 | [docs/security.md](docs/security.md) | update authentication model and hardening |
 | [AGENTS.md](AGENTS.md) | orientation for AI coding agents |
 
 ## Web remote
+
+<a href="https://fanoush.github.io/SidClock/"><img
+src="docs/qr-web-remote.png" width="222" height="222"
+alt="QR code linking to the SidClock web remote"></a>
 
 [**fanoush.github.io/SidClock**](https://fanoush.github.io/SidClock/) is a
 single static page that talks to the device over Web Bluetooth: battery,
@@ -143,18 +147,9 @@ installing anything:
   right tune; the upload record and finally the file name are fallbacks
   (an ambiguous name match says so).
 
-For local testing on a phone, Web Bluetooth needs `https` - plain http
-counts as a secure context only on `localhost` itself:
-
-```sh
-# a quick tunnel gives a real certificate (no browser warning):
-python3 -m http.server 8000                     # from the repo root
-cloudflared tunnel --url http://localhost:8000  # open <url>/web/ on the phone
-
-# or self-signed TLS, no third party involved:
-python3 tools/serve_web.py                      # open https://<this-computer>:8443/
-python3 tools/serve_web.py -v                   # log requests with their User-Agent
-```
+Serving the page locally (also to a phone), the browser tests and the
+deployment are developer topics:
+[docs/development.md](docs/development.md#web-remote-deployment).
 
 ## Status and limitations
 
