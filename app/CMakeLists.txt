@@ -40,6 +40,7 @@ target_sources(app PRIVATE
     src/display_gc9307.c
     src/opt400x.c
     src/audio.c
+    src/md5.c
     src/sid_player.cpp
     ${SID_ENGINE_SRCS}
 )

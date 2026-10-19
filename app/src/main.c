@@ -1924,17 +1924,21 @@ static ssize_t ble_dbg_write(struct bt_conn *conn,
  *        use (1 = 6581, 2 = 8580), [6] info generation, [7] reserved
  *   [8..11] elapsed s (u32 LE), [12..15] current subsong length s
  *
- * info `4b04` (read, 88 bytes): title[32] name[24] author[32], NUL
- * padded. The strings only change when a tune loads - the generation
- * byte in the state tells a subscriber when to re-read them.
+ * info `4b04` (read, 96 bytes): title[32] name[24] author[32] id[8],
+ * NUL padded strings. id is the first 4 bytes of the loaded file's
+ * whole-file MD5 as 8 lowercase hex characters (all zeros when unknown);
+ * HVSC's Songlengths.md5 is keyed on that digest, so a host can match
+ * the tune exactly where the file name is not unique. The strings only
+ * change when a tune loads - the generation byte in the state tells a
+ * subscriber when to re-read them.
  *
  * The state value notifies on any change and once per second while a
  * tune plays (elapsed); a client ticks between notifications. Nothing is
  * sent while there is no subscriber.
  */
 static uint8_t player_state[16];
-static char player_info[88];
-static char player_info_last[88]; /* strings at the last generation bump */
+static char player_info[96];
+static char player_info_last[96]; /* strings at the last generation bump */
 static bool player_state_sub;
 static bool player_state_dirty; /* force one notify on (re)subscribe */
 static uint8_t player_info_gen;
@@ -1951,10 +1955,22 @@ static void player_copy(char *dst, size_t cap, const char *src)
 
 static void player_info_fill(void)
 {
+	static const char hex[] = "0123456789abcdef";
+	uint8_t id[4];
+	unsigned i;
+
 	memset(player_info, 0, sizeof(player_info));
 	player_copy(player_info, 32U, sid_player_title());
 	player_copy(player_info + 32, 24U, sid_cur_name);
 	player_copy(player_info + 56, 32U, sid_player_author());
+	/* [88..95] whole-file MD5 prefix as 8 lowercase hex characters -
+	 * all zeros when no tune is loaded (no HVSC file has that prefix,
+	 * so hosts treat it as "unknown" and fall back to the file name). */
+	sid_player_md5_prefix(id);
+	for (i = 0; i < ARRAY_SIZE(id); i++) {
+		player_info[88 + 2 * i] = hex[id[i] >> 4];
+		player_info[89 + 2 * i] = hex[id[i] & 0x0FU];
+	}
 }
 
 /* Bump the generation byte as soon as the strings change, so even a host

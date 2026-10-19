@@ -48,6 +48,11 @@ const char *sid_player_title(void);
 const char *sid_player_author(void);
 int sid_player_subtune(void);
 
+/* First 4 bytes of the loaded file's whole-file MD5 (all zero when the
+ * hash is unknown). HVSC's Songlengths.md5 is keyed on this digest; the
+ * BLE info characteristic reports the prefix as 8 hex characters. */
+void sid_player_md5_prefix(uint8_t out[4]);
+
 /* Produce `frames` mono 16-bit samples at 22050 Hz. */
 void sid_player_render(int16_t *dst, int frames);
 

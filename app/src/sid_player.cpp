@@ -9,6 +9,7 @@
  *   sid_player_is_playing() - playback state for the audio engine
  *   sid_player_render(dst, n) - produce n mono 16-bit samples at 22050 Hz
  *   sid_player_info(buf, n) - compact status for the BLE debug read
+ *   sid_player_md5_prefix(buf) - whole-file MD5 prefix of the loaded tune
  *
  * The C64 memory map (64 KB static) and the file buffer live here; the
  * audio engine in audio.c pulls samples whenever SID mode is active.
@@ -19,6 +20,7 @@
 #include <zephyr/logging/log.h>
 #include <string.h>
 
+#include "md5.h"
 #include "sid_player.h"
 
 extern "C" {
@@ -53,6 +55,12 @@ static int sid_stream_pos;
 static struct fs_file_t sid_pf;
 static uint16_t render_calls; /* sid_player_render() calls (512 frames each) */
 static int model_mode; /* 0 = auto (PSID flags), 1 = 6581, 2 = 8580 */
+
+/* Whole-file MD5 of the loaded tune, first 4 bytes only (HVSC's
+ * Songlengths.md5 is keyed on this digest; the host looks the prefix up
+ * to identify the tune exactly). Valid after a successful load. */
+static uint8_t sid_id[4];
+static bool sid_id_ok;
 
 /* The emulator state is owned by the audio thread while it renders; every
  * mutation (load/play/pause/chip/rate) must be serialised against that.
@@ -174,6 +182,41 @@ static int sid_load_file(const char *path)
 	libcsid_stream_fill = sid_stream_read;
 	libcsid_load(sid_hdr, sid_file_len);
 	libcsid_stream_fill = 0;
+
+	/* Hash the whole file for the BLE host. The context is stack-local
+	 * (~96 B), only the 4-byte prefix is kept; the pass is sequential
+	 * and bounded by SID_MAX_FILE. A failure just leaves the prefix at
+	 * zero, i.e. "unknown", and the host falls back to name matching. */
+	sid_id_ok = false;
+	memset(sid_id, 0, sizeof(sid_id));
+	if (fs_seek(&sid_pf, 0, FS_SEEK_SET) == 0) {
+		struct md5_ctx ctx;
+		uint8_t chunk[64];
+		uint8_t digest[16];
+		off_t left = sz;
+
+		md5_init(&ctx);
+		while (left > 0) {
+			size_t want = (left > (off_t)sizeof(chunk)) ?
+					      sizeof(chunk) : (size_t)left;
+
+			rd = fs_read(&sid_pf, chunk, want);
+			if (rd <= 0) {
+				break;
+			}
+			md5_update(&ctx, chunk, (size_t)rd);
+			left -= rd;
+		}
+		if (left == 0) {
+			md5_final(&ctx, digest);
+			memcpy(sid_id, digest, sizeof(sid_id));
+			sid_id_ok = true;
+		} else {
+			LOG_WRN("SID id hash failed: %s", path);
+		}
+	} else {
+		LOG_WRN("SID id seek failed: %s", path);
+	}
 	fs_close(&sid_pf);
 
 	snprintf(sid_path, sizeof(sid_path), "%s", path);
@@ -392,6 +435,16 @@ extern "C" const char *sid_player_author(void)
 extern "C" int sid_player_subtune(void)
 {
 	return loaded ? subtune : 0;
+}
+
+/* First 4 bytes of the loaded file's MD5 (all zero when unknown). */
+extern "C" void sid_player_md5_prefix(uint8_t out[4])
+{
+	if (sid_id_ok) {
+		memcpy(out, sid_id, 4U);
+	} else {
+		memset(out, 0, 4U);
+	}
 }
 
 extern "C" void sid_player_info(uint8_t *out, size_t len)

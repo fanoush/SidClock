@@ -11,7 +11,7 @@ All interactions use standard services plus one custom debug service.
 | Environmental Sensing `0x181A` | Illuminance `0x2AFB` | read | uint24 little-endian, **0.01 lx** units |
 | SidClock (custom) `73696463-6c6f-4b01-9c1d-77ce3f41a5c0` | `73696463-6c6f-4b02-9c1d-77ce3f41a5c0` | read, write | 132-byte debug snapshot; commands below. Writes are rejected in the R/O and OFF access modes (see below). |
 | " | `73696463-6c6f-4b03-9c1d-77ce3f41a5c0` | read, notify | **player state**, 16 bytes - notifies on change and 1 Hz while playing |
-| " | `73696463-6c6f-4b04-9c1d-77ce3f41a5c0` | read | **player strings**, 88 bytes (title/name/author) |
+| " | `73696463-6c6f-4b04-9c1d-77ce3f41a5c0` | read | **player strings**, 96 bytes (title/name/author/`id`) |
 | GATT `0x1801` | Service Changed `0x2A05` | indicate | standard |
 
 The debug characteristic is a **developer interface**: its snapshot layout
@@ -146,9 +146,15 @@ have to parse the developer snapshot and does not have to poll:
   (1 = 6581, 2 = 8580), `[6]` **info generation**, `[7]` reserved;
   `[8..11]` elapsed seconds (u32 LE), `[12..15]` the current subsong
   length from the `.len` sidecar (u32 LE, 0 = unknown).
-- **info** `73696463-6c6f-4b04-9c1d-77ce3f41a5c0`, 88 bytes: title (32),
-  file name (24), author (32), each NUL-padded. Only changes when a tune
-  loads.
+- **info** `73696463-6c6f-4b04-9c1d-77ce3f41a5c0`, 96 bytes: title (32),
+  file name (24), author (32), each NUL-padded, then `id` (8): the first
+  4 bytes of the **whole-file MD5** of the tune the device actually
+  loaded, as 8 lowercase hex characters. All zeros means unknown (no
+  tune loaded, or the hash failed) and no HVSC file has that prefix.
+  The id is what makes HVSC metadata exact: `Songlengths.md5` is keyed on
+  this digest, while file names are not unique (HVSC has 3,700+ shared
+  basenames, and uploads rename files). It only changes when a tune
+  loads, like the strings.
 
 The state value **notifies** on any change and once per second while a
 tune plays (the elapsed field, so a client can tick between them); it
