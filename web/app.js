@@ -523,7 +523,8 @@ async function uploadTune(res, ui) {
         throttled((what, got, total) =>
           ui.progress(`downloading ${what}`, got, total)));
     }
-    const lenText = await hvsc.makeLen(bytes);
+    const md5hex = hvsc.fileMd5(bytes);
+    const lenText = await hvsc.makeLen(bytes, md5hex);
     const stilText = (wantStil && path)
       ? await hvsc.makeStil(path, songs) : null;
 
@@ -543,7 +544,7 @@ async function uploadTune(res, ui) {
     }
     await smp.fileClose();
     await hvsc.rememberUpload(name,
-      { file: det.filename, id: res.id, path, title: det.title });
+      { file: det.filename, id: res.id, path, title: det.title, md5: md5hex });
 
     ui.stop();
     ui.setState(name === det.filename ? 'uploaded ✓'
@@ -711,16 +712,30 @@ function renderTracks(info) {
   updateTrackHighlight();
 }
 
+/** One-line provenance of an HVSC match (shown as the path's tooltip;
+ *  an ambiguous name match also gets a visible marker - see below). */
+function metaSource(info) {
+  if (info.source === 'md5') return 'matched by the tune file md5';
+  if (info.source === 'upload') return 'matched by the upload record';
+  if (info.source === 'name') {
+    return info.candidates > 1
+      ? `matched by file name only - ${info.candidates} HVSC files share it`
+      : 'matched by file name';
+  }
+  return '';
+}
+
 async function renderMetadata(force = false) {
   const card = $('hvscinfo');
   const name = currentInfo ? currentInfo.name : '';
+  const id = currentInfo && currentInfo.id ? currentInfo.id : '';
   const have = await hvsc.dbLoaded();
   if (!name || (!have.songlengths && !have.stil)) {
     card.hidden = true;
     metaKey = '';
     return;
   }
-  const key = [name, currentState ? currentState.songs : 0,
+  const key = [name, id, currentState ? currentState.songs : 0,
                have.songlengths, have.stil].join('|');
   if (!force && key === metaKey) {
     updateTrackHighlight();
@@ -730,14 +745,23 @@ async function renderMetadata(force = false) {
 
   let info = null;
   try {
-    info = await hvsc.tuneInfo(name);
+    info = await hvsc.tuneInfo(name, id || null);
   } catch (e) {
     console.warn('tune info', e);
   }
   card.hidden = false;
   const hint = $('metahint');
   const stilBtn = $('metastil');
-  $('metapath').textContent = info && info.path ? info.path : '';
+  const meta = $('metapath');
+  meta.textContent = info && info.path ? info.path : '';
+  meta.title = info ? metaSource(info) : '';
+  if (info && info.source === 'name' && info.candidates > 1) {
+    // several HVSC files share this name and the device gave no md5: the
+    // metadata may belong to another one, so say so instead of guessing
+    meta.textContent = info.path
+      ? `name match of ${info.candidates} · ${info.path}`
+      : `name match of ${info.candidates}`;
+  }
   if (!info) {
     $('tracks').innerHTML = '';
     $('metanote').hidden = true;

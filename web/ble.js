@@ -6,7 +6,7 @@
  *   service  73696463-6c6f-4b01-9c1d-77ce3f41a5c0
  *     dbg    73696463-6c6f-4b02-...  read+write   snapshot / commands
  *     state  73696463-6c6f-4b03-...  read+notify  16-byte player state
- *     info   73696463-6c6f-4b04-...  read         88-byte title/name/author
+ *     info   73696463-6c6f-4b04-...  read         96-byte title/name/author/id
  *
  * Commands are one opcode byte plus arguments, written to the debug
  * characteristic: 0x18 play/pause, 0x19/0x1A next/prev tune,
@@ -77,15 +77,26 @@ export function parseState(view) {
   };
 }
 
-/** Decode the 88-byte info value (title|name|author). */
+/** Decode the info value: title|name|author, plus the tune id when the
+ *  firmware sends the 96-byte form (bytes [88..95]: the first 4 bytes of
+ *  the loaded file's whole-file MD5 as 8 lowercase hex characters, the
+ *  key HVSC's Songlengths.md5 uses; null means "unknown"). */
 export function parseInfo(view) {
   const b = bytesOf(view);
   if (b.length < 88) return null;
-  return {
+  const info = {
     title: cstr(b, 0, 32),
     name: cstr(b, 32, 24),
     author: cstr(b, 56, 32),
+    id: null,
   };
+  if (b.length >= 96) {
+    let hex = '';
+    for (let i = 88; i < 96; i++) hex += String.fromCharCode(b[i]);
+    hex = hex.toLowerCase();
+    if (/^[0-9a-f]{8}$/.test(hex) && hex !== '00000000') info.id = hex;
+  }
+  return info;
 }
 
 /** Decode the 10-byte Current Time value into a sorted object. */

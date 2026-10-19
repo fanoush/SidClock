@@ -360,10 +360,13 @@ def _fs_state(raw):
 
 
 # Player-status characteristics (see docs/ble-services.md). The state char
-# (read + notify) is 16 bytes; the info char (read) is 88 bytes of
-# title[32] + file name[24] + author[32], NUL padded.
+# (read + notify) is 16 bytes; the info char (read) is 96 bytes of
+# title[32] + file name[24] + author[32] + id[8], NUL padded strings. id is
+# the first 4 bytes of the loaded file's MD5 as 8 lowercase hex characters
+# (all zeros when unknown) - HVSC's Songlengths.md5 is keyed on that digest.
 END_MODES = ("next sub", "next tune", "loop sub")
 MODEL_MODES = ("auto", "6581", "8580")
+INFO_ID_OFF = 88
 
 
 def _player_state(raw):
@@ -391,7 +394,15 @@ def _player_info(raw):
     def field(off, n):
         return bytes(raw[off:off + n]).split(b"\0")[0].decode(errors="replace")
 
-    return {"title": field(0, 32), "name": field(32, 24), "author": field(56, 32)}
+    info = {"title": field(0, 32), "name": field(32, 24), "author": field(56, 32)}
+    info["id"] = None
+    if raw is not None and len(raw) >= INFO_ID_OFF + 8:
+        text = bytes(raw[INFO_ID_OFF:INFO_ID_OFF + 8]).decode(errors="replace")
+        text = text.lower()
+        if len(text) == 8 and all(ch in "0123456789abcdef" for ch in text) \
+                and text != "00000000":
+            info["id"] = text
+    return info
 
 
 def _state_words(st):
@@ -691,6 +702,8 @@ async def cmd_state(addr):
     if info["title"] or info["name"]:
         print(f"tune:    {info['title'] or '-'}  [{info['name'] or '-'}]")
         print(f"author:  {info['author'] or '-'}")
+        if info["id"]:
+            print(f"id:      {info['id']} (whole-file MD5 prefix, HVSC match)")
 
 
 async def cmd_watch(addr):
@@ -723,7 +736,9 @@ async def cmd_watch(addr):
                     raw = await _read_char(c, PLAYER_INFO_CHAR, "watch")
                     info = _player_info(raw)
                     print(f"          tune: {info['title']} "
-                          f"[{info['name']}] by {info['author']}", flush=True)
+                          f"[{info['name']}] by {info['author']}"
+                          + (f"  id {info['id']}" if info["id"] else ""),
+                          flush=True)
                 await asyncio.sleep(0.1)
         with contextlib.suppress(Exception):
             await c.stop_notify(PLAYER_STATE_CHAR)

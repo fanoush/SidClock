@@ -232,10 +232,12 @@ export function parseLengths(v) {
   return out;
 }
 
-/** Songlengths.md5 text -> lookups by md5 / file name / full path. */
+/** Songlengths.md5 text -> lookups by md5 / md5 prefix / file name / path. */
 export function parseSonglengths(text) {
   const byMd5 = new Map();
+  const byPrefix = new Map(); // 8 hex chars -> entry or [entry, ...] (collision)
   const byName = new Map();
+  const byNameCount = new Map(); // how many HVSC files share a name
   const byPath = new Map();
   let path = '?';
   for (const raw of text.split('\n')) {
@@ -249,12 +251,21 @@ export function parseSonglengths(text) {
     if (eq <= 0) continue;
     const value = line.slice(eq + 1).trim();
     const entry = { path, value, lengths: parseLengths(value) };
-    byMd5.set(line.slice(0, eq).toLowerCase(), entry);
+    const hex = line.slice(0, eq).toLowerCase();
+    byMd5.set(hex, entry);
     byPath.set(path, entry);
     const base = path.split('/').pop();
-    if (base && !byName.has(base)) byName.set(base, entry);
+    if (base) {
+      if (!byName.has(base)) byName.set(base, entry);
+      byNameCount.set(base, (byNameCount.get(base) || 0) + 1);
+    }
+    const prefix = hex.slice(0, 8);
+    const prev = byPrefix.get(prefix);
+    if (prev === undefined) byPrefix.set(prefix, entry);
+    else if (Array.isArray(prev)) prev.push(entry);
+    else byPrefix.set(prefix, [prev, entry]);
   }
-  return { byMd5, byName, byPath };
+  return { byMd5, byPrefix, byName, byNameCount, byPath };
 }
 
 /** STIL.txt text -> Map(path -> {names, comment, subs}) (fields wrap). */
@@ -327,15 +338,18 @@ export function parseStil(text) {
   return entries;
 }
 
-/** STIL entries by path and by file name. */
+/** STIL entries by path and by file name (first match + name counts). */
 export function stilIndex(text) {
   const byPath = parseStil(text);
   const byName = new Map();
+  const byNameCount = new Map();
   for (const [path, entry] of byPath) {
     const base = path.split(/[\\/]/).pop();
-    if (base && !byName.has(base)) byName.set(base, entry);
+    if (!base) continue;
+    if (!byName.has(base)) byName.set(base, entry);
+    byNameCount.set(base, (byNameCount.get(base) || 0) + 1);
   }
-  return { byPath, byName };
+  return { byPath, byName, byNameCount };
 }
 
 /** Drop a trailing "(1:23)" / "(1:23-2:45)" time range from a STIL name. */
@@ -405,9 +419,14 @@ export async function stilEntryForPath(path) {
   return st ? st.byPath.get(path) || null : null;
 }
 
+/** Whole-file MD5 as lowercase hex - the Songlengths.md5 key. */
+export function fileMd5(bytes) {
+  return md5(bytes);
+}
+
 /** The `.len` for a tune's bytes, or null (not in the database). */
-export async function makeLen(bytes) {
-  const entry = await lengthEntryForMd5(md5(bytes));
+export async function makeLen(bytes, hex = md5(bytes)) {
+  const entry = await lengthEntryForMd5(hex);
   if (!entry || entry.lengths.length === 0) return null;
   return `${entry.lengths.join(' ')}\n`;
 }
@@ -433,29 +452,84 @@ export async function uploadInfo(deviceName) {
 }
 
 /**
- * Metadata for the tune the device is playing: lengths from
- * Songlengths, names/comment/notes from STIL, matched by device file
- * name (via the upload map when the tune was renamed on upload).
- * Returns null when neither database is loaded or nothing matches.
+ * The matching itself (pure - the caller supplies the parsed indexes,
+ * the device file name, the device's whole-file md5 prefix and the
+ * upload record from upload time):
+ *
+ *   1. the md5 prefix is the exact key (Songlengths.md5),
+ *   2. the upload record covers tunes renamed / not yet in Songlengths,
+ *   3. the case-sensitive file name is the last resort.
+ *
+ * Lengths and STIL always come from the same HVSC path. Returns null
+ * when nothing matches; `source` says which key matched ('md5',
+ * 'upload' or 'name') and `candidates` how many HVSC files share the
+ * name.
  */
-export async function tuneInfo(deviceName) {
-  const [sl, st] = [await songlengths(), await stil()];
+export function tuneLookup(sl, st, deviceName, id, remembered) {
   if (!sl && !st) return null;
-  const remembered = await uploadInfo(deviceName);
   let len = null;
-  let entry = null;
-  if (remembered && remembered.path) {
-    len = sl ? sl.byPath.get(remembered.path) || null : null;
-    entry = st ? st.byPath.get(remembered.path) || null : null;
+  let path = null;
+  let source = null;
+  let candidates = 0;
+
+  if (id && sl && sl.byPrefix.has(id)) {
+    const hits = sl.byPrefix.get(id);
+    const list = Array.isArray(hits) ? hits : [hits];
+    // 8 hex chars make a collision ~impossible (0 among the 61k HVSC
+    // tunes), but keep a deterministic pick if it ever happens
+    const hit = list.length === 1 ? list[0]
+      : list.find((e) => e.path.split('/').pop() === deviceName) || null;
+    if (hit) {
+      len = hit;
+      path = hit.path;
+      source = 'md5';
+    }
   }
-  if (!len && sl) len = sl.byName.get(deviceName) || null;
-  if (!entry && st) entry = st.byName.get(deviceName) || null;
+  if (!path) {
+    // The remembered path is a guess from upload time; drop it when the
+    // device's own md5 says that name now holds a different tune.
+    const stale = !!(remembered && remembered.md5 && id &&
+      !remembered.md5.startsWith(id));
+    if (remembered && remembered.path && !stale) {
+      path = remembered.path;
+      len = sl ? sl.byPath.get(path) || null : null;
+      source = 'upload';
+    }
+  }
+  if (!path && sl) {
+    candidates = sl.byNameCount.get(deviceName) || 0;
+    len = sl.byName.get(deviceName) || null;
+    path = len ? len.path : null;
+    if (len) source = 'name';
+  }
+  // Keep lengths and STIL from the same file: the path picks the entry
+  const entry = (path && st) ? st.byPath.get(path) || null
+    : (st ? st.byName.get(deviceName) || null : null);
   if (!len && !entry) return null;
+  if (!source && entry) {
+    source = 'name';
+    candidates = candidates || (st.byNameCount.get(deviceName) || 0);
+  }
   return {
-    path: (len && len.path) || (remembered && remembered.path) || null,
+    path: path || null,
     lengths: len ? len.lengths : null,
     names: entry ? entry.names : {},
     comment: entry ? entry.comment : '',
     subs: entry ? entry.subs : {},
+    source,
+    candidates,
   };
+}
+
+/**
+ * Metadata for the tune the device is playing: lengths from
+ * Songlengths, names/comment/notes from STIL, matched as described in
+ * tuneLookup(). Returns null when neither database is loaded or
+ * nothing matches.
+ */
+export async function tuneInfo(deviceName, id) {
+  const [sl, st] = [await songlengths(), await stil()];
+  if (!sl && !st) return null;
+  const remembered = await uploadInfo(deviceName);
+  return tuneLookup(sl, st, deviceName, id, remembered);
 }

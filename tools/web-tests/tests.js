@@ -9,14 +9,15 @@
  */
 
 import { md5 } from '../../web/md5.js';
+import { parseInfo } from '../../web/ble.js';
 import {
   cborUint, cborBytes, cborText, cborMap, cborDecode, SmpClient, SmpError,
 } from '../../web/smp.js';
 import {
   parseLengths, parseSonglengths, stilIndex, buildStil, stripTimeRange,
   deviceNameFor, searchSids, getSidDetails, downloadSid, loadSonglengths,
-  loadStil, makeLen, makeStil, tuneInfo, rememberUpload, SEARCH_FIELDS,
-  filterSids,
+  loadStil, makeLen, makeStil, tuneInfo, tuneLookup, rememberUpload,
+  SEARCH_FIELDS, filterSids, fileMd5,
 } from '../../web/hvsc.js';
 
 /* ---------- tiny harness ---------- */
@@ -511,9 +512,19 @@ const SL_FIXTURE = `[Database]
 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=4:27 5:38
 ; /MUSICIANS/T/Test/Times.sid
 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb=0:31
+; /MUSICIANS/U/Other/Times.sid
+cccccccccccccccccccccccccccccccc=1:00
+; /MUSICIANS/U/Other/Alpha.sid
+dddddddd000000000000000000000000=0:12
+; /MUSICIANS/V/Various/Alpha.sid
+ddddddddffffffffffffffffffffffff=0:13
 `;
 
 const STIL_FIXTURE = `; STIL test fixture
+/MUSICIANS/U/Other/Times.sid
+TITLE: Other Times
+COMMENT: other comment
+
 /MUSICIANS/T/Test/Test_Tune.sid
 TITLE: Test Tune
 AUTHOR: Test Author
@@ -551,6 +562,45 @@ await test('hvsc: songlengths lookups', () => {
   eq(sl.byPath.get('/MUSICIANS/T/Test/Times.sid').value, '0:31', 'by path');
   eq(sl.byMd5.get('ffffffffffffffffffffffffffffffff'), undefined,
      'missing key');
+  eq(sl.byPrefix.get('aaaaaaaa').lengths, [267, 338], 'by md5 prefix');
+  const col = sl.byPrefix.get('dddddddd');
+  ok(Array.isArray(col) && col.length === 2, 'prefix collision -> list');
+  eq(col[0].path, '/MUSICIANS/U/Other/Alpha.sid', 'first collision entry');
+  eq(sl.byPrefix.get('12345678'), undefined, 'unknown prefix');
+  eq(sl.byNameCount.get('Alpha.sid'), 2, 'name candidate count');
+  eq(sl.byNameCount.get('Test_Tune.sid'), 1, 'unique name count');
+});
+
+await test('ble: parseInfo (88-byte and 96-byte info reads)', () => {
+  const infoBytes = ({ title = '', name = '', author = '', id = null }) => {
+    const b = new Uint8Array(id === null ? 88 : 96);
+    const put = (s, off, n) =>
+      b.set(new TextEncoder().encode(s).subarray(0, n - 1), off);
+    put(title, 0, 32);
+    put(name, 32, 24);
+    put(author, 56, 32);
+    if (id !== null) b.set(new TextEncoder().encode(id), 88);
+    return b;
+  };
+
+  const full = parseInfo(infoBytes({
+    title: 'To be on Top', name: 'To_be_on_Top.sid',
+    author: 'Chris Hulsbeck', id: 'b9fcd75b',
+  }));
+  eq(full.title, 'To be on Top', 'title');
+  eq(full.name, 'To_be_on_Top.sid', 'name');
+  eq(full.author, 'Chris Hulsbeck', 'author');
+  eq(full.id, 'b9fcd75b', 'whole-file md5 prefix');
+
+  eq(parseInfo(infoBytes({ name: 'X.sid' })).id, null,
+     '88-byte value from an older firmware: no id');
+  eq(parseInfo(infoBytes({ name: 'X.sid', id: '00000000' })).id, null,
+     'all-zero id means unknown');
+  eq(parseInfo(infoBytes({ name: 'X.sid', id: 'ABCDEF01' })).id, 'abcdef01',
+     'normalized to lower case');
+  eq(parseInfo(infoBytes({ name: 'X.sid', id: '\0\0\0\0\0\0\0\0' })).id, null,
+     'NUL-filled id');
+  eq(parseInfo(new Uint8Array(40)), null, 'short value rejected');
 });
 
 await test('hvsc: STIL entry parsing', () => {
@@ -562,9 +612,61 @@ await test('hvsc: STIL entry parsing', () => {
   eq(e.comment, 'A tune-wide comment that wraps', 'tune comment');
   eq(e.subs[2], 'Second level note here', 'subsong note');
   eq(e.subs[3], 'Third note', 'second note');
-  const t = idx.byName.get('Times.sid');
+  const t = idx.byPath.get('/MUSICIANS/T/Test/Times.sid');
   eq(t.comment, 'quoted comment', 'quotes stripped');
   eq(Object.keys(t.names).length, 0, 'no sub-0 names');
+  eq(idx.byName.get('Times.sid'),
+     idx.byPath.get('/MUSICIANS/U/Other/Times.sid'),
+     'by name keeps the first entry in file order');
+  eq(idx.byNameCount.get('Times.sid'), 2, 'name candidate count');
+  eq(idx.byNameCount.get('Test_Tune.sid'), 1, 'unique name count');
+});
+
+await test('hvsc: tune matching (md5 / upload / name)', () => {
+  const sl = parseSonglengths(SL_FIXTURE);
+  const st = stilIndex(STIL_FIXTURE);
+
+  // the md5 prefix the device reports is the exact key: here the file
+  // name matches nothing at all, the id still resolves
+  const byMd5 = tuneLookup(sl, st, 'Totally_Wrong.sid', 'bbbbbbbb', null);
+  eq(byMd5.source, 'md5', 'source');
+  eq(byMd5.path, '/MUSICIANS/T/Test/Times.sid', 'path from the md5');
+  eq(byMd5.lengths, [31], 'lengths');
+  eq(byMd5.comment, 'quoted comment', 'STIL of the same path');
+  eq(byMd5.candidates, 0, 'exact match needs no name candidates');
+
+  // upload record (renamed tune) when the device sends no id
+  const up = tuneLookup(sl, st, 'Renamed.sid', null,
+    { path: '/MUSICIANS/T/Test/Times.sid' });
+  eq(up.source, 'upload', 'source');
+  eq(up.path, '/MUSICIANS/T/Test/Times.sid', 'path from the record');
+  eq(up.lengths, [31], 'lengths');
+
+  // ...but a record whose md5 disagrees with the device is just a guess
+  const stale = { path: '/MUSICIANS/T/Test/Times.sid',
+                  md5: 'aaaaaaaa000000000000000000000000' };
+  eq(tuneLookup(sl, st, 'Nowhere.sid', '00000000', stale), null,
+     'stale record dropped, nothing else matches');
+  const still = tuneLookup(sl, st, 'Times.sid', '00000000', stale);
+  eq(still.source, 'name', 'stale record ignored, name match used');
+  eq(still.path, '/MUSICIANS/T/Test/Times.sid', 'name match path');
+
+  // name fallback: the ambiguity is counted, and lengths + STIL come
+  // from the same HVSC path (not from two first-wins lookups)
+  const amb = tuneLookup(sl, st, 'Times.sid', null, null);
+  eq(amb.source, 'name', 'source');
+  eq(amb.candidates, 2, 'two HVSC files share the name');
+  eq(amb.path, '/MUSICIANS/T/Test/Times.sid', 'first entry in file order');
+  eq(amb.comment, 'quoted comment', 'STIL for that same path');
+
+  // 8-hex collision (never happens in practice): the name picks one
+  const col = tuneLookup(sl, st, 'Alpha.sid', 'dddddddd', null);
+  eq(col.source, 'md5', 'source');
+  eq(col.path, '/MUSICIANS/U/Other/Alpha.sid', 'first collision entry');
+  eq(col.lengths, [12], 'its lengths');
+
+  eq(tuneLookup(null, null, 'Times.sid', null, null), null, 'no databases');
+  eq(tuneLookup(sl, st, 'Unknown.sid', null, null), null, 'no match');
 });
 
 await test('hvsc: buildStil matches sid_add.py output', () => {
@@ -679,6 +781,7 @@ if (LIVE) {
       id: hit.id, path: LN2_PATH });
     const info = await tuneInfo('Last_Ninja_2.sid');
     eq(info.path, LN2_PATH, 'matched path via the upload map');
+    eq(info.source, 'upload', 'match source');
     eq(info.lengths.length, 13, 'lengths from Songlengths');
     eq(info.names[2], 'Central Park (in-game)', 'names from STIL');
     ok(info.comment.length > 100, 'tune comment');
@@ -689,6 +792,24 @@ if (LIVE) {
     const renamed = await tuneInfo('LN2.sid');
     eq(renamed.path, LN2_PATH, 'renamed uploads still match');
     eq(renamed.names[13], 'The Final Battle (loader)', 'name 13');
+
+    // the whole-file md5 the device reports is the exact key: this name
+    // matches nothing in HVSC, the id (from the md5 every host computes
+    // the same way) resolves it anyway
+    const byId = await tuneInfo('No_Such_Tune_At_All.sid', '69ecd5a4');
+    eq(byId.source, 'md5', 'id wins over the file name');
+    eq(byId.path, LN2_PATH, 'path from the id');
+    eq(byId.lengths.length, 13, 'lengths from the id');
+    eq(byId.names[2], 'Central Park (in-game)', 'STIL from the id');
+    eq(byId.candidates, 0, 'no name guessing involved');
+
+    // a stale upload record loses to the device's own md5
+    await rememberUpload('Stale.sid', { file: 'Last_Ninja_2.sid',
+      id: hit.id, path: LN2_PATH, md5: md5(bytes) });
+    const fresh = await tuneInfo('Stale.sid', '69ecd5a4');
+    eq(fresh.path, LN2_PATH, 'matching md5 keeps the record usable');
+    const stale = await tuneInfo('Stale.sid', '00000000');
+    eq(stale, null, 'disagreeing md5 drops the record and finds nothing');
   });
 }
 
