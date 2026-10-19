@@ -121,14 +121,19 @@ installing anything:
 - **Search and upload**: search hvsc.c64.org and write a tune straight to
   the device's `/home` over mcumgr SMP - that needs R/W mode (the device
   unregisters the SMP service otherwise) and the browser's Web Bluetooth
-  SMP characteristic.
+  SMP characteristic. The boxes beside the search box pick which fields
+  count (name, author, released - the API searches all three, series
+  names included) and long result lists page in behind a *show more*
+  button.
 - **Sidecars**: the first upload (or the *load databases* button) caches
   HVSC's `Songlengths.md5` and `STIL.txt` in IndexedDB - about 9 MB
   together, they only change with HVSC releases - and the page builds the
   device's `.len` and `.stil` files with the same rules, caps and
   truncation as `tools/sid_add.py`.
 - **Device library**: list `/home`, mark tunes that have sidecars, play or
-  delete them (a `.sid` drops its `.len`/`.stil` too).
+  delete them (a `.sid` drops its `.len`/`.stil` too). The card sits above
+  the search and starts collapsed - tap its header to open it - so a long
+  result list cannot bury it.
 - **Tune info**: while a tune plays, the page shows its HVSC song lengths,
   the subtune names (tap one to jump to that subtune), the STIL note for
   the current subtune and the tune comment. Tunes uploaded from the page

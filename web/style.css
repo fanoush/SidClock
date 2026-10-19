@@ -119,6 +119,31 @@ main { max-width: 520px; margin: 0 auto; padding-bottom: 8px; }
   color: var(--dim);
 }
 
+/* the device list is a <details> card, closed by default: its header is
+ * the summary and the list only renders once it is opened, so a long
+ * search result cannot bury it */
+
+details.card > summary {
+  list-style: none;
+  cursor: pointer;
+  padding: 3px 0;
+  user-select: none;
+}
+details.card > summary::-webkit-details-marker { display: none; }
+details.card > summary:hover .label { color: var(--fg); }
+
+.chev {
+  display: inline-block;
+  width: 0;
+  height: 0;
+  margin-left: 7px;
+  border-left: 5px solid currentColor;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  transition: transform .15s ease;
+}
+details[open] .chev { transform: rotate(90deg); }
+
 /* ---------- now playing ---------- */
 
 .title { font-size: 20px; font-weight: 600; margin-top: 4px; overflow-wrap: anywhere; }

@@ -810,7 +810,13 @@ $('dbload').addEventListener('click', () =>
   loadDbsFromCard({ songlengths: true, stil: true }, 'HVSC databases'));
 $('metastil').addEventListener('click', () =>
   loadDbsFromCard({ stil: true }, 'STIL.txt'));
-$('librefresh').addEventListener('click', () => refreshLibrary());
+$('librefresh').addEventListener('click', (e) => {
+  /* the button sits in the card's <summary>: without this a refresh
+   * click would also toggle the card */
+  e.preventDefault();
+  e.stopPropagation();
+  refreshLibrary();
+});
 
 /* ---------- theme ---------- */
 

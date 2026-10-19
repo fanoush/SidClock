@@ -104,6 +104,15 @@ try {
     <p id="metacomment" class="comment" hidden></p>
   </section>
 
+  <details id="libcard" class="card">
+    <summary class="cardhead">
+      <span class="label">on the device<span class="chev" aria-hidden="true"></span></span>
+      <span id="libinfo" class="dim"></span>
+      <button id="librefresh" class="btn small">refresh</button>
+    </summary>
+    <ul id="lib" class="results"></ul>
+  </details>
+
   <section class="card">
     <div class="cardhead">
       <span class="label">hvsc online</span>
@@ -132,15 +141,6 @@ try {
     <div id="hmsg" class="dim msg" hidden></div>
     <ul id="results" class="results" hidden></ul>
     <button id="more" class="btn morebtn" hidden>show more</button>
-  </section>
-
-  <section class="card">
-    <div class="cardhead">
-      <span class="label">on the device</span>
-      <span id="libinfo" class="dim"></span>
-      <button id="librefresh" class="btn small">refresh</button>
-    </div>
-    <ul id="lib" class="results"></ul>
   </section>
 
   <p class="hint">

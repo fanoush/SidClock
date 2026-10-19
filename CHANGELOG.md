@@ -56,7 +56,10 @@
   so the page renders 100 rows and a "show N more" button continues the
   list; the status line counts what is shown ("5061 results in
   name+author (8460 server matches) · showing 100") and says which box
-  is off when the ticked fields come up empty.
+  is off when the ticked fields come up empty. The device list moved
+  above the search card and is a collapsed `<details>` now - its header
+  keeps the tune count and the refresh button - so a long result list
+  cannot bury it, and neither can a long device list bury the search.
 - `tools/web-tests/`: browser test page for the web remote's libraries -
   MD5 vectors (including padding block boundaries), CBOR encoding checked
   byte-for-byte against `cbor2` canonical output, SMP upload/download/
@@ -65,9 +68,9 @@
   checks the real HVSC API and databases, `tools/web-tests/record.py`
   runs the page headless and reports pass/fail. A second driver
   (`tools/web-tests/page.html`) loads the real `web/index.html` in an
-  iframe and drives it - search boxes, paging button, status line - so
-  the `app.js` DOM code is exercised too, something the module tests
-  never execute.
+  iframe and drives it - search boxes, paging button, status line, the
+  collapsible device card - so the `app.js` DOM code is exercised too,
+  something the module tests never execute.
 
 **Fixes**
 

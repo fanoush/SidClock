@@ -146,6 +146,40 @@ await test('page: boots the search card', async () => {
   ok($('more').hidden, '"show more" is hidden before any search');
 });
 
+await test('page: the device list is above the search and starts closed', async () => {
+  const card = $('libcard');
+  ok(card && card.tagName === 'DETAILS', 'it is a <details> card');
+  const head = card.querySelector('summary');
+  ok(head, 'its header is the summary');
+  ok(!card.open, 'collapsed by default');
+  const pos = card.compareDocumentPosition($('q'));
+  ok(pos & win.Node.DOCUMENT_POSITION_FOLLOWING, 'it comes before the search box');
+  /* a probe row (the headless page has no device, so the list is empty)
+   * makes the card's growth measurable: a closed <details> must not take
+   * up the room its content would need */
+  const ul = $('lib');
+  const wasHidden = ul.hidden;
+  ul.hidden = false;
+  const probe = doc.createElement('li');
+  probe.textContent = 'probe';
+  ul.append(probe);
+  const closed = card.getBoundingClientRect().height;
+  head.click();
+  await until(() => card.open, 'the card to open');
+  const opened = card.getBoundingClientRect().height;
+  ok(opened > closed + 10,
+     `opening grows the card (${Math.round(closed)} -> ${Math.round(opened)} px)`);
+  head.click();
+  await until(() => !card.open, 'the card to close');
+  ok(Math.abs(card.getBoundingClientRect().height - closed) < 2,
+     'closing shrinks it back');
+  probe.remove();
+  ul.hidden = wasHidden;
+  $('librefresh').click();
+  await sleep(400);
+  ok(!card.open, 'the refresh button does not toggle the card');
+});
+
 const NAME_TERM = /commando/i;
 let raw = [];
 
