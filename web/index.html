@@ -115,9 +115,15 @@ try {
         include STIL names/notes</label>
     </div>
     <div class="searchrow">
-      <input id="q" type="search" placeholder="title, author, year…"
+      <input id="q" type="search" placeholder="search tunes by name or author…"
              autocomplete="off" enterkeyhint="search">
       <button id="search" class="btn">Search</button>
+    </div>
+    <div class="fieldrow">
+      <span class="dim">search in</span>
+      <label class="chk"><input id="f-title" type="checkbox" checked>name</label>
+      <label class="chk"><input id="f-author" type="checkbox" checked>author</label>
+      <label class="chk"><input id="f-released" type="checkbox">released</label>
     </div>
     <div id="hprog" class="progressline" hidden>
       <div class="progress"><div id="hprogbar"></div></div>
@@ -125,6 +131,7 @@ try {
     </div>
     <div id="hmsg" class="dim msg" hidden></div>
     <ul id="results" class="results" hidden></ul>
+    <button id="more" class="btn morebtn" hidden>show more</button>
   </section>
 
   <section class="card">

@@ -30,7 +30,6 @@ let smp = null;              // SMP client while connected in R/W mode
 let library = null;          // names in /home, or null when unknown
 let busy = null;             // what long operation is running, if any
 let metaKey = '';            // what the HVSC info card currently shows
-let searchResults = [];      // last HVSC search
 
 /* ---------- helpers ---------- */
 
@@ -341,29 +340,91 @@ async function loadDbs(which, onProgress) {
 
 /* --- search --- */
 
+/** Results drawn per "show more" click (large searches return thousands:
+ *  the API has no paging parameters, so the page holds them all and
+ *  renders in pages). */
+const SEARCH_PAGE = 100;
+
+let searchRaw = [];     // the API's match list, unfiltered
+let searchResults = []; // after the field boxes
+let searchShown = 0;    // rows currently in the list
+
+const FIELD_NAMES = { title: 'name', author: 'author', released: 'released' };
+
+function searchFields() {
+  return hvsc.SEARCH_FIELDS.filter((f) => $(`f-${f}`).checked);
+}
+
+function searchFieldNames() {
+  const sel = searchFields();
+  return sel.length ? ` in ${sel.map((f) => FIELD_NAMES[f]).join('+')}` : '';
+}
+
+/** Names the boxes that are unticked, for the "nothing here" status. */
+function searchFieldsOff() {
+  const off = hvsc.SEARCH_FIELDS.filter((f) => !$(`f-${f}`).checked);
+  return off.length ? ` - ${off.map((f) => FIELD_NAMES[f]).join('/')} is off` : '';
+}
+
+function applyFieldFilter() {
+  searchResults = hvsc.filterSids(searchRaw, $('q').value.trim(),
+                                  searchFields());
+  renderResults();
+}
+
 async function doSearch() {
   const q = $('q').value.trim();
   if (!q || busy) return;
   $('hmsg').hidden = false;
   $('hmsg').textContent = 'searching…';
+  $('more').hidden = true;
   try {
-    searchResults = await hvsc.searchSids(q);
-    renderResults();
-    $('hmsg').textContent = searchResults.length
-      ? `${searchResults.length} result${searchResults.length === 1 ? '' : 's'}`
-      : `no results for "${q}"`;
+    searchRaw = await hvsc.searchSids(q);
+    applyFieldFilter();
   } catch (e) {
     console.error(e);
+    searchRaw = [];
+    searchResults = [];
+    renderResults();
     $('hmsg').textContent = `search failed: ${errorText(e)}`;
   }
 }
 
 function renderResults() {
+  $('results').innerHTML = '';
+  searchShown = 0;
+  appendResults();
+}
+
+function appendResults() {
   const ul = $('results');
-  ul.innerHTML = '';
-  for (const res of searchResults) ul.append(tuneRow(res));
+  const end = Math.min(searchResults.length, searchShown + SEARCH_PAGE);
+  for (let i = searchShown; i < end; i++) ul.append(tuneRow(searchResults[i]));
+  searchShown = end;
   ul.hidden = searchResults.length === 0;
+  updateSearchStatus();
   refreshControls();
+}
+
+function updateSearchStatus() {
+  const n = searchResults.length;
+  const hidden = searchRaw.length - n;
+  const from = hidden > 0 ? ` (${searchRaw.length} server matches)` : '';
+  let text;
+  if (!n) {
+    text = searchRaw.length
+      ? `no match${searchFieldNames()} (${searchRaw.length} server matches` +
+        `${searchFieldsOff()})`
+      : `no results for "${$('q').value.trim()}"`;
+  } else {
+    text = `${n} result${n === 1 ? '' : 's'}${searchFieldNames()}${from}`;
+    if (searchShown < n) text += ` · showing ${searchShown}`;
+  }
+  $('hmsg').textContent = text;
+  const left = n - searchShown;
+  const more = $('more');
+  more.hidden = left <= 0;
+  more.textContent = `show ${Math.min(left, SEARCH_PAGE)} more (${left} left)`;
 }
 
 function tuneRow(res) {
@@ -738,6 +799,13 @@ $('search').addEventListener('click', doSearch);
 $('q').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') doSearch();
 });
+$('more').addEventListener('click', appendResults);
+/* the field boxes re-filter the list already fetched - no new search */
+for (const f of hvsc.SEARCH_FIELDS) {
+  $(`f-${f}`).addEventListener('change', () => {
+    if (searchRaw.length) applyFieldFilter();
+  });
+}
 $('dbload').addEventListener('click', () =>
   loadDbsFromCard({ songlengths: true, stil: true }, 'HVSC databases'));
 $('metastil').addEventListener('click', () =>

@@ -295,6 +295,22 @@ footer a { color: var(--accent2); text-decoration: none; }
 }
 .chk input { width: 18px; height: 18px; accent-color: var(--accent); }
 
+.fieldrow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 14px;
+  margin-top: 8px;
+  font-size: 13px;
+}
+.fieldrow .chk { margin-left: 0; }
+
+.morebtn {
+  display: block;
+  width: 100%;
+  margin-top: 10px;
+}
+
 .progressline {
   display: flex;
   align-items: center;

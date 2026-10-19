@@ -15,7 +15,8 @@ import {
 import {
   parseLengths, parseSonglengths, stilIndex, buildStil, stripTimeRange,
   deviceNameFor, searchSids, getSidDetails, downloadSid, loadSonglengths,
-  loadStil, makeLen, makeStil, tuneInfo, rememberUpload,
+  loadStil, makeLen, makeStil, tuneInfo, rememberUpload, SEARCH_FIELDS,
+  filterSids,
 } from '../../web/hvsc.js';
 
 /* ---------- tiny harness ---------- */
@@ -591,6 +592,35 @@ await test('hvsc: device file names', () => {
      'never longer than 20');
 });
 
+await test('hvsc: search field filter', () => {
+  eq(SEARCH_FIELDS.join(','), 'title,author,released', 'the API match fields');
+  // the shape the API returns, and the complaint that started this:
+  // a title search for "commando" also brings back rows whose *released*
+  // line says "1987 Commando Frontier"
+  const r = [
+    { id: 1, title: 'Bubble Bobble', author: 'Kent Patfield (Patto)',
+      released: '2020 Onslaught' },
+    { id: 2, title: 'Alpha', author: 'Geert Vandevenne (Cavi)',
+      released: '1987 Commando Frontier' },
+    { id: 3, title: 'Commando', author: 'Rob Hubbard',
+      released: '1985 Elite' },
+  ];
+  const ids = (rows) => rows.map((x) => x.id).join(',');
+  eq(ids(filterSids(r, 'commando', ['title', 'author'])), '3',
+     'released-only match dropped');
+  eq(ids(filterSids(r, 'commando', ['title', 'author', 'released'])), '2,3',
+     'ticking released keeps it');
+  eq(ids(filterSids(r, 'commando', ['released'])), '2',
+     'released-only search still possible');
+  eq(ids(filterSids(r, 'commando', [])), '1,2,3', 'no box: no filter');
+  eq(ids(filterSids(r, 'bobble bubble', ['title'])), '1', 'word order free');
+  eq(ids(filterSids(r, 'BUBBLE', ['title'])), '1', 'case insensitive');
+  eq(ids(filterSids(r, 'patfield', ['author'])), '1', 'author match');
+  eq(ids(filterSids(r, 'patfield', ['title'])), '', 'field respected');
+  eq(ids(filterSids(r, '   ', ['title'])), '1,2,3', 'blank query: no filter');
+  eq(ids(filterSids(r, 'xia', ['title'])), '', 'substring only');
+});
+
 /* ---------- live checks (network) ---------- */
 
 const LIVE = new URLSearchParams(location.search).has('live');
@@ -608,6 +638,24 @@ if (LIVE) {
     eq(det.filename, 'Last_Ninja_2.sid', 'file name');
     eq(det.numberOfSongs, 13, 'song count');
     eq(det.filePath, '/MUSICIANS/G/Gray_Matt/', 'path');
+  });
+
+  await test('live: search field filter against the API', async () => {
+    // the API searches title, author *and* released: "commando" comes back
+    // with tunes from "1987 Commando Frontier" that are not Commandos
+    const raw = await searchSids('commando');
+    ok(raw.length > 0, `server matches (${raw.length})`);
+    const releasedOnly = raw.find((r) =>
+      !/commando/i.test(r.title || '') && !/commando/i.test(r.author || ''));
+    ok(releasedOnly, 'the API really matches the released line too');
+    const kept = filterSids(raw, 'commando', ['title', 'author']);
+    ok(kept.length > 0 && kept.length < raw.length,
+       `name+author filter keeps ${kept.length} of ${raw.length}`);
+    ok(kept.every((r) => /commando/i.test(r.title || '') ||
+                        /commando/i.test(r.author || '')),
+       'every kept row matches a checked field');
+    ok(!kept.some((r) => r.id === releasedOnly.id),
+       'the released-only row is gone');
   });
 
   await test('live: download + Songlengths sidecar + STIL info', async () => {

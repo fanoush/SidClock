@@ -45,13 +45,29 @@
   plays/deletes them (delete drops the sidecars, `16`), and while a tune
   plays it shows the HVSC info: song lengths, subtune names (tap to jump),
   the current subtune's STIL note and the tune comment.
+- **Web remote: search field boxes and result paging**. The HVSC API
+  matches every query word against a tune's title, its author *and* its
+  released line - HVSC's series/publisher names - so "commando" also
+  returned tunes from "1987 Commando Frontier" that are not Commando.
+  The search row now has `name` / `author` / `released` boxes, the first
+  two ticked by default, and the fetched list is filtered to the ticked
+  fields (unticking a box re-filters what is already there, no new
+  request). The API takes no paging parameters and returns every match,
+  so the page renders 100 rows and a "show N more" button continues the
+  list; the status line counts what is shown ("5061 results in
+  name+author (8460 server matches) · showing 100") and says which box
+  is off when the ticked fields come up empty.
 - `tools/web-tests/`: browser test page for the web remote's libraries -
   MD5 vectors (including padding block boundaries), CBOR encoding checked
   byte-for-byte against `cbor2` canonical output, SMP upload/download/
   retry/error paths against a fake device, and the `.len`/`.stil` parsers
   against fixtures generated with `sid_add.py`; `?live` additionally
   checks the real HVSC API and databases, `tools/web-tests/record.py`
-  runs the page headless and reports pass/fail.
+  runs the page headless and reports pass/fail. A second driver
+  (`tools/web-tests/page.html`) loads the real `web/index.html` in an
+  iframe and drives it - search boxes, paging button, status line - so
+  the `app.js` DOM code is exercised too, something the module tests
+  never execute.
 
 **Fixes**
 

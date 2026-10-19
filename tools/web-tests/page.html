@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>SidClock web remote page smoke</title>
+<style>
+  body {
+    font: 13px/1.45 ui-monospace, Menlo, Consolas, monospace;
+    margin: 20px;
+    background: #101820;
+    color: #d0d8e0;
+  }
+  pre { white-space: pre-wrap; }
+  iframe {
+    float: right;
+    width: 460px;
+    height: 860px;
+    margin: 0 0 16px 16px;
+    border: 1px solid #2a3a4a;
+    background: #fff;
+  }
+</style>
+</head>
+<body>
+<!--
+  Page-level smoke test: loads the real web remote (web/index.html) in an
+  iframe and drives it, so the code the module tests in tests.js never
+  execute - app.js's DOM wiring, the result list, the search field boxes
+  and the "show more" paging - runs for real against hvsc.c64.org.
+
+  In a browser, over http (same server as index.html):
+
+    python3 -m http.server 8899        # from the repository root
+    # then open http://127.0.0.1:8899/tools/web-tests/page.html
+
+  Automatically, with a headless Chrome (needs the network):
+
+    python3 tools/web-tests/record.py --out /tmp/page-smoke.txt &
+    google-chrome --headless=new --disable-gpu \\
+        "http://127.0.0.1:8901/tools/web-tests/page.html?record"
+-->
+<pre id="out">running…</pre>
+<div id="frame"></div>
+<script type="module" src="page.js"></script>
+</body>
+</html>

@@ -168,6 +168,9 @@ Do not break these without discussing it in the PR/commit:
   then a headless Chrome on
   `http://127.0.0.1:8901/tools/web-tests/index.html?record&live` - the
   `?live` half needs the network and downloads the HVSC databases.
+  `tools/web-tests/page.html?record` drives the real page (search boxes,
+  paging, status line) in an iframe against the live API; wrap the headless
+  Chrome in `timeout` - the report arrives before Chrome exits.
 
 ## Testing checklist (run on hardware)
 

@@ -51,7 +51,13 @@ tools/sid_add.py --no-upload sids/*.sid       # sidecars only, no BLE
 
 The [web remote](../README.md#web-remote) does the same from a browser:
 search hvsc.c64.org, upload (with `.len`/`.stil` built in the page),
-list, play and delete. `web/hvsc.js` has to keep matching
+list, play and delete. The search follows the API's own rule - every
+query word against the title, the author **and** the released line - so
+the `name`/`author`/`released` boxes decide what counts: name and author
+are on by default, which keeps HVSC series names ("1987 Commando
+Frontier") out of a title search. The API returns every match and takes
+no paging parameters, so the page draws 100 rows and a "show more"
+button continues the list. `web/hvsc.js` has to keep matching
 `tools/sid_add.py` - same caps, same truncation - and both are checked
 against the same fixtures in `tools/web-tests/`.
 

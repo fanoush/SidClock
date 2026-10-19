@@ -50,6 +50,23 @@ export function searchSids(query) {
   return fetchJson(`${API}/sids?q=${encodeURIComponent(query)}`);
 }
 
+/** The result fields the search boxes can restrict to. The API matches
+ *  every one of them, which is why a search for "Commando" also returns
+ *  tunes whose released line says "1987 Commando Frontier". */
+export const SEARCH_FIELDS = ['title', 'author', 'released'];
+
+/** Keep the results whose checked `fields` contain every query term.
+ *  The API matches all the terms, in any order, across title/author/
+ *  released; this repeats that same match over the fields the user kept
+ *  checked, so unticking `released` drops the series-name lookalikes.
+ *  An empty field selection filters nothing. */
+export function filterSids(results, query, fields) {
+  const terms = String(query).toLowerCase().split(/\s+/).filter(Boolean);
+  if (!terms.length || !fields.length) return results;
+  return results.filter((res) => terms.every((t) => fields.some((f) =>
+    String(res[f] || '').toLowerCase().includes(t))));
+}
+
 export function getSidDetails(id) {
   return fetchJson(`${API}/sids/${encodeURIComponent(id)}`);
 }
