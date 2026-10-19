@@ -61,6 +61,16 @@ button continues the list. `web/hvsc.js` has to keep matching
 `tools/sid_add.py` - same caps, same truncation - and both are checked
 against the same fixtures in `tools/web-tests/`.
 
+The page labels the tune it is showing by the **whole-file MD5** the
+device reports for the file it actually loaded (`info` characteristic
+bytes [88..95], the first 4 bytes of the digest as 8 hex characters):
+`Songlengths.md5` is keyed on exactly this digest, so the lookup is
+exact even for renamed uploads and for the ~3,700 basenames HVSC reuses
+across directories. Without an id (no tune, or a hash that failed) the
+page falls back to the upload record, then to the case-sensitive file
+name - and marks a name match that several HVSC files share, because
+then the metadata may describe a different tune.
+
 Manual upload also works (sidecars are optional):
 
 ```sh

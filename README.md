@@ -136,9 +136,12 @@ installing anything:
   result list cannot bury it.
 - **Tune info**: while a tune plays, the page shows its HVSC song lengths,
   the subtune names (tap one to jump to that subtune), the STIL note for
-  the current subtune and the tune comment. Tunes uploaded from the page
-  are matched by their remembered HVSC path, others by file name (several
-  HVSC files can share a name, so the upload path wins).
+  the current subtune and the tune comment. The device reports the
+  whole-file MD5 prefix of the tune it loaded (`info` characteristic
+  bytes [88..95]), and that is the exact key into `Songlengths.md5`, so
+  renamed files and the 3,700+ shared HVSC basenames still resolve to the
+  right tune; the upload record and finally the file name are fallbacks
+  (an ambiguous name match says so).
 
 For local testing on a phone, Web Bluetooth needs `https` - plain http
 counts as a secure context only on `localhost` itself:

@@ -8,8 +8,9 @@
   in the custom service next to the debug snapshot - a 16-byte **state**
   value (playing/paused flags, subtune and song count, end mode, chip
   model, elapsed and `.len` length) that **notifies** on every change and
-  once per second while a tune plays, plus an 88-byte **info** value
-  (title, file name, author) that only changes when a tune loads. A host
+  once per second while a tune plays, plus an **info** value (title, file
+  name, author - 96 bytes once the tune id below landed) that only changes
+  when a tune loads. A host
   subscribes instead of polling and stays in sync with on-device button
   presses; it re-reads the strings when the state's generation byte moves.
   Both reads work in every BLE access mode.
@@ -45,6 +46,20 @@
   plays/deletes them (delete drops the sidecars, `16`), and while a tune
   plays it shows the HVSC info: song lengths, subtune names (tap to jump),
   the current subtune's STIL note and the tune comment.
+- **Exact tune identity over BLE** (firmware + web remote). The info
+  characteristic grew from 88 to 96 bytes: bytes [88..95] are the first 4
+  bytes of the **whole-file MD5** of the tune the device actually loaded,
+  as 8 lowercase hex characters (`00000000` = unknown). The firmware
+  hashes the file during the load (new `app/src/md5.c`, ~96 bytes of stack
+  context, no allocation). HVSC's `Songlengths.md5` is keyed on exactly
+  this digest, so the web remote resolves the tune it shows exactly:
+  renamed uploads, case variants and the ~3,700 basenames HVSC reuses
+  across directories (`Commando.sid`, `Last_Ninja_2.sid`, ...) no longer
+  depend on whichever entry a name lookup found first. Without an id the
+  page falls back to the upload record and then the file name - and says
+  when several HVSC files share that name. Verified on hardware: all 23
+  tunes in `/home` resolve to the correct HVSC paths, including a renamed
+  one (`Neverending_Stor.sid` -> `Neverending_Story.sid`).
 - **Web remote: search field boxes and result paging**. The HVSC API
   matches every query word against a tune's title, its author *and* its
   released line - HVSC's series/publisher names - so "commando" also
@@ -120,12 +135,21 @@
   with a TypeError; it stops the row's progress bar and reports the
   failure plus what it did about the partial file.
 
+- The web remote's tune info could mix sources: song lengths came from
+  the first Songlengths entry with the tune's file name while the STIL
+  names came from a remembered path (or the other way around). Both now
+  come from the one HVSC path the match resolved to, and an upload record
+  whose stored md5 disagrees with the device's is treated as stale
+  instead of trusted.
+
 **Host tools**
 
 - `tools/sidclock_ble.py` gained `state` (read the player status in one
   shot), `watch` (follow the state notifications), `playpause`, `next`,
   `prev`, `subnext`, `subprev` and `subplay N`; `sid`/`sidname` take
-  `--sub N` to start at a specific subtune.
+  `--sub N` to start at a specific subtune. `state` and `watch` print the
+  loaded tune's id (the whole-file MD5 prefix) when the firmware reports
+  it.
 
 ## 1.0.7
 

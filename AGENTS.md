@@ -164,6 +164,15 @@ Do not break these without discussing it in the PR/commit:
   names over 23, but play-by-name `0x20` and `filedelete` `0x16` take at
   most 20) and remembers the original HVSC path per device name, because
   several HVSC files can share one file name.
+- Tune identity is exact now: the info characteristic is 96 bytes and its
+  last 8 are the loaded file's whole-file MD5 prefix (`sid_player_md5_prefix`,
+  `app/src/md5.c`; `00000000` = unknown - no HVSC file has that prefix).
+  The page keys `Songlengths.md5` on it (`byPrefix`), so rename/case/dupe
+  games cannot confuse the metadata; the upload record and then the file
+  name are only fallbacks, and `tuneLookup()` is the place to change that
+  order. Anything that grows `player_info` again must stay inside the
+  `sizeof` comparisons in `player_info_check` (it bumps the generation
+  byte) and needs no GATT table change.
 - Web remote tests: `python3 tools/web-tests/record.py --out /tmp/wt.txt &`
   then a headless Chrome on
   `http://127.0.0.1:8901/tools/web-tests/index.html?record&live` - the
