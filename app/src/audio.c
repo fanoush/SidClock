@@ -110,6 +110,9 @@ static int16_t sid_scratch[AUDIO_FRAMES];
 
 static uint8_t volume = 100;
 static uint8_t dbg[20];
+/* Worst audio-loop gap (ms, low byte) since the host last read the debug
+ * snapshot: shows stalls that start after the boot-time max in dbg[16]. */
+static uint8_t stall_since_read;
 
 /* verification test state (documentation pass) */
 static bool cfg_lrck4;
@@ -452,6 +455,9 @@ static void audio_thread(void *a, void *b, void *c)
 			if (gap > dbg[16]) {
 				dbg[16] = (uint8_t)gap; /* worst stall, ms */
 			}
+			if (gap > stall_since_read) {
+				stall_since_read = (uint8_t)gap;
+			}
 			loop_last = now;
 		}
 
@@ -495,6 +501,17 @@ K_THREAD_DEFINE(audio_tid, 2560, audio_thread, NULL, NULL, NULL, -1, 0, 0);
 const uint8_t *audio_debug(void)
 {
 	return dbg;
+}
+
+/* Worst audio-loop gap since the previous call (ms, low byte): the debug
+ * snapshot maps it to [139] so a host sees stalls that happen between
+ * reads (the boot-time max in dbg[16] may already be saturated). */
+uint8_t audio_take_stall(void)
+{
+	uint8_t v = stall_since_read;
+
+	stall_since_read = 0;
+	return v;
 }
 
 /* One-off debug byte write (used by the UI for idle diagnostics). */

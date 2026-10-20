@@ -65,19 +65,21 @@ is still queued is rejected with `INSUFFICIENT_RESOURCES`. Reading the
 player state (or the snapshot) right after a write can still show the
 previous tune for that moment.
 
-The read snapshot (132 bytes) mixes audio state (sample rate, DMA buffer
+The read snapshot (140 bytes) mixes audio state (sample rate, DMA buffer
 health, enable registers), SID state (playing flag, song count, title,
 render timing) and UI diagnostics; bytes [96..127] carry timekeeping
 telemetry - `k_uptime_get()` ms, the raw GRTC cycle counter, the clock
 guard trip count and the current clock base - so a host can spot a broken
-uptime source, and byte [128] reports the BLE access mode. Bytes [129..139]
+uptime source, and byte [128] reports the BLE access mode. Bytes [129..138]
 carry crash telemetry: boot counter, hwinfo reset-cause flags (LE), audio
 and main thread heartbeats (u16 LE each, a stalled one names the hung
 thread) and the active SID engine (0 = new, 1 = legacy, 0xFF = none).
 Byte [137] is the filesystem state (0 = `/home` mounted, 1 = not mounted)
 with the mount error code in [138]: an unmounted or corrupt LittleFS used to
 report nothing anywhere, so `status` and `ls` can now say it instead of
-showing an empty directory.
+showing an empty directory. Byte [139] is the worst audio-loop gap in ms
+(low byte) since the previous snapshot read: it shows a stall that starts
+after boot, when the all-time maximum in [16] is already saturated.
 
 The stack telemetry (`1D`) reports **peaks, not current depth**: stacks are
 filled with 0xAA when a thread starts (`CONFIG_INIT_STACKS`), and the

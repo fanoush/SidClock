@@ -100,6 +100,10 @@
   cheaper. `/home/dir.txt` is gone - the index file, the
   listing-triggered rebuild and the SAVE STATE rewrite were removed
   (0x13 is the only listing path) and the stale copy is deleted at boot.
+- The debug snapshot reports the worst audio-loop gap (ms) since the
+  previous read in byte [139], so a stall that starts after boot is
+  visible even though the all-time maximum in [16] is already saturated
+  by the boot-time load.
 - Player commands from BLE now run in the main loop instead of the
   Bluetooth receive workqueue. That workqueue's 2 KB stack was already at
   96 % during a tune load and "next tune" adds a directory scan on top:

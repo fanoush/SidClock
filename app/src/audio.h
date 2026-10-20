@@ -61,6 +61,9 @@ void audio_sid_stop(void);
  */
 const uint8_t *audio_debug(void);
 
+/* Worst audio-loop gap since the previous call (ms, low byte). */
+uint8_t audio_take_stall(void);
+
 /* [0..3] PSEL.SCK  [4..7] PSEL.SDOUT  [8..11] PSEL.MCK
  * [12] ENABLE  [13] TXEN */
 void audio_read_hw(uint8_t *out, size_t len);

@@ -1565,7 +1565,9 @@ static ssize_t ble_dbg_read(struct bt_conn *conn,
 	 * are going nowhere instead of showing an empty directory */
 	ble_dbg[137] = fs_ready ? 0U : 1U;
 	ble_dbg[138] = (uint8_t)(fs_mount_err < 0 ? -fs_mount_err : 0);
-	ble_dbg[139] = 0;
+	/* [139] worst audio-loop gap (ms, low byte) since the previous
+	 * snapshot read: a stall that starts after the counter above */
+	ble_dbg[139] = audio_take_stall();
 
 	return bt_gatt_attr_read(conn, attr, buf, len, offset, ble_dbg,
 				 sizeof(ble_dbg));
