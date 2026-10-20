@@ -24,14 +24,23 @@ import sys
 
 
 def check_ram(header, overlay):
-    """The header (linker + M33 view) and the overlay (reserved-memory)
-    must agree on every FLPR RAM carve-out."""
+    """Audit the FLPR RAM map.
+
+    - header and overlay agree on every carve-out,
+    - the ring's frame count matches its byte size (int16), so both cores
+      bound their accesses to the reserved window (a frames/bytes mix-up
+      walked the ring past the end of SRAM and bus-faulted the M33),
+    - every region lies inside the FLPR-side SRAM window and none overlap
+      (private RAM, mailbox, ring; the M33 never links any of it).
+    """
     defines = {}
     for line in open(header):
-        m = re.match(r"#define\s+(\w+)\s+(0x[0-9a-fA-F]+)UL?", line)
+        m = re.match(r"#define\s+(\w+)\s+(0x[0-9a-fA-F]+|\d+)"
+                     r"(?:U?L?)?\s*(?:/\*.*)?$", line)
         if m:
-            defines[m.group(1)] = int(m.group(2), 16)
+            defines[m.group(1)] = int(m.group(2), 0)
     ov = open(overlay).read()
+    regions = []
     for name, base, size in (("priv", "FLPR_PRIV_BASE", "FLPR_PRIV_SIZE"),
                              ("shared", "FLPR_SHARED_BASE",
                               "FLPR_SHARED_SIZE"),
@@ -44,7 +53,35 @@ def check_ram(header, overlay):
         if (int(m.group(1), 16) != defines[base]
                 or int(m.group(2), 16) != defines[size]):
             sys.exit(f"error: flpr_{name}_ram overlay/header mismatch")
-    print("ram map: header and overlay agree")
+        regions.append((name, defines[base],
+                        defines[base] + defines[size]))
+
+    # int16 frames: the index bound must describe the reserved bytes.
+    frames = None
+    m = re.search(r"#define\s+FLPR_RING_FRAMES\s+\(\s*FLPR_RING_SIZE\s*/\s*"
+                  r"(\d+)U?\s*\)", open(header).read())
+    if m:
+        frames = defines["FLPR_RING_SIZE"] // int(m.group(1))
+    elif "FLPR_RING_FRAMES" in defines:
+        frames = defines["FLPR_RING_FRAMES"]
+    if frames is None:
+        sys.exit("error: FLPR_RING_FRAMES not found in the header")
+    if frames * 2 != defines["FLPR_RING_SIZE"]:
+        sys.exit("error: FLPR_RING_FRAMES * 2 != FLPR_RING_SIZE "
+                 "(the ring index would run past its reserved region)")
+
+    # Contiguous SRAM of the FLPR side: no M33 links it, nothing else may
+    # claim it, and all three regions must sit inside it.
+    win_lo, win_hi = 0x2002F000, 0x20040000
+    for name, lo, hi in regions:
+        if lo < win_lo or hi > win_hi:
+            sys.exit(f"error: flpr_{name}_ram [{lo:#x},{hi:#x}) outside "
+                     f"the FLPR SRAM window")
+    regions.sort(key=lambda r: r[1])
+    for (n1, _, hi1), (n2, lo2, _) in zip(regions, regions[1:]):
+        if hi1 > lo2:
+            sys.exit(f"error: flpr_{n1}_ram and flpr_{n2}_ram overlap")
+    print("ram map: header/overlay agree, ring frames match, no overlap")
 
 
 def check_relocs(elf, priv_base, priv_size):

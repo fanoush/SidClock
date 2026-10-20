@@ -39,7 +39,7 @@ link region, so the app keeps all of its RAM):
 
 | Region | Address | Size | Use |
 |---|---|---|---|
-| SRAM | `0x20034000-0x2003DFFF` | 32 KB | PCM ring: blob renders, M33 drains (1.4 s, absorbs fetch-contention bursts) |
+| SRAM | `0x20034000-0x2003BFFF` | 32 KB | PCM ring: blob renders, M33 drains (16384 int16 frames, ~0.74 s, absorbs fetch-contention bursts) |
 | SRAM | `0x2003E000-0x2003FBFF` | 7 KB | blob-private RAM (`.got`/`.data`/`.bss`), 1 KB stack on top |
 | SRAM | `0x2003FC00-0x2003FFFF` | 1 KB | shared control struct (`flpr/flpr_shared.h`) |
 
