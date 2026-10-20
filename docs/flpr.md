@@ -134,11 +134,18 @@ current design runs all of it on the FLPR: it fits, but with ~2% margin,
 which shows up as ~1.7 underruns/second on this tune. Splitting the work
 across both cores is the way to get real headroom:
 
-| Split | M33 | FLPR |
+| Split | M33 (measured) | FLPR (measured) |
 |---|---|---|
-| **A: SID on the FLPR, C64/CPU on the M33** | ~12.5 us (27%) | ~26 us (58%) |
-| B: C64/CPU on the FLPR, SID + I2S on the M33 | ~18 us (40%) | ~18 us (40%) |
-| current: everything on the FLPR | ~0 (drains only) | ~44.5 us (98%) |
+| A: SID on the FLPR, C64/CPU on the M33 (implemented, `engine split`) | 25.5 us (56%) | ~26 us (58%) |
+| B: C64/CPU on the FLPR, SID + I2S on the M33 | ~5 us would stay (11%) | ~18 us (40%) |
+| whole engine on the FLPR (`engine flpr`) | ~0 (drains only) | 44.5 us (98%), ~1.7 underruns/s |
+
+The measured split is lopsided: the SID stage costs ~5 us/frame on the
+M33 but ~26 us on the FLPR (it is table/branch heavy, and the VPR has no
+instruction cache), while the 6510 interpreter is *cheaper* on the FLPR
+(18 us) than on the M33 (25.5 us). So the SID stage is the wrong half to
+offload: the better split is B - the M33 keeps only the SID stage and
+I2S (~11%) and the FLPR runs the C64/CPU (~40%).
 
 A is the better split for UI responsiveness and the natural boundary:
 the per-sample SID stage (`cRSID_emulateLightSIDs`) is already separate

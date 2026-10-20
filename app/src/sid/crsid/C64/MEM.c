@@ -156,6 +156,12 @@ static INLINE unsigned char cRSID_readMem (FASTVAR unsigned short address) {
 
 static INLINE void cRSID_writeMem (FASTVAR unsigned short address, FASTVAR unsigned char data) {
  *cRSID_getMemWritePtr(address)=data;
+#ifdef CRSID_SPLIT
+ //Split mode: the SID stage runs on the FLPR and reads its registers from
+ //its own SRAM - mirror the write (rare, so a remote byte write is cheap).
+ if ( RARELY (cRSID_splitMode && 0xD400 <= address && address < 0xD420) )
+  ((volatile unsigned char*)FLPR_SID_REGS)[address - 0xD400] = data;
+#endif
 }
 
 /*static INLINE void cRSID_writeMemC64 (cRSID_C64instance* C64, FASTVAR unsigned short address, FASTVAR unsigned char data) {

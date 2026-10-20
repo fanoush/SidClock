@@ -28,6 +28,15 @@ cRSID_Output cRSID_generateSample(void)
 	s.R = 0;
 	return s;
 }
+
+cRSID_Output cRSID_emulateSplitSample(void)
+{
+	cRSID_Output s;
+
+	s.L = 0;
+	s.R = 0;
+	return s;
+}
 #endif
 
 int (*libcsid_stream_fill)(unsigned char *dst, int max);

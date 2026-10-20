@@ -67,6 +67,17 @@ typedef struct cRSID_VICinstance {
 } cRSID_VICinstance;
 
 
+#ifdef CRSID_SPLIT
+/* Split engine: the SID stage runs on the FLPR (see flpr_shared.h). The
+ * M33 side owns the flag; the blob is always the split side. */
+#include "flpr_shared.h"
+#ifdef FLPR_BLOB
+#define cRSID_splitMode 1
+#else
+extern char cRSID_splitMode;
+#endif
+#endif
+
 typedef struct cRSID_SIDinstance {
  //SID-chip data:
  //cRSID_C64instance* C64;           //reference to the containing C64
@@ -161,7 +172,9 @@ typedef struct cRSID_C64instance {
  char              FadeLevel;
  //Hardware-elements:
  cRSID_CPUinstance CPU;
- cRSID_SIDinstance SID[CRSID_SIDCOUNT_MAX+1];
+ //Split mode: the instances live in FLPR SRAM (both cores see all
+ //SRAM), otherwise in this image - see cRSID_setSplit().
+ cRSID_SIDinstance *SID;
  cRSID_CIAinstance CIA[CRSID_CIACOUNT+1];
  cRSID_VICinstance VIC;
  //Embedded slim-down: bank-pointer tables removed (8KB); banking is computed
@@ -205,6 +218,8 @@ unsigned char      cRSID_emulateCPU    (void); //direct instances inside for hop
 static INLINE char cRSID_handleCPUinterrupts ();
 // C64/SID.c
 void               cRSID_createSIDchip (cRSID_SIDinstance* SID, unsigned short model, char channel, unsigned short baseaddress);
+void               cRSID_setSplit (char on); //relocate SID instances to FLPR SRAM / back
+cRSID_Output       cRSID_emulateSplitSample (void); //blob side: one SID-only sample
 void               cRSID_initSIDchip   (cRSID_SIDinstance* SID);
 static INLINE int  cRSID_emulateHQresampledSID (FASTVAR cRSID_SIDinstance *const FASTPTR SID, FASTVAR char cycles);
 // C64/SID_ADSR.c

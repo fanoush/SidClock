@@ -114,6 +114,7 @@ static int16_t sid_scratch[AUDIO_FRAMES];
  * (see flpr/flpr_shared.h). The M33-side render stays off while it runs,
  * so the two sources never mix. */
 static volatile bool flpr_pipe;
+static volatile bool split_mode; /* engine split: M33 CPU + FLPR SID */
 static uint32_t flpr_pipe_until; /* k_uptime deadline; 0 = until stopped */
 static uint32_t flpr_underruns;
 static uint16_t pipe_peak; /* max |taken sample| since pipe start */
@@ -264,11 +265,9 @@ static void fill_hold_tone(void)
 }
 #endif /* SIDCLOCK_DEBUG */
 
-static void fill_buffer(int32_t *dst)
+/* Drain the ring the FLPR renders into (whole-engine and split modes). */
+static void drain_flpr_ring(int32_t *dst)
 {
-	if (muted) {
-		fill_zeros(dst);
-	} else if (flpr_pipe && !sid_player_is_paused()) {
 		uint32_t w = FLPR_SHARED->write_idx;
 		uint32_t r = FLPR_SHARED->read_idx;
 		uint32_t avail = w - r;
@@ -312,6 +311,27 @@ static void fill_buffer(int32_t *dst)
 		}
 		pack(dst);
 		last_sound_ms = k_uptime_get_32();
+}
+
+static void fill_buffer(int32_t *dst)
+{
+	if (muted) {
+		fill_zeros(dst);
+	} else if (split_mode && sid_player_is_playing() &&
+		   !sid_player_is_paused()) {
+		/* M33: run the C64/CPU for this buffer (records the cycles the
+		 * blob needs), then drain what the blob rendered. The timing is
+		 * the M33's CPU-only share of the split (dbg[13]/[14] us). */
+		uint32_t c0 = k_cycle_get_32();
+		uint32_t dt;
+
+		sid_player_render(sid_scratch, (int)AUDIO_FRAMES);
+		dt = k_cycle_get_32() - c0;
+		dbg[13] = (uint8_t)(dt & 0xFFU);
+		dbg[14] = (uint8_t)((dt >> 8) & 0xFFU);
+		drain_flpr_ring(dst);
+	} else if (flpr_pipe && !sid_player_is_paused()) {
+		drain_flpr_ring(dst);
 	} else if (sid_mode && sid_player_is_playing() &&
 		   !sid_player_is_paused()) {
 		uint32_t c0 = k_cycle_get_32();
@@ -541,7 +561,7 @@ static void audio_thread(void *a, void *b, void *c)
 		 * not render: the ring would overrun and the next drain would
 		 * play stale samples (and the tune clock would jump). On
 		 * resume, drop whatever piled up. */
-		if (flpr_pipe) {
+		if (flpr_pipe || split_mode) {
 			if (sid_player_is_paused()) {
 				if (FLPR_SHARED->run != 0U) {
 					FLPR_SHARED->run = 0U;
@@ -867,10 +887,31 @@ void audio_sid_start(void)
 	/* Engine choice: cRSID on the FLPR blob, or either core on the M33.
 	 * The blob only boots when this engine is actually selected; if it
 	 * cannot start, fall back to the M33 render rather than go silent. */
-	if (sid_player_engine_mode() == SID_ENGINE_FLPR && flpr_start() == 0) {
+	if (sid_player_engine_mode() == SID_ENGINE_SPLIT && flpr_start() == 0) {
+		/* Split: the M33 runs the CPU in the fill path and publishes
+		 * the per-sample cycle counts; the blob runs the SID stage. */
 		sid_mode = false;
+		flpr_pipe = false;
+		split_mode = true;
+		FLPR_SHARED->run = 0U;
+		FLPR_SPLIT->enable = 1U;
+		FLPR_SPLIT->prod = 0U;
+		FLPR_SPLIT->cons = 0U;
+		FLPR_SHARED->mode = 4U;
+		FLPR_SHARED->read_idx = FLPR_SHARED->write_idx;
+		FLPR_SHARED->underruns = 0U;
+		flpr_underruns = 0U;
+		pipe_peak = 0U;
+		dbg[2] = 0U;
+		dbg[3] = 1U;
+		FLPR_SHARED->run = 1U;
+	} else if (sid_player_engine_mode() == SID_ENGINE_FLPR &&
+		   flpr_start() == 0) {
+		sid_mode = false;
+		split_mode = false;
 		flpr_pipe_start(0U); /* until audio_sid_stop() */
 	} else {
+		split_mode = false;
 		flpr_pipe = false;
 		FLPR_SHARED->run = 0U;
 		sid_mode = true;
@@ -892,6 +933,7 @@ void audio_sid_stop(void)
 	 * blob idles on run=0. Started explicitly by 0x31 after. */
 	flpr_pipe = false;
 	flpr_pipe_until = 0U;
+	split_mode = false;
 	dbg[3] = 0U;
 	FLPR_SHARED->run = 0U;
 }

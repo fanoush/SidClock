@@ -859,11 +859,12 @@ async def cmd_watch(addr):
 
 
 async def cmd_engine(addr, value=None):
-    """Switch the SID engine (dual-engine builds): new | old | flpr."""
-    if value not in ("new", "old", "flpr"):
-        raise SystemExit("usage: engine new|old|flpr  "
-                         "(cRSID / cSID-light / cRSID on the FLPR)")
-    code = {"new": 0, "old": 1, "flpr": 2}[value]
+    """Switch the SID engine: new | old | flpr | split."""
+    if value not in ("new", "old", "flpr", "split"):
+        raise SystemExit("usage: engine new|old|flpr|split  (cRSID / "
+                         "cSID-light / whole engine on the FLPR / "
+                         "M33 CPU + FLPR SID)")
+    code = {"new": 0, "old": 1, "flpr": 2, "split": 3}[value]
     async with connect(addr) as c:
         await c.write_gatt_char(DBG_CHAR, bytes([0x17, code]),
                                 response=True)

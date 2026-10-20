@@ -1240,6 +1240,8 @@ static const char *sid_engine_label(void)
 		return "cSID";
 	case SID_ENGINE_FLPR:
 		return "FLPR";
+	case SID_ENGINE_SPLIT:
+		return "SPLIT";
 	default:
 		return "cRSID";
 	}
@@ -1802,7 +1804,7 @@ static ssize_t ble_dbg_write(struct bt_conn *conn,
 		 * cSID-light, 2 = cRSID on the FLPR blob. The main loop
 		 * stops, switches and restarts the current tune if one was
 		 * playing (same as the main-screen button). */
-		if (len != 2U || p[1] > SID_ENGINE_FLPR) {
+		if (len != 2U || p[1] > SID_ENGINE_SPLIT) {
 			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
 		}
 		if (sid_req_post(0x17, p[1], NULL) != 0) {
@@ -2180,6 +2182,9 @@ static void player_state_fill(void)
 	}
 	if (sid_player_engine_mode() == SID_ENGINE_FLPR) {
 		flags |= 0x10U; /* rendered by the FLPR blob */
+	}
+	if (sid_player_engine_mode() == SID_ENGINE_SPLIT) {
+		flags |= 0x20U; /* SID stage on the FLPR, CPU on the M33 */
 	}
 #endif
 	player_state[0] = flags;
@@ -4041,7 +4046,7 @@ static void sid_req_take(void)
 		break;
 #ifdef SID_ENGINE_DUAL
 	case 0x17:
-		if (arg > SID_ENGINE_FLPR) {
+		if (arg > SID_ENGINE_SPLIT) {
 			LOG_WRN("sid engine: bad value %u", arg);
 			break;
 		}
@@ -4061,7 +4066,8 @@ static void sid_req_take(void)
 			}
 		}
 		LOG_INF("sid engine: %s", arg == SID_ENGINE_LEGACY ? "legacy" :
-			arg == SID_ENGINE_FLPR ? "flpr" : "new");
+			arg == SID_ENGINE_FLPR ? "flpr" :
+			arg == SID_ENGINE_SPLIT ? "split" : "new");
 		break;
 #endif
 	case 0x18:
@@ -4867,7 +4873,7 @@ static void touch_poll(void)
 			audio_sid_stop();
 			sid_player_set_engine_mode(
 				(sid_player_engine_mode() + 1) %
-				(SID_ENGINE_FLPR + 1));
+				(SID_ENGINE_SPLIT + 1));
 			if (was && sid_cur_name[0] != '\0') {
 				snprintf(path, sizeof(path), "/home/%s",
 					 sid_cur_name);

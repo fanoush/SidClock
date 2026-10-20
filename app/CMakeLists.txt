@@ -34,6 +34,8 @@ else()
     set(SID_ENGINE_SUFFIX "-crsid")
 endif()
 target_compile_definitions(app PRIVATE SID_ENGINE_SUFFIX="${SID_ENGINE_SUFFIX}")
+# Split engine (M33 CPU + FLPR SID): adds the hooks in the vendored core.
+target_compile_definitions(app PRIVATE CRSID_SPLIT)
 
 target_sources(app PRIVATE
     src/main.c

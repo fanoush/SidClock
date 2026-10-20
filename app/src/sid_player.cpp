@@ -30,6 +30,11 @@ extern "C" {
 #include "sid/libcsid.h"
 }
 
+#ifdef CRSID_SPLIT
+/* Split engine: relocates the SID instances to FLPR SRAM (C64.c). */
+extern "C" void cRSID_setSplit(char on);
+#endif
+
 LOG_MODULE_REGISTER(sid_player, LOG_LEVEL_INF);
 
 /* Render rate = the true hardware playback rate for a 22050 request,
@@ -87,10 +92,11 @@ static int sid_engine_mode;
 
 extern "C" void sid_player_set_engine_mode(int mode)
 {
-	if (mode < SID_ENGINE_CRSID || mode > SID_ENGINE_FLPR) {
+	if (mode < SID_ENGINE_CRSID || mode > SID_ENGINE_SPLIT) {
 		mode = SID_ENGINE_CRSID;
 	}
 	sid_engine_mode = mode;
+	cRSID_setSplit(mode == SID_ENGINE_SPLIT ? 1 : 0);
 }
 
 extern "C" int sid_player_engine_mode(void)
@@ -118,6 +124,13 @@ extern "C" void sid_player_set_engine_mode(int mode)
 static inline bool engine_on_flpr(void)
 {
 	return sid_engine_mode == SID_ENGINE_FLPR;
+}
+
+/* Split mode renders its audio on the blob too (SID stage), but the M33
+ * still runs the CPU emulation in the fill path. */
+static inline bool engine_on_split(void)
+{
+	return sid_engine_mode == SID_ENGINE_SPLIT;
 }
 
 static inline bool engine_quiesce(void)

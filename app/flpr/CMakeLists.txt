@@ -42,7 +42,7 @@ if(FLPR_WITH_ENGINE)
 		PROPERTIES COMPILE_OPTIONS
 		"${FLPR_ENGINE_OPT};-std=gnu99;-fno-pie;-msmall-data-limit=0;-ffunction-sections;-fdata-sections"
 		COMPILE_DEFINITIONS
-		"CRSID_HOT_CODE=__attribute__((section(\".flprhot\"),noinline,optimize(\"Os\")))")
+		"CRSID_HOT_CODE=__attribute__((section(\".flprhot\"),noinline,optimize(\"Os\")));CRSID_SPLIT;FLPR_BLOB=1")
 endif()
 
 # No libc, no syscalls: pure number crunching on shared memory.

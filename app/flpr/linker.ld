@@ -19,7 +19,7 @@ MEMORY {
 	/* Hot engine code: executed from the FLPR's own SRAM. Code fetched
 	 * from RRAM costs ~3 cycles per instruction on this core (no
 	 * instruction cache), from SRAM ~1; see docs/flpr.md. */
-	CODERAM (rx) : ORIGIN = 0x2002F000, LENGTH = 0xE000
+	CODERAM (rx) : ORIGIN = 0x2002F000, LENGTH = 0xD000
 	RAM (rwx) : ORIGIN = 0x2003F000, LENGTH = 0xC00
 }
 

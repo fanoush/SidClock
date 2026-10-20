@@ -34,6 +34,10 @@ void cRSID_createSIDchip (cRSID_SIDinstance* SID, unsigned short model, char cha
  SID->ChipModel = model; SID->Channel=channel;
  if( baseaddress>=0xD400 && (baseaddress<0xD800 || (0xDE00<=baseaddress && baseaddress<=0xDFE0)) ) { //check valid address, avoid Color-RAM
   SID->BaseAddress = baseaddress; SID->BasePtr = &cRSID_C64.IObankWR[((baseaddress) & 0xFFF)]; SID->BasePtrRD = &cRSID_C64.IObankRD[((baseaddress) & 0xFFF)];
+#ifdef CRSID_SPLIT
+  //In split mode the blob (SID stage) reads the registers from its own SRAM.
+  if ( cRSID_splitMode ) SID->BasePtr = (unsigned char*)FLPR_SID_REGS;
+#endif
  }
  else { SID->BaseAddress=0x0000;
  SID->BasePtr = SID->BasePtrRD = &cRSID_C64.SIDnullGuard; } //slim: sink never read (BaseAddress==0); NULL-ing not preferred as it can cause Segfault in sample-thread

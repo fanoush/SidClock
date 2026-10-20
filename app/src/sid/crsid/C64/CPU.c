@@ -56,7 +56,13 @@ static INLINE void wr (FASTVAR unsigned short address, FASTVAR unsigned char dat
  if ( MOSTLY ((address & 0xF000) != 0xD000) ) { cRSID_C64.RAMbank[address] = data; return; }
  *cRSID_getMemWritePtr(address)=data;
  if (RARELY (0xD400 <= address && address <= 0xDFFF)) { //OPT: any SID-reg write must force an envelope pass (see SID_ADSR.c)
-  if (TIGHTLY (cRSID_C64.SID[1].BaseAddress <= address && address < cRSID_C64.SID[1].BaseAddress+0x1C)) cRSID_C64.SID[1].ADSRthr = 0; //the pending folded cycles must never be merged under the new state
+  if (TIGHTLY (cRSID_C64.SID[1].BaseAddress <= address && address < cRSID_C64.SID[1].BaseAddress+0x1C)) { cRSID_C64.SID[1].ADSRthr = 0; //the pending folded cycles must never be merged under the new state
+#ifdef CRSID_SPLIT
+   //Split engine: the SID stage runs on the FLPR and reads its registers
+   //from its own SRAM - mirror the write (SID writes are rare).
+   if ( RARELY (cRSID_splitMode) ) ((volatile unsigned char*)FLPR_SID_REGS)[address - 0xD400] = data;
+#endif
+  }
   if (cRSID_C64.SID[2].BaseAddress != 0 && cRSID_C64.SID[2].BaseAddress <= address && address < cRSID_C64.SID[2].BaseAddress+0x1C) cRSID_C64.SID[2].ADSRthr = 0;
   if (cRSID_C64.SID[3].BaseAddress != 0 && cRSID_C64.SID[3].BaseAddress <= address && address < cRSID_C64.SID[3].BaseAddress+0x1C) cRSID_C64.SID[3].ADSRthr = 0;
   if (cRSID_C64.SID[4].BaseAddress != 0 && cRSID_C64.SID[4].BaseAddress <= address && address < cRSID_C64.SID[4].BaseAddress+0x1C) cRSID_C64.SID[4].ADSRthr = 0;
@@ -74,7 +80,13 @@ static INLINE void wr2 (FASTVAR unsigned short address, FASTVAR unsigned char da
  if ( MOSTLY ((address & 0xF000) != 0xD000) ) { cRSID_C64.RAMbank[address] = data; return; }
  *cRSID_getMemWritePtr(address)=data;
  if (RARELY (0xD400 <= address && address <= 0xDFFF)) { //OPT: any SID-reg write must force an envelope pass (see wr() and SID_ADSR.c)
-  if (TIGHTLY (cRSID_C64.SID[1].BaseAddress <= address && address < cRSID_C64.SID[1].BaseAddress+0x1C)) cRSID_C64.SID[1].ADSRthr = 0; //the pending folded cycles must never be merged under the new state
+  if (TIGHTLY (cRSID_C64.SID[1].BaseAddress <= address && address < cRSID_C64.SID[1].BaseAddress+0x1C)) { cRSID_C64.SID[1].ADSRthr = 0; //the pending folded cycles must never be merged under the new state
+#ifdef CRSID_SPLIT
+   //Split engine: the SID stage runs on the FLPR and reads its registers
+   //from its own SRAM - mirror the write (SID writes are rare).
+   if ( RARELY (cRSID_splitMode) ) ((volatile unsigned char*)FLPR_SID_REGS)[address - 0xD400] = data;
+#endif
+  }
   if (cRSID_C64.SID[2].BaseAddress != 0 && cRSID_C64.SID[2].BaseAddress <= address && address < cRSID_C64.SID[2].BaseAddress+0x1C) cRSID_C64.SID[2].ADSRthr = 0;
   if (cRSID_C64.SID[3].BaseAddress != 0 && cRSID_C64.SID[3].BaseAddress <= address && address < cRSID_C64.SID[3].BaseAddress+0x1C) cRSID_C64.SID[3].ADSRthr = 0;
   if (cRSID_C64.SID[4].BaseAddress != 0 && cRSID_C64.SID[4].BaseAddress <= address && address < cRSID_C64.SID[4].BaseAddress+0x1C) cRSID_C64.SID[4].ADSRthr = 0;

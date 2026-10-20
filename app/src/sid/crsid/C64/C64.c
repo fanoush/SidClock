@@ -4,6 +4,7 @@
 
 #include "../libcRSID.h"
 
+
 #include "MEM.c"
 #include "CPU.c"
 #include "CIA.c"
@@ -11,6 +12,17 @@
 #include "SID.c"
 
 #include "C64_SIDrouting.c"
+
+#ifdef CRSID_SPLIT
+/* Split mode: local SID instances (used outside split mode; in split mode
+ * the same five live in FLPR SRAM so the blob touches them locally). The
+ * blob must carry no writable globals (see flpr/linker.ld), so it gets a
+ * constant "always split" flag instead of the variable. */
+#ifndef FLPR_BLOB
+static cRSID_SIDinstance cRSID_SIDlocal[CRSID_SIDCOUNT_MAX+1];
+char cRSID_splitMode; /* 1 = M33 runs the CPU, the FLPR the SID */
+#endif
+#endif
 
 extern int sid_frame_calls; //device debug counter (play-routine frames since boot); defined by the app shim (or test harness)
 
@@ -27,6 +39,9 @@ cRSID_C64instance* cRSID_createC64 (unsigned short samplerate) { //init a basic 
  cRSID_C64.OversampleClockRatio = (samplerate << CRSID_RESAMPLER_FRACTIONAL_BITS) / CRSID_PAL_AUDIO_CLOCK; //round( SID_AUDIO_CLOCK / C64->SampleRate );
  cRSID_C64.OversampleClockRatioReciproc = CRSID_PAL_AUDIO_CLOCK / cRSID_C64.SampleRate; //round?
 
+#if defined(CRSID_SPLIT) && !defined(FLPR_BLOB)
+ cRSID_C64.SID = cRSID_SIDlocal;
+#endif
  cRSID_C64.SIDchipCount=cRSID_C64.AudioThread_SIDchipCount=1; //init audio-thread's version as well
  cRSID_C64.Attenuation = ((SID_FULLVOLUME+26) * CRSID_PRESAT_ATT_NOM) / (CRSID_PRESAT_ATT_DENOM * CRSID_WAVGEN_PREDIV);
  //cRSID_C64.CPU.C64 = C64;
@@ -194,6 +209,9 @@ CRSID_HOT_CODE cRSID_Output* cRSID_emulateC64 () {
  static enum { VUMETER_LOWPASS_DIV = 16, VUMETER_DIVSHIFTS = (4 - CRSID_WAVGEN_PRESHIFT) } VUmeterParameters;
 
  FASTVAR unsigned char InstructionCycles;
+#ifdef CRSID_SPLIT
+ unsigned short SplitCycles = 0; //sum of this sample's instruction cycles
+#endif
  static unsigned char VUmeterUpdateCounter;
  static cRSID_Output* Output;
 
@@ -238,6 +256,13 @@ CRSID_HOT_CODE cRSID_Output* cRSID_emulateC64 () {
 
   cRSID_C64.SampleCycleCnt += (InstructionCycles << CRSID_CLOCK_FRACTIONAL_BITS);
 
+#ifdef CRSID_SPLIT
+  SplitCycles += InstructionCycles;
+#endif
+#ifdef CRSID_SPLIT
+  if (!cRSID_splitMode)
+#endif
+  {
   //OPT: event-driven envelope stepping (exact upstream window semantics).
   //Per SID the instruction cycles fold into ADSRacc and a pass runs only
   //when they can reach the earliest possible envelope event; SID-register
@@ -264,10 +289,20 @@ CRSID_HOT_CODE cRSID_Output* cRSID_emulateC64 () {
     cRSID_C64.SID[4].ADSRacc = acc;
   }
 
+  }
  } //end of 1MHz cycle-based emulations (CPU, VIC, CIA, ADSR)
  cRSID_C64.SampleCycleCnt -= cRSID_C64.SampleClockRatio;
 
 
+#if defined(CRSID_SPLIT) && !defined(FLPR_BLOB)
+ if ( RARELY (cRSID_splitMode) ) { //M33 side: publish this sample's cycles, no SID
+  uint32_t sx = FLPR_SPLIT->prod % FLPR_SID_RING;
+
+  FLPR_SID_CYC[sx] = SplitCycles;
+  FLPR_SPLIT->prod = FLPR_SPLIT->prod + 1;
+  { static cRSID_Output ZeroOut = {0,0}; return &ZeroOut; }
+ }
+#endif
  if ( TIGHTLY (cRSID_C64.HighQualitySID) ) { //oversampled waveform-generation (although delayed ~22 cycles (~5 instructions) compared to CPU, shouldn't cause many issues (apart from cycle-exact SID-routines reading OSC3))
   if ( TIGHTLY (cRSID_C64.HighQualityResampler) ) cRSID_emulateHQresampledSIDs(); //high-quality but more CPU-hungry Sinc-based resampler (decimator)
   else cRSID_emulateOversampledSIDwaves(); //fast simple (but lower-quality) averager (box-filter) resampler
@@ -315,3 +350,66 @@ CRSID_HOT_CODE cRSID_Output* cRSID_emulateC64 () {
 
 
 
+
+
+#ifdef CRSID_SPLIT
+/* Relocate the SID instances: the FLPR blob runs the SID stage from its
+ * own SRAM in split mode. Reload the tune afterwards so the new
+ * instances are created and BasePtr points at the register mirror. */
+void cRSID_setSplit (char on) {
+#ifdef FLPR_BLOB
+ (void)on; /* always split on the blob side */
+#else
+ int n;
+
+ if ( (on ? 1 : 0) == cRSID_splitMode ) return;
+ /* Move the live instances to the new home, then re-create the chips:
+  * createSIDchip is what points BasePtr at the register block for the
+  * side that runs the SID stage. */
+ if ( on ) {
+  int i;
+
+  memcpy( (void*)FLPR_SID_BASE, cRSID_SIDlocal, sizeof(cRSID_SIDlocal) );
+  //fresh register mirror/readback for the blob (the tune load fills it)
+  for (i=0; i<32; ++i) ((volatile unsigned char*)FLPR_SID_REGS)[i] = 0;
+  for (i=0; i<32; ++i) ((volatile unsigned char*)FLPR_SID_RDBK)[i] = 0;
+  cRSID_splitMode = 1;
+  cRSID_C64.SID = (cRSID_SIDinstance*)FLPR_SID_BASE;
+ } else {
+  memcpy( cRSID_SIDlocal, (void*)FLPR_SID_BASE, sizeof(cRSID_SIDlocal) );
+  cRSID_splitMode = 0;
+  cRSID_C64.SID = cRSID_SIDlocal;
+ }
+ for (n=1; n<=CRSID_SIDCOUNT_MAX; ++n) {
+  cRSID_SIDinstance* SID = &cRSID_C64.SID[n];
+  unsigned short base = SID->BaseAddress;
+
+  if ( base ) cRSID_createSIDchip( SID, SID->ChipModel, (char)SID->Channel, base );
+ }
+#endif
+}
+
+
+/* FLPR side: advance the ADSR by one sample's recorded instruction
+ * cycles and run the per-sample SID waveform/filter stage. Called once
+ * per sample by the blob; consumes one entry of the cycle ring. */
+cRSID_Output cRSID_emulateSplitSample (void) {
+ uint32_t i = FLPR_SPLIT->cons % FLPR_SID_RING;
+ unsigned short cyc = FLPR_SID_CYC[i];
+ cRSID_Output Out;
+ int n;
+
+ for (n=1; n<=CRSID_SIDCOUNT_MAX; ++n) {
+  cRSID_SIDinstance* SID = &cRSID_C64.SID[n];
+  FASTVAR unsigned short acc;
+
+  if (n > 1 && SID->BaseAddress == 0) continue; //unused SID
+  acc = SID->ADSRacc + cyc;
+  if ( acc >= SID->ADSRthr ) { cRSID_emulateADSRs( SID, (unsigned short)(acc - cyc), (unsigned char)cyc ); acc = 0; }
+  SID->ADSRacc = acc;
+ }
+ Out = *cRSID_emulateLightSIDs();
+ FLPR_SPLIT->cons = FLPR_SPLIT->cons + 1;
+ return Out;
+}
+#endif

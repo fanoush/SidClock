@@ -31,7 +31,7 @@
  * docs/flpr.md). The M33 keeps its own SRAM - this is the FLPR-side
  * window. */
 #define FLPR_CODERAM_BASE 0x2002F000UL
-#define FLPR_CODERAM_SIZE 0x0000E000UL /* 56 KB: cRSID_emulateC64 */
+#define FLPR_CODERAM_SIZE 0x0000D000UL /* 52 KB: cRSID_emulateC64 */
 
 /* PCM ring: int16 mono frames, written by the FLPR, drained by the M33
  * audio path. 8 KB (4096 frames, ~0.19 s at 22 kHz) rides out the M33's
@@ -44,11 +44,46 @@
  * the ring past its reserved window into private RAM, the mailbox and
  * finally past the end of SRAM (M33 bus fault at 0x20043460).
  * blob_audit.py --check-ram enforces the relation and the layout. */
-#define FLPR_RING_BASE 0x2003D000UL
+#define FLPR_RING_BASE 0x2003C000UL
 #define FLPR_RING_SIZE 0x00002000UL /* 8 KB of int16 frames */
 #define FLPR_RING_FRAMES (FLPR_RING_SIZE / 2U) /* 4096 frames */
 
-/* Shared control struct (1 KB at the top of SRAM). */
+/* --- split mode: M33 runs the C64/CPU, the FLPR runs the SID ---------
+ *
+ * The SID stage is ~59% of the emulation and the 6510 interpreter ~41%,
+ * so the engine is split at the existing boundary: the M33 runs the
+ * per-instruction cycle loop (CPU, CIA/VIC, memory) and records the
+ * instruction cycles of every sample, the FLPR advances the ADSR and
+ * runs the per-sample SID waveform/filter stage into the audio ring.
+ *
+ * The SID instances live here (FLPR SRAM) so the blob touches them
+ * locally; the M33 creates/initialises them through the same pointer
+ * (both cores see all SRAM). The register block is mirrored by the M33
+ * on every SID write, so the blob reads registers locally too.
+ */
+#define FLPR_SPLIT_BASE 0x2003E000UL
+#define FLPR_SPLIT_SIZE 0x00001000UL /* 4 KB */
+
+#define FLPR_SID_BASE (FLPR_SPLIT_BASE + 0x0000UL) /* 5 x 448 B instances */
+#define FLPR_SID_REGS (FLPR_SPLIT_BASE + 0x08C0UL) /* $D400..$D41F mirror */
+#define FLPR_SID_RDBK (FLPR_SPLIT_BASE + 0x08E0UL) /* $D419..$D41F readback */
+#define FLPR_SID_CYCLES (FLPR_SPLIT_BASE + 0x0900UL) /* u16 per sample */
+#define FLPR_SID_RING 640U /* two audio buffers of cycle counts */
+
+/* Shared split control (same page). */
+#define FLPR_SPLIT_CTRL (FLPR_SPLIT_BASE + 0x0E00UL)
+
+struct flpr_split {
+	uint32_t enable;  /* 1 = split mode active */
+	uint32_t prod;    /* samples the M33 has emulated */
+	uint32_t cons;    /* samples the FLPR has rendered */
+	uint32_t reinit;  /* bumped by the M33 on load/reset */
+	uint32_t reinit_ack;
+};
+
+#define FLPR_SPLIT ((volatile struct flpr_split *)FLPR_SPLIT_CTRL)
+#define FLPR_SID_CYC ((volatile uint16_t *)FLPR_SID_CYCLES)
+#define FLPR_SID_REGP ((volatile uint8_t *)FLPR_SID_REGS)
 #define FLPR_SHARED_BASE 0x2003FC00UL
 #define FLPR_SHARED_SIZE 0x00000400UL
 

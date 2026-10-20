@@ -7,8 +7,9 @@
  * launch at boot (NORDIC_VPR_LAUNCHER=n). Only the FLPR-side SRAM is
  * reserved here - the M33 never links any of it:
  *
- *   SRAM  0x2002F000-0x2003CFFF (56 KB) hot engine code (cRSID_emulateC64)
- *   SRAM  0x2003D000-0x2003EFFF (8 KB)  PCM ring (FLPR -> M33 audio)
+ *   SRAM  0x2002F000-0x2003BFFF (52 KB) hot engine code (cRSID_emulateC64)
+ *   SRAM  0x2003C000-0x2003DFFF (8 KB)  PCM ring (FLPR -> M33 audio)
+ *   SRAM  0x2003E000-0x2003EFFF (4 KB)  split mode: SID instances, regs, cycles
  *   SRAM  0x2003F000-0x2003FBFF (3 KB)  FLPR private RAM, 1 KB stack on top
  *   SRAM  0x2003FC00-0x2003FFFF (1 KB)  shared control struct
  *
@@ -22,10 +23,13 @@
 			#address-cells = <1>;
 			#size-cells = <1>;
 			flpr_code_ram: memory@2002f000 {
-				reg = <0x2002F000 0xE000>;
+				reg = <0x2002F000 0xD000>;
 			};
-			flpr_ring_ram: memory@2003d000 {
-				reg = <0x2003D000 0x2000>;
+			flpr_ring_ram: memory@2003c000 {
+				reg = <0x2003C000 0x2000>;
+			};
+			flpr_split_ram: memory@2003e000 {
+				reg = <0x2003E000 0x1000>;
 			};
 			flpr_priv_ram: memory@2003f000 {
 				reg = <0x2003F000 0xC00>;
