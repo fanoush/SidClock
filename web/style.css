@@ -376,6 +376,12 @@ footer a { color: var(--accent2); text-decoration: none; }
 }
 .tune .tstate.ok { color: var(--accent); }
 .tune .tstate.err { color: var(--err); }
+.tune .ondevice {
+  color: var(--accent);
+  font-size: 12.5px;
+  font-weight: 600;
+  white-space: nowrap;
+}
 .tune .progress { margin: 10px 0 0; }
 .tune .progress .bar {
   height: 100%;

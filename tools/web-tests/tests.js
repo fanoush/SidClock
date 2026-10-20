@@ -19,6 +19,7 @@ import {
   parseLengths, parseSonglengths, stilIndex, buildStil, stripTimeRange,
   deviceNameFor, searchSids, getSidDetails, downloadSid, loadSonglengths,
   loadStil, makeLen, makeStil, tuneInfo, tuneLookup, rememberUpload,
+  uploadedIds, nameKey, deviceNameKeys, onDeviceByTitle,
   SEARCH_FIELDS, filterSids, fileMd5,
 } from '../../web/hvsc.js';
 
@@ -929,6 +930,45 @@ await test('hvsc: device file names', () => {
   eq(deviceNameFor('The_Great_Giana_Sisters.sid'), 'The_Great_Giana_.sid');
   ok(deviceNameFor('a_very_long_hvsc_file_name.sid').length <= 20,
      'never longer than 20');
+});
+
+await test('hvsc: uploadedIds marks what is still on the device', () => {
+  const uploads = {
+    'Short.sid': { id: 11, file: 'Short.sid' },
+    'A_Very_Long_Name.sid': { id: 22, file: 'A_Very_Long_Name_Original.sid' },
+    'Gone.sid': { id: 33, file: 'Gone.sid' },
+    'No_Id.sid': { file: 'No_Id.sid' },
+  };
+  const ids = uploadedIds(uploads, ['Short.sid', 'A_Very_Long_Name.sid',
+                                    'No_Id.sid', 'Other.sid']);
+  eq([...ids].sort(), ['11', '22'], 'ids of files still listed');
+  ok(!ids.has('33'), 'deleted file is not marked');
+  eq([...uploadedIds(null, ['Short.sid'])], [], 'no upload log');
+  eq([...uploadedIds(uploads, [])], [], 'nothing on the device');
+});
+
+await test('hvsc: name keys mark files that are already on the device', () => {
+  eq(nameKey('RoboCop 3'), 'robocop3', 'space');
+  eq(nameKey('RoboCop_3.sid'), 'robocop3', 'underscore + .sid');
+  eq(nameKey('IK+'), 'ikplus', 'plus reads as plus');
+  eq(nameKey('IK_plus.sid'), 'ikplus', 'IK_plus');
+  eq(nameKey(''), '', 'empty');
+
+  const keys = deviceNameKeys([
+    'RoboCop_3.sid', 'Supremacy.sid', 'IK_plus.sid', 'Neverending_Stor.sid',
+    'Gone.len', 'RoboCop_3.len',
+  ]);
+  ok(onDeviceByTitle(keys, 'RoboCop 3'), 'exact title');
+  ok(onDeviceByTitle(keys, 'Supremacy'), 'exact title 2');
+  ok(onDeviceByTitle(keys, 'robocop 3'), 'case-insensitive');
+  ok(onDeviceByTitle(keys, 'IK+'), 'plus variant');
+  ok(onDeviceByTitle(keys, 'Neverending Story'), '16-char stem prefix');
+  ok(!onDeviceByTitle(keys, 'RoboCop 2'), 'different sequel is not marked');
+  ok(!onDeviceByTitle(keys, 'Last Ninja'), 'not in the listing');
+  ok(!onDeviceByTitle(keys, ''), 'empty title');
+  // the listing is authoritative: an empty /home marks nothing
+  const empty = deviceNameKeys([]);
+  ok(!onDeviceByTitle(empty, 'Supremacy'), 'empty listing');
 });
 
 await test('hvsc: search field filter', () => {

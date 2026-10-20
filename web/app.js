@@ -28,6 +28,8 @@ let currentInfo = null;      // last info read (title / name / author)
 let currentState = null;     // last pushed player state
 let smp = null;              // SMP client while connected in R/W mode
 let library = null;          // names in /home, or null when unknown
+let deviceIds = new Set();   // HVSC ids uploaded into a name still in /home
+let deviceKeys = { exact: new Set(), short: new Set() }; // /home names by title
 let busy = null;             // what long operation is running, if any
 let metaKey = '';            // what the HVSC info card currently shows
 let infoReading = null;      // an info read in flight
@@ -97,6 +99,8 @@ function setConnected(ok) {
     $('devtime').classList.remove('warn');
     smp = null;
     library = null;
+    deviceIds = new Set();
+    deviceKeys = { exact: new Set(), short: new Set() };
     busy = null;
     renderLibrary();
   }
@@ -475,8 +479,20 @@ function appendResults() {
   for (let i = searchShown; i < end; i++) ul.append(tuneRow(searchResults[i]));
   searchShown = end;
   ul.hidden = searchResults.length === 0;
+  syncResultsOnDevice();
   updateSearchStatus();
   refreshControls();
+}
+
+/** Toggle the "on device" marker / upload button on every search row for
+ *  the current /home listing (called on render and after a listing). */
+function syncResultsOnDevice() {
+  for (const li of $('results').children) {
+    const on = deviceIds.has(li.dataset.id) ||
+      hvsc.onDeviceByTitle(deviceKeys, li.dataset.title);
+    li.querySelector('.ondevice').hidden = !on;
+    li.querySelector('.upload').hidden = on;
+  }
 }
 
 function updateSearchStatus() {
@@ -503,6 +519,8 @@ function updateSearchStatus() {
 function tuneRow(res) {
   const li = document.createElement('li');
   li.className = 'tune';
+  li.dataset.id = String(res.id);
+  li.dataset.title = res.title || '';
 
   const name = document.createElement('div');
   name.className = 'tname';
@@ -524,11 +542,16 @@ function tuneRow(res) {
   row.className = 'trow';
   const state = document.createElement('span');
   state.className = 'tstate';
+  const ondev = document.createElement('span');
+  ondev.className = 'ondevice';
+  ondev.textContent = 'on device ✓';
+  ondev.title = 'already in /home (uploaded from this browser, or the file name matches)';
+  ondev.hidden = true;
   const upload = document.createElement('button');
   upload.type = 'button';
   upload.className = 'btn small upload';
   upload.textContent = 'upload';
-  row.append(state, upload);
+  row.append(state, ondev, upload);
   li.append(name, meta, bar, row);
 
   const ui = {
@@ -652,15 +675,24 @@ async function uploadTune(res, ui) {
 async function refreshLibrary() {
   if (!sc.connected) {
     library = null;
+    deviceIds = new Set();
+    deviceKeys = { exact: new Set(), short: new Set() };
     renderLibrary();
     return;
   }
   try {
     library = new Set(await sc.listFiles());
+    /* which HVSC tunes are already there: the upload map covers tunes
+     * this browser put in /home (the id survives renaming), the name
+     * keys cover everything else that is on the device */
+    deviceIds = hvsc.uploadedIds(await hvsc.uploadMap(), library);
+    deviceKeys = hvsc.deviceNameKeys(library);
     renderLibrary();
   } catch (e) {
     console.warn('listing failed', e);
     library = null;
+    deviceIds = new Set();
+    deviceKeys = { exact: new Set(), short: new Set() };
     renderLibrary(true);
   }
 }
@@ -715,6 +747,7 @@ function renderLibrary(failed = false) {
   $('libinfo').textContent = failed ? 'needs R/W mode'
     : library ? `${sids.length} tune${sids.length === 1 ? '' : 's'}`
     : sc.connected ? 'not listed' : 'not connected';
+  syncResultsOnDevice();
   refreshControls();
 }
 

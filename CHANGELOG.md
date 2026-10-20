@@ -75,6 +75,12 @@
   above the search card and is a collapsed `<details>` now - its header
   keeps the tune count and the refresh button - so a long result list
   cannot bury it, and neither can a long device list bury the search.
+- **Web remote: "already on the device" markers**. Search results now
+  remember what this browser uploaded - the upload map plus the `/home`
+  listing - so a tune that is still on the device shows a green
+  "on device ✓" instead of the upload button. The match is the HVSC id,
+  not the file name, so shortened/renamed uploads and the ~3,700
+  same-name HVSC files are not confused.
 - `tools/web-tests/`: browser test page for the web remote's libraries -
   MD5 vectors (including padding block boundaries), CBOR encoding checked
   byte-for-byte against `cbor2` canonical output, SMP upload/download/
@@ -128,6 +134,13 @@
   page test drives the real page against a fake device that rejects a
   state read before the CCC write (and a wedged CCC write), so the
   ordering and the recovery cannot regress.
+- Search results in the web remote now show "on device" for tunes that
+  were uploaded from another browser (or before the page kept an upload
+  log): besides the exact HVSC id from the upload map, a result is
+  matched by its title against the `/home` names, ignoring case,
+  punctuation and `_`/space ("RoboCop 3" = `RoboCop_3.sid`, "IK+" =
+  `IK_plus.sid`), including the 16-character stem of a shortened file
+  name.
 - Player commands from BLE now run in the main loop instead of the
   Bluetooth receive workqueue. That workqueue's 2 KB stack was already at
   96 % during a tune load and "next tune" adds a directory scan on top:

@@ -451,6 +451,68 @@ export async function uploadInfo(deviceName) {
   return map[deviceName] || null;
 }
 
+/** The whole remembered device name -> HVSC identity map. */
+export async function uploadMap() {
+  return (await idbGet('uploads')) || {};
+}
+
+/** The HVSC ids of tunes uploaded from this browser whose device file is
+ *  still in `files` (the /home listing). Search results use it to show
+ *  "on device" instead of "upload": the id survives renaming/shortening,
+ *  so a result is only marked when its own upload record is still
+ *  present - two results can share one device file name, and then only
+ *  the one that was actually uploaded counts. */
+export function uploadedIds(uploads, files) {
+  const present = new Set(files);
+  const ids = new Set();
+  for (const [deviceName, info] of Object.entries(uploads || {})) {
+    if (info && info.id != null && present.has(deviceName)) {
+      ids.add(String(info.id));
+    }
+  }
+  return ids;
+}
+
+/** Case/punctuation-free comparison key: "RoboCop 3" and "RoboCop_3.sid"
+ *  both give "robocop3"; "+" reads as "plus" ("IK+" == "IK_plus.sid"). */
+export function nameKey(text) {
+  return String(text || '')
+    .replace(/\.sid$/i, '')
+    .replace(/\+/g, 'plus')
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, '');
+}
+
+/** Device listing -> keys for matching search results by title, for tunes
+ *  that are on /home but have no upload record from this browser (added
+ *  elsewhere, or uploaded before the page kept the map). `short` holds the
+ *  16-character stems: deviceNameFor() cuts longer HVSC file names there,
+ *  so "Neverending_Stor.sid" still matches "Neverending Story". */
+export function deviceNameKeys(files) {
+  const exact = new Set();
+  const short = new Set();
+  for (const f of files || []) {
+    if (!/\.sid$/i.test(f)) continue;
+    const stem = f.replace(/\.sid$/i, '');
+    const k = nameKey(stem);
+    if (!k) continue;
+    exact.add(k);
+    if (stem.length === 16) short.add(k);
+  }
+  return { exact, short };
+}
+
+/** True when a search result's title names a file in the device listing. */
+export function onDeviceByTitle(keys, title) {
+  const k = nameKey(title);
+  if (!k) return false;
+  if (keys.exact.has(k)) return true;
+  for (const s of keys.short) {
+    if (k.startsWith(s)) return true;
+  }
+  return false;
+}
+
 /**
  * The matching itself (pure - the caller supplies the parsed indexes,
  * the device file name, the device's whole-file md5 prefix and the
