@@ -484,6 +484,8 @@ def _player_state(raw):
         "paused": bool(flags & 0x02),
         "sound": bool(flags & 0x04),
         "legacy": bool(flags & 0x08),
+        "flpr": bool(flags & 0x10),
+        "split": bool(flags & 0x20),
         "subtune": raw[1],  # 0-based on the wire, 1-based in every print
         "songs": raw[2],
         "end": raw[3],
@@ -810,7 +812,9 @@ async def cmd_state(addr):
         info = _player_info(await _read_char(c, PLAYER_INFO_CHAR, "state"))
     if state is None:
         raise SystemExit("state: unexpected value from the device")
-    engine = "legacy" if state["legacy"] else "cRSID"
+    engine = ("legacy" if state["legacy"] else
+              "split (M33 CPU + FLPR SID)" if state.get("split") else
+              "cRSID on FLPR" if state.get("flpr") else "cRSID")
     print(f"player:  {_state_line(state)}")
     print(f"engine:  {engine}")
     if info["title"] or info["name"]:
