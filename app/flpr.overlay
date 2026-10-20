@@ -1,0 +1,45 @@
+/*
+ * flpr.overlay - FLPR (VPR RISC-V) resources for the bare-metal spike.
+ *
+ * Deliberately not the nordic-flpr snippet: the blob is embedded in the
+ * M33 image as flpr_blob[] (position-independent, XIP wherever the
+ * linker put it), so there is no fixed flash partition and nothing to
+ * launch at boot (NORDIC_VPR_LAUNCHER=n). Only RAM is reserved here:
+ *
+ *   SRAM  0x20034000-0x2003DFFF (32 KB) PCM ring (FLPR -> M33 audio)
+ *   SRAM  0x2003E000-0x2003FBFF (7 KB) FLPR private RAM (.got/.data/.bss,
+ *                                          1 KB stack on top)
+ *   SRAM  0x2003FC00-0x2003FFFF (1 KB) shared control struct
+ *
+ * Both sit in the FLPR-side 68 KB SRAM window (0x2002F000+, outside the
+ * M33's 188 KB link region), so the M33 keeps all of its RAM.
+ * Runtime start/stop from the M33 goes through hal/nrf_vpr.h directly.
+ */
+
+/ {
+	soc {
+		reserved-memory {
+			#address-cells = <1>;
+			#size-cells = <1>;
+			flpr_ring_ram: memory@20034000 {
+				reg = <0x20034000 0x8000>;
+			};
+			flpr_priv_ram: memory@2003e000 {
+				reg = <0x2003E000 0x1C00>;
+			};
+			flpr_shared_ram: memory@2003fc00 {
+				reg = <0x2003FC00 0x400>;
+			};
+		};
+	};
+};
+
+&cpuapp_vevif_tx {
+	status = "okay";
+};
+
+/* Keep the UART free for the FLPR side (no UART is wired on this board;
+ * logging goes over RTT/BLE either way). */
+&uart30 {
+	status = "reserved";
+};

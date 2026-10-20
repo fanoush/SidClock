@@ -49,6 +49,7 @@ dl() { # url file
 dl https://github.com/zephyrproject-rtos/sdk-ng/releases/download/v0.17.0/zephyr-sdk-0.17.0_linux-${SDK_ARCH}_minimal.tar.xz "$TOOLS/sdk-minimal.tar.xz"
 dl https://github.com/zephyrproject-rtos/sdk-ng/releases/download/v0.17.0/hosttools_linux-${SDK_ARCH}.tar.xz "$TOOLS/hosttools.tar.xz"
 dl https://github.com/zephyrproject-rtos/sdk-ng/releases/download/v0.17.0/toolchain_linux-${SDK_ARCH}_arm-zephyr-eabi.tar.xz "$TOOLS/arm-zephyr-eabi.tar.xz"
+dl https://github.com/zephyrproject-rtos/sdk-ng/releases/download/v0.17.0/toolchain_linux-${SDK_ARCH}_riscv64-zephyr-elf.tar.xz "$TOOLS/riscv64-zephyr-elf.tar.xz"
 
 # --- sources (pinned revisions) ---
 dl https://codeload.github.com/nrfconnect/sdk-zephyr/tar.gz/f791c49f492c "$SRC/zephyr.tar.gz"
@@ -97,6 +98,7 @@ if [ ! -d "$SDKDIR" ]; then
 fi
 [ -d "$SDKDIR/hosttools" ] || tar -xf "$TOOLS/hosttools.tar.xz" -C "$SDKDIR"
 [ -d "$SDKDIR/arm-zephyr-eabi" ] || tar -xf "$TOOLS/arm-zephyr-eabi.tar.xz" -C "$SDKDIR"
+[ -d "$SDKDIR/riscv64-zephyr-elf" ] || tar -xf "$TOOLS/riscv64-zephyr-elf.tar.xz" -C "$SDKDIR"
 
 if [ ! -x "$TOOLS/bin/ninja" ] && [ -s "$SRC/ninja-linux.zip" ]; then
 	mkdir -p "$TOOLS/bin"
