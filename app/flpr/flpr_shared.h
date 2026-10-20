@@ -64,21 +64,32 @@
 #define FLPR_SPLIT_BASE 0x2003E000UL
 #define FLPR_SPLIT_SIZE 0x00001000UL /* 4 KB */
 
-#define FLPR_SID_BASE (FLPR_SPLIT_BASE + 0x0000UL) /* 5 x 448 B instances */
-#define FLPR_SID_REGS (FLPR_SPLIT_BASE + 0x08C0UL) /* $D400..$D41F mirror */
-#define FLPR_SID_RDBK (FLPR_SPLIT_BASE + 0x08E0UL) /* $D419..$D41F readback */
-#define FLPR_SID_CYCLES (FLPR_SPLIT_BASE + 0x0900UL) /* u16 per sample */
+#define FLPR_SID_CYCLES (FLPR_SPLIT_BASE + 0x0000UL) /* u16 per sample */
 #define FLPR_SID_RING 640U /* two audio buffers of cycle counts */
+#define FLPR_SID_REGCOPY (FLPR_SPLIT_BASE + 0x0800UL) /* M33 SID register copy */
+
+/* SID register-write events, FLPR -> M33. The blob (CPU) runs ahead of
+ * the M33's SID rendering, so a write must carry the sample it belongs
+ * to; the M33 applies it to its own register copy right before it
+ * renders that sample. The ring shares the PCM ring region: the two
+ * modes (whole engine on the blob, split) never run together. */
+#define FLPR_EVENTS_MAX 2048U
+struct flpr_event {
+	uint16_t pos; /* sample index (mod 65536) */
+	uint8_t reg;  /* $D400 + reg */
+	uint8_t val;
+};
+#define FLPR_EVENTS ((volatile struct flpr_event *)FLPR_RING_BASE)
 
 /* Shared split control (same page). */
 #define FLPR_SPLIT_CTRL (FLPR_SPLIT_BASE + 0x0E00UL)
 
 struct flpr_split {
-	uint32_t enable;  /* 1 = split mode active */
-	uint32_t prod;    /* samples the M33 has emulated */
-	uint32_t cons;    /* samples the FLPR has rendered */
-	uint32_t reinit;  /* bumped by the M33 on load/reset */
-	uint32_t reinit_ack;
+	uint32_t enable; /* 1 = split mode active */
+	uint32_t prod;   /* samples the blob has emulated (CPU) */
+	uint32_t cons;   /* samples the M33 has rendered (SID) */
+	uint32_t eprod;  /* SID write events produced */
+	uint32_t econs;  /* SID write events consumed */
 };
 
 #define FLPR_SPLIT ((volatile struct flpr_split *)FLPR_SPLIT_CTRL)

@@ -219,7 +219,7 @@ static INLINE char cRSID_handleCPUinterrupts ();
 // C64/SID.c
 void               cRSID_createSIDchip (cRSID_SIDinstance* SID, unsigned short model, char channel, unsigned short baseaddress);
 void               cRSID_setSplit (char on); //relocate SID instances to FLPR SRAM / back
-cRSID_Output       cRSID_emulateSplitSample (void); //blob side: one SID-only sample
+int                cRSID_renderSplitSample (void); //split B, M33: one SID-only sample
 void               cRSID_initSIDchip   (cRSID_SIDinstance* SID);
 static INLINE int  cRSID_emulateHQresampledSID (FASTVAR cRSID_SIDinstance *const FASTPTR SID, FASTVAR char cycles);
 // C64/SID_ADSR.c

@@ -58,9 +58,24 @@ static INLINE void wr (FASTVAR unsigned short address, FASTVAR unsigned char dat
  if (RARELY (0xD400 <= address && address <= 0xDFFF)) { //OPT: any SID-reg write must force an envelope pass (see SID_ADSR.c)
   if (TIGHTLY (cRSID_C64.SID[1].BaseAddress <= address && address < cRSID_C64.SID[1].BaseAddress+0x1C)) { cRSID_C64.SID[1].ADSRthr = 0; //the pending folded cycles must never be merged under the new state
 #ifdef CRSID_SPLIT
-   //Split engine: the SID stage runs on the FLPR and reads its registers
-   //from its own SRAM - mirror the write (SID writes are rare).
-   if ( RARELY (cRSID_splitMode) ) ((volatile unsigned char*)FLPR_SID_REGS)[address - 0xD400] = data;
+   /* Split engine. On the blob the CPU runs ahead of the M33's SID
+    * rendering, so the write becomes an event the M33 applies right
+    * before rendering that sample. On the M33 (tune load/init) the SID
+    * registers are written straight into its own copy. */
+   if ( RARELY (cRSID_splitMode) ) {
+#ifdef FLPR_BLOB
+    uint32_t ev = FLPR_SPLIT->eprod % FLPR_EVENTS_MAX;
+
+    if ( (uint32_t)(FLPR_SPLIT->eprod - FLPR_SPLIT->econs) < FLPR_EVENTS_MAX ) {
+     FLPR_EVENTS[ev].pos = (unsigned short)(FLPR_SPLIT->prod & 0xFFFF);
+     FLPR_EVENTS[ev].reg = (unsigned char)(address - 0xD400);
+     FLPR_EVENTS[ev].val = data;
+     FLPR_SPLIT->eprod = FLPR_SPLIT->eprod + 1;
+    }
+#else
+    ((volatile unsigned char*)FLPR_SID_REGCOPY)[address - 0xD400] = data;
+#endif
+   }
 #endif
   }
   if (cRSID_C64.SID[2].BaseAddress != 0 && cRSID_C64.SID[2].BaseAddress <= address && address < cRSID_C64.SID[2].BaseAddress+0x1C) cRSID_C64.SID[2].ADSRthr = 0;
@@ -82,9 +97,24 @@ static INLINE void wr2 (FASTVAR unsigned short address, FASTVAR unsigned char da
  if (RARELY (0xD400 <= address && address <= 0xDFFF)) { //OPT: any SID-reg write must force an envelope pass (see wr() and SID_ADSR.c)
   if (TIGHTLY (cRSID_C64.SID[1].BaseAddress <= address && address < cRSID_C64.SID[1].BaseAddress+0x1C)) { cRSID_C64.SID[1].ADSRthr = 0; //the pending folded cycles must never be merged under the new state
 #ifdef CRSID_SPLIT
-   //Split engine: the SID stage runs on the FLPR and reads its registers
-   //from its own SRAM - mirror the write (SID writes are rare).
-   if ( RARELY (cRSID_splitMode) ) ((volatile unsigned char*)FLPR_SID_REGS)[address - 0xD400] = data;
+   /* Split engine. On the blob the CPU runs ahead of the M33's SID
+    * rendering, so the write becomes an event the M33 applies right
+    * before rendering that sample. On the M33 (tune load/init) the SID
+    * registers are written straight into its own copy. */
+   if ( RARELY (cRSID_splitMode) ) {
+#ifdef FLPR_BLOB
+    uint32_t ev = FLPR_SPLIT->eprod % FLPR_EVENTS_MAX;
+
+    if ( (uint32_t)(FLPR_SPLIT->eprod - FLPR_SPLIT->econs) < FLPR_EVENTS_MAX ) {
+     FLPR_EVENTS[ev].pos = (unsigned short)(FLPR_SPLIT->prod & 0xFFFF);
+     FLPR_EVENTS[ev].reg = (unsigned char)(address - 0xD400);
+     FLPR_EVENTS[ev].val = data;
+     FLPR_SPLIT->eprod = FLPR_SPLIT->eprod + 1;
+    }
+#else
+    ((volatile unsigned char*)FLPR_SID_REGCOPY)[address - 0xD400] = data;
+#endif
+   }
 #endif
   }
   if (cRSID_C64.SID[2].BaseAddress != 0 && cRSID_C64.SID[2].BaseAddress <= address && address < cRSID_C64.SID[2].BaseAddress+0x1C) cRSID_C64.SID[2].ADSRthr = 0;

@@ -147,6 +147,14 @@ instruction cache), while the 6510 interpreter is *cheaper* on the FLPR
 offload: the better split is B - the M33 keeps only the SID stage and
 I2S (~11%) and the FLPR runs the C64/CPU (~40%).
 
+**ADSR windows must stay <= 7 cycles.** cRSID's envelope pass detects at
+most one shot per call and its quiet-voice folding assumes
+`cycles/call <= 7` (below any prescale period). Batching a whole sample
+(~45 cycles) into one call therefore advances slow envelopes once
+instead of several times - heard as a bass line fading out. The M33
+replays each sample's cycles in 7-cycle chunks, which matches the
+per-instruction fold closely (events can land up to 7 *cycles* off).
+
 A is the better split for UI responsiveness and the natural boundary:
 the per-sample SID stage (`cRSID_emulateLightSIDs`) is already separate
 from the per-instruction cycle loop. It needs the SID instance (voices,

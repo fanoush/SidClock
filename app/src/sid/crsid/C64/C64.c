@@ -259,7 +259,7 @@ CRSID_HOT_CODE cRSID_Output* cRSID_emulateC64 () {
 #ifdef CRSID_SPLIT
   SplitCycles += InstructionCycles;
 #endif
-#ifdef CRSID_SPLIT
+#if defined(CRSID_SPLIT) && defined(FLPR_BLOB)
   if (!cRSID_splitMode)
 #endif
   {
@@ -294,8 +294,8 @@ CRSID_HOT_CODE cRSID_Output* cRSID_emulateC64 () {
  cRSID_C64.SampleCycleCnt -= cRSID_C64.SampleClockRatio;
 
 
-#if defined(CRSID_SPLIT) && !defined(FLPR_BLOB)
- if ( RARELY (cRSID_splitMode) ) { //M33 side: publish this sample's cycles, no SID
+#if defined(CRSID_SPLIT) && defined(FLPR_BLOB)
+ if ( RARELY (cRSID_splitMode) ) { //CPU side: publish this sample's cycles, no SID
   uint32_t sx = FLPR_SPLIT->prod % FLPR_SID_RING;
 
   FLPR_SID_CYC[sx] = SplitCycles;
@@ -360,56 +360,66 @@ void cRSID_setSplit (char on) {
 #ifdef FLPR_BLOB
  (void)on; /* always split on the blob side */
 #else
- int n;
-
  if ( (on ? 1 : 0) == cRSID_splitMode ) return;
- /* Move the live instances to the new home, then re-create the chips:
-  * createSIDchip is what points BasePtr at the register block for the
-  * side that runs the SID stage. */
+ cRSID_splitMode = on ? 1 : 0;
  if ( on ) {
   int i;
 
-  memcpy( (void*)FLPR_SID_BASE, cRSID_SIDlocal, sizeof(cRSID_SIDlocal) );
-  //fresh register mirror/readback for the blob (the tune load fills it)
-  for (i=0; i<32; ++i) ((volatile unsigned char*)FLPR_SID_REGS)[i] = 0;
-  for (i=0; i<32; ++i) ((volatile unsigned char*)FLPR_SID_RDBK)[i] = 0;
-  cRSID_splitMode = 1;
-  cRSID_C64.SID = (cRSID_SIDinstance*)FLPR_SID_BASE;
- } else {
-  memcpy( cRSID_SIDlocal, (void*)FLPR_SID_BASE, sizeof(cRSID_SIDlocal) );
-  cRSID_splitMode = 0;
-  cRSID_C64.SID = cRSID_SIDlocal;
- }
- for (n=1; n<=CRSID_SIDCOUNT_MAX; ++n) {
-  cRSID_SIDinstance* SID = &cRSID_C64.SID[n];
-  unsigned short base = SID->BaseAddress;
+  /* Split B: the M33 renders the SID stage from its own register copy
+   * (the blob's CPU runs ahead and pushes writes as events). */
+  for (i=0; i<32; ++i) ((volatile unsigned char*)FLPR_SID_REGCOPY)[i] = 0;
+  for (i=1; i<=CRSID_SIDCOUNT_MAX; ++i) {
+   cRSID_SIDinstance* SID = &cRSID_C64.SID[i];
 
-  if ( base ) cRSID_createSIDchip( SID, SID->ChipModel, (char)SID->Channel, base );
+   if ( SID->BaseAddress ) cRSID_createSIDchip( SID, SID->ChipModel, (char)SID->Channel, SID->BaseAddress );
+  }
  }
 #endif
 }
 
 
-/* FLPR side: advance the ADSR by one sample's recorded instruction
- * cycles and run the per-sample SID waveform/filter stage. Called once
- * per sample by the blob; consumes one entry of the cycle ring. */
-cRSID_Output cRSID_emulateSplitSample (void) {
- uint32_t i = FLPR_SPLIT->cons % FLPR_SID_RING;
- unsigned short cyc = FLPR_SID_CYC[i];
- cRSID_Output Out;
+/* M33 side (split B): render one sample from the blob's cycle count and
+ * the SID writes it recorded. Events are applied just before the sample
+ * they belong to, so register timing stays within one sample. */
+int cRSID_renderSplitSample (void) {
+ uint32_t s = FLPR_SPLIT->cons;
+ uint16_t pos = (uint16_t)(s & 0xFFFF);
+ unsigned short cyc;
+ static cRSID_Output Out;
  int n;
+
+ if ( FLPR_SPLIT->prod == s ) return 0; //blob has not reached this sample yet
+ cyc = FLPR_SID_CYC[s % FLPR_SID_RING];
+
+ while ( FLPR_SPLIT->econs != FLPR_SPLIT->eprod ) {
+  uint32_t e = FLPR_SPLIT->econs % FLPR_EVENTS_MAX;
+
+  if ( (short)(FLPR_EVENTS[e].pos - pos) > 0 ) break; //belongs to a later sample
+  ((volatile unsigned char*)FLPR_SID_REGCOPY)[FLPR_EVENTS[e].reg] = FLPR_EVENTS[e].val;
+  FLPR_SPLIT->econs = FLPR_SPLIT->econs + 1;
+ }
 
  for (n=1; n<=CRSID_SIDCOUNT_MAX; ++n) {
   cRSID_SIDinstance* SID = &cRSID_C64.SID[n];
-  FASTVAR unsigned short acc;
+  FASTVAR unsigned short left = cyc;
 
   if (n > 1 && SID->BaseAddress == 0) continue; //unused SID
-  acc = SID->ADSRacc + cyc;
-  if ( acc >= SID->ADSRthr ) { cRSID_emulateADSRs( SID, (unsigned short)(acc - cyc), (unsigned char)cyc ); acc = 0; }
-  SID->ADSRacc = acc;
+  /* The ADSR pass expects instruction-sized windows: it detects at most
+   * one envelope shot per call and the quiet-voice folding assumes
+   * cycles/call <= 7 (< any prescale period). Replay the sample's cycles
+   * in <=7-cycle chunks, exactly like the per-instruction fold. */
+  while ( left ) {
+   FASTVAR unsigned short acc;
+   FASTVAR unsigned char w = (unsigned char)(left > 7 ? 7 : left);
+
+   acc = SID->ADSRacc + w;
+   if ( acc >= SID->ADSRthr ) { cRSID_emulateADSRs( SID, (unsigned short)(acc - w), w ); acc = 0; }
+   SID->ADSRacc = acc;
+   left -= w;
+  }
  }
  Out = *cRSID_emulateLightSIDs();
- FLPR_SPLIT->cons = FLPR_SPLIT->cons + 1;
- return Out;
+ FLPR_SPLIT->cons = s + 1;
+ return Out.L;
 }
 #endif

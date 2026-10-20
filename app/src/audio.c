@@ -44,6 +44,9 @@
 #include "flpr.h"
 #include "flpr_shared.h"
 
+/* Split B: render one SID-only sample on the M33 (C64.c). */
+extern int cRSID_renderSplitSample(void);
+
 LOG_MODULE_REGISTER(audio, LOG_LEVEL_INF);
 
 #define I2S_REGS ((NRF_I2S_Type *)0x500DD000UL)
@@ -319,17 +322,31 @@ static void fill_buffer(int32_t *dst)
 		fill_zeros(dst);
 	} else if (split_mode && sid_player_is_playing() &&
 		   !sid_player_is_paused()) {
-		/* M33: run the C64/CPU for this buffer (records the cycles the
-		 * blob needs), then drain what the blob rendered. The timing is
-		 * the M33's CPU-only share of the split (dbg[13]/[14] us). */
+		/* Split B: the blob has run the C64/CPU; render the SID stage
+		 * for this buffer from its cycle counts and events. dbg[13]/[14]
+		 * is the M33's share of the split. */
 		uint32_t c0 = k_cycle_get_32();
 		uint32_t dt;
 
-		sid_player_render(sid_scratch, (int)AUDIO_FRAMES);
+		if (FLPR_SPLIT->prod == FLPR_SPLIT->cons) {
+			/* the blob has not produced this buffer's samples yet */
+			flpr_underruns++;
+			dbg[2]++;
+		}
+		for (uint32_t i = 0; i < AUDIO_FRAMES; i++) {
+			int32_t s = cRSID_renderSplitSample();
+
+			s = (s * (int32_t)volume) >> 8;
+			s = (s * (int32_t)volume) >> 8;
+			stage[i * 2U] = (int16_t)s;
+			stage[i * 2U + 1U] = (int16_t)s;
+		}
+		sid_player_add_elapsed((int)AUDIO_FRAMES);
 		dt = k_cycle_get_32() - c0;
 		dbg[13] = (uint8_t)(dt & 0xFFU);
 		dbg[14] = (uint8_t)((dt >> 8) & 0xFFU);
-		drain_flpr_ring(dst);
+		pack(dst);
+		last_sound_ms = k_uptime_get_32();
 	} else if (flpr_pipe && !sid_player_is_paused()) {
 		drain_flpr_ring(dst);
 	} else if (sid_mode && sid_player_is_playing() &&
@@ -897,6 +914,8 @@ void audio_sid_start(void)
 		FLPR_SPLIT->enable = 1U;
 		FLPR_SPLIT->prod = 0U;
 		FLPR_SPLIT->cons = 0U;
+		FLPR_SPLIT->eprod = 0U;
+		FLPR_SPLIT->econs = 0U;
 		FLPR_SHARED->mode = 4U;
 		FLPR_SHARED->read_idx = FLPR_SHARED->write_idx;
 		FLPR_SHARED->underruns = 0U;

@@ -13,9 +13,6 @@
 #include "flpr_shared.h"
 #include "crsid/libcRSID.h"
 
-/* Split mode: one SID-only sample (defined in the engine's C64.c). */
-extern cRSID_Output cRSID_emulateSplitSample(void);
-
 #define BURST 512 /* frames per outer iteration (heartbeat keeps moving) */
 
 static void pump_sid(void)
@@ -86,22 +83,13 @@ static void pump_bench(void)
 	FLPR_SHARED->bench_done = 1U;
 }
 
-/* Split mode: the M33 has already run the CPU for each sample and
- * recorded its instruction cycles; advance the ADSR and run the SID
- * stage, one sample per cycle-ring entry, into the audio ring. */
+/* Split mode: run the C64/CPU ahead of the M33's SID rendering. Each
+ * sample's instruction cycles go into the shared ring and every SID
+ * register write becomes a timestamped event (see C64.c). */
 static void pump_split(void)
 {
-	while (FLPR_SPLIT->cons != FLPR_SPLIT->prod) {
-		uint32_t w = FLPR_SHARED->write_idx;
-		uint32_t r = FLPR_SHARED->read_idx;
-		cRSID_Output o;
-
-		if ((uint32_t)(w - r) >= FLPR_RING_FRAMES) {
-			break; /* ring full: the M33 drains first */
-		}
-		o = cRSID_emulateSplitSample();
-		FLPR_RING[w % FLPR_RING_FRAMES] = (int16_t)o.L;
-		FLPR_SHARED->write_idx = w + 1;
+	while ((uint32_t)(FLPR_SPLIT->prod - FLPR_SPLIT->cons) < 320U) {
+		cRSID_generateSample(); /* CPU only in split mode: no SID, no audio */
 	}
 }
 
