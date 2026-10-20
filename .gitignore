@@ -3,8 +3,6 @@ build/
 build-*/
 *.signed.bin
 
-# Generated FLPR blob array (app/build.sh regenerates it every build)
-app/src/flpr_blob.c
 # Generated FLPR link maps (rewritten on every build.sh run)
 app/flpr/memmap.ld
 app/flpr/datamap.ld

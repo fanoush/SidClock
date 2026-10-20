@@ -91,12 +91,10 @@ printf 'MEMORY {\n\tROM (rx)  : ORIGIN = 0x0, LENGTH = 0x28000\n}\n' \
     > "$GEN/memmap.ld"
 printf '/* phase 1: no engine map */\n' > "$GEN/datamap.ld"
 flpr_build OFF
-python3 "$HERE/flpr/blob_to_c.py" --check-relocs \
+python3 "$HERE/flpr/blob_audit.py" --check-relocs \
     "$HERE/build-flpr/flpr.elf" 0x2003E000 0x1C00
-python3 "$HERE/flpr/blob_to_c.py" --check-ram \
+python3 "$HERE/flpr/blob_audit.py" --check-ram \
     "$HERE/flpr/flpr_shared.h" "$HERE/flpr.overlay"
-python3 "$HERE/flpr/blob_to_c.py" "$HERE/build-flpr/flpr.bin" \
-    "$HERE/src/flpr_blob.c" 0x40000
 
 cmake -GNinja \
     -S "$HERE" -B "$HERE/build" \
@@ -105,6 +103,7 @@ cmake -GNinja \
     -DZEPHYR_MODULES="$SDK/sdk/mcuboot;$SDK/sdk/modules/hal/nordic;$SDK/sdk/modules/hal/cmsis;$SDK/sdk/modules/crypto/tinycrypt;$SDK/sdk/modules/debug/segger;$SDK/sdk/modules/lib/zcbor;$SDK/sdk/modules/fs/littlefs" \
     -DSIDCLOCK_VERSION="$VERSION" \
     -DSIDCLOCK_SID_ENGINE="${SIDCLOCK_SID_ENGINE:-dual}" \
+    -DFLPR_BLOB_BIN="$HERE/build-flpr/flpr.bin" \
     "${DEBUG_ARGS[@]}" \
     -DDTC_OVERLAY_FILE="$HERE/app.overlay;$HERE/flpr.overlay" \
     -DPYTHON_EXECUTABLE="$(command -v python3)"
@@ -123,21 +122,19 @@ riscv64-zephyr-elf-gcc -march=rv32emc_zicsr -mabi=ilp32e -O3 -funroll-loops \
     -std=gnu99 -fno-pie -msmall-data-limit=0 -ffunction-sections \
     -fdata-sections -I"$HERE/src/sid" -I"$HERE/src/sid/crsid" \
     -c "$HERE/src/sid/crsid/libcRSID.c" -o "$HERE/build-flpr/engine.o"
-python3 "$HERE/flpr/blob_to_c.py" --gen-map "$ARMNM" \
+python3 "$HERE/flpr/blob_audit.py" --gen-map "$ARMNM" \
     "$HERE/build/zephyr/zephyr.elf" "$HERE/build-flpr/engine.o" \
     "$ARRAY_VMA" "$GEN/memmap.ld" "$GEN/datamap.ld"
 cp "$GEN/memmap.ld.json" "$GEN/map1.json"
 flpr_build ON
-python3 "$HERE/flpr/blob_to_c.py" --check-final \
+python3 "$HERE/flpr/blob_audit.py" --check-final \
     "$HERE/build-flpr/flpr.elf" "$ARRAY_VMA" 0x2003E000 0x1C00 \
     "$GEN/map1.json"
-python3 "$HERE/flpr/blob_to_c.py" "$HERE/build-flpr/flpr.bin" \
-    "$HERE/src/flpr_blob.c" 0x40000
 ninja -C "$HERE/build"
 # Stability: the array and every engine address must be identical.
 ARRAY_VMA2=$("$ARMNM" --print-size "$HERE/build/zephyr/zephyr.elf" |
     awk '/ R flpr_blob$/ {print "0x" $1}')
-python3 "$HERE/flpr/blob_to_c.py" --gen-map "$ARMNM" \
+python3 "$HERE/flpr/blob_audit.py" --gen-map "$ARMNM" \
     "$HERE/build/zephyr/zephyr.elf" "$HERE/build-flpr/engine.o" \
     "$ARRAY_VMA2" "$GEN/memmap.ld" "$GEN/datamap.ld" --expect "$GEN/map1.json"
 

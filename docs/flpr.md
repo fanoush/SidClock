@@ -27,9 +27,12 @@ state, and feeds I2S exactly as before.
 
 ## Layout
 
-Code: embedded in the M33 image as `const uint8_t flpr_blob[]`
-(`app/flpr/blob_to_c.py`), aligned 128 bytes. No fixed flash partition,
-no image padding - the signed image grows by exactly the blob size.
+Code: linked into the M33 image with `.incbin` in a small assembly unit
+(`app/flpr/flpr_blob.S`, the elm-chan "binclude" trick) as `flpr_blob[]`,
+aligned 128 bytes. No generated C array and no fixed flash partition:
+the signed image grows by exactly the blob size. `build.sh` passes the
+built binary's path and CMake makes the object depend on it, so a
+rebuilt blob relinks.
 
 RAM (all in the FLPR-side 68 KB SRAM window, outside the M33's 188 KB
 link region, so the app keeps all of its RAM):
@@ -65,7 +68,7 @@ embeds it, then links the M33 image twice:
 2. blob with the engine linked against that map -> re-embed -> relink.
 
 The second M33 link must produce the identical map, otherwise the build
-fails. `blob_to_c.py` also audits the blob link: zero dynamic
+fails. `blob_audit.py` also audits the blob link: zero dynamic
 relocations, no `gp`-relative code, no small-data sections, stack top
 where the header says.
 
