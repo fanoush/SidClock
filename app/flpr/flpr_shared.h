@@ -1,5 +1,5 @@
 /*
- * flpr_shared.h - M33 <-> FLPR shared-memory contract (bare-metal spike).
+ * flpr_shared.h - M33 <-> FLPR shared-memory contract (bare-metal SID render).
  *
  * The M33 side is wired in app/flpr.overlay (reserved RAM + mailbox);
  * the FLPR blob side in flpr/linker.ld. The blob's code has no fixed
@@ -45,9 +45,8 @@ struct flpr_shared {
 	uint32_t heartbeat; /* ++ each blob iteration */
 	uint32_t status;    /* blob-defined status flags */
 	uint32_t control;   /* reserved */
-	/* PCM pipe (M33 writes freq/rate/run/mode, blob writes the rest): */
-	uint32_t mode;      /* 0 = sine test, 1 = SID render */
-	uint32_t freq_hz;   /* sine frequency requested */
+	/* SID pipe (M33 writes run/rate/mode, blob writes the rest): */
+	uint32_t mode;      /* 1 = SID render, 2 = one-shot bench */
 	uint32_t rate_hz;   /* render rate (M33 hw_rate) */
 	uint32_t run;       /* 1 = render into the ring */
 	uint32_t write_idx; /* absolute frames produced (blob) */

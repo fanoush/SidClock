@@ -4,7 +4,8 @@ project(flpr_baremetal C ASM)
 
 # FLPR_WITH_ENGINE=1 links the cRSID render core (phase 2 of build.sh,
 # with memmap.ld/datamap.ld generated from the M33 link). =0 builds the
-# sine-only test blob (phase 1).
+# blob without the engine (phase 1: it only reserves the array slot and
+# proves the layout; the stub in stubs.c keeps the pump linkable).
 option(FLPR_WITH_ENGINE "Link the cRSID SID engine" OFF)
 
 # Generated address map (written by build.sh before configuring):
