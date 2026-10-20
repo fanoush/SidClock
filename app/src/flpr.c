@@ -17,6 +17,7 @@
 #include <zephyr/devicetree.h>
 #include <string.h>
 #include <hal/nrf_vpr.h>
+#include <hal/nrf_memconf.h>
 #if defined(CONFIG_SOC_NRF54L_CPUAPP_COMMON) && \
 	!defined(CONFIG_TRUSTED_EXECUTION_NONSECURE)
 #include <hal/nrf_spu.h>
@@ -31,6 +32,24 @@ extern const unsigned flpr_blob_size;
 
 static NRF_VPR_Type *const vpr =
 	(NRF_VPR_Type *)DT_REG_ADDR(DT_NODELABEL(cpuflpr_vpr));
+
+/*
+ * VPR power. The block draws ~0.5 mA from the moment the core has been
+ * started, no matter whether it runs, sleeps (default sleep state WAIT)
+ * or is held in reset - Nordic's answer to the DevZone report is that
+ * only powering the block down removes it, keeping state in RAM. The
+ * power-off sequence in Zephyr's z_sys_poweroff() disables retention on
+ * power block 1 (the VPR): MEMCONF.POWER[1].RET bit 0. Clearing it here
+ * powers the block down; flpr_start() re-enables it first.
+ */
+#define VPR_POWER_BLOCK 1U
+#define VPR_RET_BIT 0U
+
+static void flpr_power(bool on)
+{
+	nrf_memconf_ramblock_ret_enable_set(NRF_MEMCONF, VPR_POWER_BLOCK,
+					    VPR_RET_BIT, on);
+}
 
 static void flpr_core_reset(void)
 {
@@ -69,6 +88,7 @@ int flpr_start(void)
 	if ((entry & 0x7FUL) != 0U) {
 		return -EINVAL;
 	}
+	flpr_power(true); /* the block may have been powered down by flpr_halt() */
 #if defined(CONFIG_SOC_NRF54L_CPUAPP_COMMON) && \
 	!defined(CONFIG_TRUSTED_EXECUTION_NONSECURE)
 	nrf_spu_periph_perm_secattr_set(NRF_SPU00,
@@ -87,6 +107,10 @@ void flpr_halt(void)
 	nrf_vpr_cpurun_set(vpr, false);
 	flpr_core_reset();
 	flpr_clear();
+	/* Power the block down: a stopped/reset VPR still draws ~0.5 mA
+	 * (default sleep state WAIT). This is what z_sys_poweroff() does for
+	 * the VPR before System OFF. */
+	flpr_power(false);
 }
 
 /* The blob checks `run` between bursts of 512 frames (a burst is ~1 ms of

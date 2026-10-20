@@ -955,6 +955,11 @@ void audio_sid_stop(void)
 	split_mode = false;
 	dbg[3] = 0U;
 	FLPR_SHARED->run = 0U;
+	/* Nothing left to render: power the VPR block down (it draws ~0.5 mA
+	 * from the moment it was started, running or not). */
+	if (flpr_alive()) {
+		flpr_halt();
+	}
 }
 
 /*

@@ -165,6 +165,31 @@ waveform generation stay cycle-exact. OSC3 reads would need the blob to
 publish the oscillator value each sample (cRSID tolerates ~22 cycles of
 delay there).
 
+## Power
+
+A started VPR costs about **0.5 mA**, and that cost does not go away by
+stopping it: `CPURUN=0` plus a `NDMRESET` pulse leaves the block drawing
+the same current (Nordic's answer in DevZone 127621: the default sleep
+state is WAIT; DEEPSLEEP/HIBERNATE only shave part of it, and the way to
+remove it is to power the block down while keeping state in RAM).
+
+SidClock therefore:
+
+- **never starts the FLPR unless an FLPR engine is selected**
+  (`NORDIC_VPR_LAUNCHER=n`), so the default cRSID/cSID builds pay nothing;
+- **powers the block down** (`flpr_halt()`: CPURUN off, NDMRESET, then
+  clear `MEMCONF.POWER[1].RET` bit 0 - the same bit Zephyr's
+  `z_sys_poweroff()` clears for the VPR) whenever playback stops or an
+  M33 engine is selected. `flpr_start()` re-enables retention first and
+  re-boots the blob, so switching back to split/FLPR is a few ms;
+- while playing, the blob is busy ~40% of the time and spins otherwise;
+  it does not `WFI` because a bare-metal blob has no interrupt to wake it
+  (adding the VEVIF wake is possible, but the core is powered anyway while
+  playing).
+
+Do not enable VPR hibernate without moving the mailbox: the hardware
+context-save address (`VPR00_VPRSAVEADDR`, 0x2003FE00) sits inside it.
+
 ## Host harness (tools/crsid_split_wav.c)
 
 The split is deterministic, so both paths can be rendered on the host from
