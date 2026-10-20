@@ -90,6 +90,12 @@ static int model_arg(void)
  * libcsid_select_engine()); the FLPR part is handled by the audio path. */
 static int sid_engine_mode;
 
+extern "C" void sid_player_set_quality(int hq)
+{
+	libcsid_set_quality(hq ? 1 : 0);
+	LOG_INF("sid quality: %s", hq ? "HQ (oversampled)" : "light");
+}
+
 extern "C" void sid_player_set_engine_mode(int mode)
 {
 	if (mode < SID_ENGINE_CRSID || mode > SID_ENGINE_SPLIT) {

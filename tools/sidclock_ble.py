@@ -812,6 +812,17 @@ async def cmd_watch(addr):
             await c.stop_notify(PLAYER_STATE_CHAR)
 
 
+async def cmd_quality(addr, value=None):
+    """SID waveform quality: light (default) | hq (oversampled, costly)."""
+    if value not in ("light", "hq"):
+        raise SystemExit("usage: quality light|hq  (HQ oversampled waveforms; "
+                         "~4.6x the SID cost, not persisted)")
+    code = {"light": 0, "hq": 1}[value]
+    async with connect(addr) as c:
+        await c.write_gatt_char(DBG_CHAR, bytes([0x35, code]), response=True)
+    print(f"SID quality: {value}")
+
+
 async def cmd_engine(addr, value=None):
     """Switch the SID engine: new | old | split."""
     if value not in ("new", "old", "split"):
@@ -1108,7 +1119,7 @@ def main():
             "tone", "mute", "rate", "tonefreq",
         "tonestart", "tonestop", "fsformat", "sid", "sidname", "chip",
         "sidstop", "ls", "glitch", "blemode", "filedelete", "endmode",
-        "engine", "stacks", "threads", "log", "accel",
+        "engine", "quality", "stacks", "threads", "log", "accel",
         "playpause", "next", "prev", "subnext", "subprev", "subplay",
         "state", "watch", "flpr", "flpralu",
         ],
@@ -1164,6 +1175,7 @@ def main():
         "blemode": cmd_blemode,
         "filedelete": cmd_filedelete,
         "engine": cmd_engine,
+        "quality": cmd_quality,
         "stacks": cmd_stacks,
         "threads": cmd_stacks,  # alias for the old name
         "log": cmd_log,
@@ -1185,7 +1197,7 @@ def main():
         asyncio.run(fn(args.addr, args.value))
     elif args.command == "sidname":
         asyncio.run(fn(args.addr, args.value, args.sub))
-    elif args.command in ("chip", "filedelete", "engine", "stacks",
+    elif args.command in ("chip", "filedelete", "engine", "quality", "stacks",
                           "threads", "endmode"):
         asyncio.run(fn(args.addr, args.value))
     elif args.command == "set-time":

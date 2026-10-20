@@ -1725,6 +1725,7 @@ static ssize_t ble_dbg_write(struct bt_conn *conn,
 	      (len == 2U && p[0] == 0x1FU) ||
 	      (len == 2U && p[0] == 0x30U) ||
 	      (len == 3U && p[0] == 0x33U) ||
+	      (len == 2U && p[0] == 0x35U) ||
 	      (len >= 2U && len <= SID_CMD_NAME_MAX + 1U && p[0] == 0x11U) ||
 	      (len >= 2U && len <= SID_CMD_NAME_MAX + 1U && p[0] == 0x16U) ||
 	      (len == 2U && p[0] >= 0x18U && p[0] <= 0x1CU) ||
@@ -1852,6 +1853,17 @@ static ssize_t ble_dbg_write(struct bt_conn *conn,
 		}
 		break;
 #endif
+	case 0x35:
+		/* SID waveform quality: 0 = light (default), 1 = oversampled
+		 * (HQ). Not persisted; HQ costs ~4.6x the SID stage (41 us per
+		 * 22050 Hz frame on the M33 in split mode, i.e. ~90% of the
+		 * audio budget - audible aliasing is lower, but the UI and the
+		 * audio thread have no headroom left). For A/B listening. */
+		if (len != 2U) {
+			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+		}
+		sid_player_set_quality(p[1] ? 1 : 0);
+		break;
 	case 0x12:
 		if (len != 2U) {
 			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);

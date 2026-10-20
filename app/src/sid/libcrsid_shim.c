@@ -121,6 +121,17 @@ static void refresh_models(void)
 		(int)m3 : SID_model[0];
 }
 
+/* SID waveform quality: 0 = Light (fast, the default - HQ costs ~4.6x,
+ * 41 us/frame on the M33 in split mode), 1 = HQ (oversampled waveforms
+ * and filter). Kept here so a reload/rate change does not reset it. */
+static int sid_quality;
+
+void libcsid_set_quality(int hq)
+{
+	sid_quality = hq ? 1 : 0;
+	cRSID_setQuality((unsigned char)sid_quality, 0);
+}
+
 void libcsid_init(int samplerate, int sidmodel)
 {
 #ifdef SID_ENGINE_DUAL
@@ -132,7 +143,7 @@ void libcsid_init(int samplerate, int sidmodel)
 	}
 #endif
 	cRSID_init((unsigned short)samplerate, 2048);
-	cRSID_setQuality(0, 0); /* Light */
+	cRSID_setQuality((unsigned char)sid_quality, 0); /* Light by default */
 	cRSID.SelectedSIDmodel =
 		(sidmodel == SIDMODEL_6581 || sidmodel == SIDMODEL_8580) ?
 			(unsigned short)sidmodel : 0; /* 0: model from the SID header */

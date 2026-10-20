@@ -41,6 +41,7 @@ int sid_player_chip(void);
 #define SID_ENGINE_SPLIT 2 /* M33 runs the SID, FLPR runs the C64/CPU */
 void sid_player_set_engine_mode(int mode);
 int sid_player_engine_mode(void);
+
 #else
 #define SID_ENGINE_CRSID 0
 #define SID_ENGINE_LEGACY 1
@@ -48,6 +49,10 @@ int sid_player_engine_mode(void);
 int sid_player_engine_mode(void);
 void sid_player_set_engine_mode(int mode);
 #endif
+
+/* SID waveform quality: 0 = light (default, ~9 us/frame on the M33 in
+ * split mode), 1 = oversampled (HQ, ~4.6x - only for A/B listening). */
+void sid_player_set_quality(int hq);
 
 bool sid_player_is_playing(void);
 bool sid_player_is_paused(void);

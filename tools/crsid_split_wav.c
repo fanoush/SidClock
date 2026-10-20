@@ -89,8 +89,11 @@ static cRSID_SIDheader *start(unsigned char *data, int len, int sub)
 {
 	cRSID_SIDheader *hdr;
 
-	cRSID_setQuality(0, 0);           /* Light, same as the device */
 	cRSID_init(RATE, 2048);
+	/* cRSID_init() forces HQ=1; the device runs Light (libcsid_init sets
+	 * it after init), so default to Light here too and A/B the
+	 * oversampled path with SID_HQ=1. */
+	cRSID_setQuality(getenv("SID_HQ") ? 1 : 0, 0);
 	hdr = cRSID_processSIDfileData(data, len);
 	if (!hdr) {
 		fprintf(stderr, "not a SID file\n");

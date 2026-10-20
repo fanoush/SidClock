@@ -236,14 +236,20 @@ The split runs the same core in two images, so differences come only from
 *splitting* the per-sample work. Three rules came out of tuning it, each
 found by a tune that broke:
 
-- **Same output stage as the unsplit engine.** A tune with the
-  `HighQualitySID` flag must take the oversampled path
-  (`cRSID_emulateOversampledSIDwaves`/`SIDoutputs`), not the light
-  renderer. The split used to force `cRSID_emulateLightSIDs()` for
-  everything: HQ tunes then played at a different oscillator pitch scale
-  through a different filter chain. Leviathan sounded like a thinner,
-  half-missing arrangement from the first note while cRSID was fine.
-  With the selection mirrored, the harness renders it bit-identical.
+- **Same output stage as the unsplit engine.** cRSID has two SID
+  renderers and the choice is a *global setting*, not a tune flag:
+  `cRSID_init()` defaults to HighQualitySID (oversampled waveforms +
+  filter, `cRSID_emulateOversampledSIDwaves`/`SIDoutputs`, phase step
+  `freq * CRSID_OVERSAMPLING_CYCLES`), while the device's
+  `libcsid_init()` sets Light (`cRSID_emulateLightSIDs`, phase step
+  `freq * SampleClockRatio` - a 16x different scale). The split used to
+  force the light renderer for everything, so selecting HQ at runtime
+  would have played at the wrong pitch scale through the wrong filter
+  chain. The selection is now mirrored, which also makes the host
+  harness test the same path as the device (it used to call
+  `cRSID_setQuality` *before* `cRSID_init`, which forces HQ - so it was
+  silently testing HQ for every tune; it now applies the quality after
+  init and defaults to Light, `SID_HQ=1` for the oversampled path).
 - **Per-write cycle offsets.** The blob tags each SID write with the
   cycle it happened at inside the sample (`FLPR_EVENTS[].cyc`, from
   `FLPR_SHARED->cur_cyc`), and the M33 replays the sample's ADSR cycles
@@ -319,9 +325,27 @@ It reports the first differing sample with context, per-second RMS of the
 difference (spots where a part goes missing rather than a constant offset)
 and the per-second energy ratio of the two files. After the fixes in
 "Fidelity" above, the tunes tested here are identical or within a few
-LSBs: Leviathan 0 samples differing, Game Over max |diff| 2, Arkanoid 5,
-Odyssey 2SID 3, Light Years 3SID 21 - all inaudible, and a far cry from
-the hundreds-to-thousands RMS differences before. `-DHOST_DIRECT_REGS`
+LSBs in both quality modes: Leviathan 0 samples differing, Game Over
+max |diff| 2, Arkanoid 5, Odyssey 2SID 3, Light Years 3SID 21 - all
+inaudible, and a far cry from the hundreds-to-thousands RMS differences
+before.
+
+### SID quality (Light vs HQ)
+
+`quality light|hq` (BLE `0x35`, not persisted) switches the SID renderer
+at runtime. HQ is cRSID's own default, but it costs ~4.6x the SID stage
+on this hardware, measured on the device for Leviathan:
+
+| mode | split SID stage | share of the 45.3 us frame |
+|---|---|---|
+| light (default) | 2.5 ms / 320 frames = 7.7 us | 17% |
+| HQ | 13.7 ms / 320 frames = 43 us | 95% |
+
+and the M33 cRSID engine goes from ~35 us to ~62 us/frame, i.e. past
+realtime. So HQ is an A/B listening tool, not a default: it lowers
+aliasing and models the filter/output stage more closely, but it leaves
+no headroom for the UI or for a 2SID/3SID tune (which multiply the SID
+work). `-DHOST_DIRECT_REGS`
 bypasses the event ring (writes the SID copy directly) to separate event
 timing from the ADSR replay. `CRSID_HOST_TEST` maps the shared regions to
 plain arrays and enables both split roles in one binary (the device build
