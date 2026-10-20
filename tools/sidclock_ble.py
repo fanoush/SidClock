@@ -309,6 +309,77 @@ async def cmd_blemode(addr, mode=None):
         print("note: undo R/O or OFF from the device screen (or reboot)")
 
 
+def _flpr(raw):
+    """(heartbeat, alive, started) from the snapshot, or None (old fw)."""
+    if raw is None or len(raw) < 143:
+        return None
+    return (raw[140] | (raw[141] << 8), raw[142] & 1, (raw[142] >> 1) & 1)
+
+
+async def cmd_flpr(addr, mode=None):
+    """Start/stop the FLPR bare-metal blob (R/W only)."""
+    code = {"start": 1, "stop": 0}.get((mode or "start").lower())
+    if code is None:
+        raise SystemExit("flpr mode: start | stop")
+    async with BleakClient(addr) as c:
+        await c.write_gatt_char(DBG_CHAR, bytes([0x30, code]), response=True)
+        await asyncio.sleep(1.5)
+        after = await c.read_gatt_char(DBG_CHAR)
+    hb = _flpr(after)
+    if hb is None:
+        print("no FLPR telemetry (old firmware?)")
+    else:
+        print(f"flpr: {'start' if code else 'stop'} -> "
+              f"heartbeat {hb[0]}, alive {hb[1]}, started {hb[2]}")
+
+
+async def cmd_flprbench(addr, value=None):
+    """Render N frames on the FLPR into a checksum, timed (needs tune)."""
+    try:
+        n = int(value or 1024)
+    except ValueError:
+        raise SystemExit("flprbench [FRAMES]")
+    if not 1 <= n <= 4096:
+        raise SystemExit("flprbench [FRAMES]")
+    async with BleakClient(addr) as c:
+        await c.write_gatt_char(DBG_CHAR,
+                                bytes([0x32, n & 0xFF, (n >> 8) & 0xFF]),
+                                response=True)
+        await asyncio.sleep(1.0)
+        after = await c.read_gatt_char(DBG_CHAR)
+    if len(after) < 152:
+        print("no bench telemetry (old firmware?)")
+    else:
+        print(f"flprbench {n} frames: {int.from_bytes(after[144:148], 'little')} us "
+              f"sum=0x{int.from_bytes(after[148:152], 'little'):08x}")
+
+
+async def cmd_flprsid(addr, value=None):
+    """Render the loaded tune on the FLPR: SEC seconds (0 = until stopped)."""
+    if (value or "").lower() == "stop":
+        async with BleakClient(addr) as c:
+            await c.write_gatt_char(DBG_CHAR, bytes([0x0F]),
+                                    response=True)
+        print("flprsid stop sent (SID stop also stops the pipe)")
+        return
+    try:
+        sec = int(value or 0)
+    except ValueError:
+        raise SystemExit("flprsid [SEC] | stop")
+    if not 0 <= sec <= 255:
+        raise SystemExit("flprsid [SEC] | stop")
+    async with BleakClient(addr) as c:
+        await c.write_gatt_char(DBG_CHAR, bytes([0x31, sec]), response=True)
+        await asyncio.sleep(1.5)
+        after = await c.read_gatt_char(DBG_CHAR)
+    hb = _flpr(after)
+    if hb is None:
+        print("no FLPR telemetry (old firmware?)")
+    else:
+        print(f"flprsid {sec}s -> heartbeat {hb[0]}, alive {hb[1]}, "
+              f"started {hb[2]}")
+
+
 async def cmd_glitch(addr, mode=None):
     """Developer test: fake a timebase glitch, verify the clock guard."""
     code = {"reset": 0, "jump": 0, "fwd": 1, "forward": 1}.get(
@@ -473,6 +544,9 @@ async def cmd_audio(addr):
         raw = await c.read_gatt_char(DBG_CHAR)
         print(f"ready {raw[0]}  init_rc {raw[1]}  enabled {raw[6]}  "
               f"volume {raw[7]}  asleep {raw[5]}")
+        if len(raw) > 12 and (raw[2] or raw[3]):
+            print(f"flpr pipe: active {raw[3]}  underruns {raw[2]}  "
+                  f"taken_peak {raw[4] | (raw[12] << 8)}")
         print(f"play attempts {raw[9]}  tone buffers left {raw[17]}  "
               f"combo {raw[18]} (flags 0x{raw[19]:02x})")
         print(f"PSEL sck 0x{_u32(raw, 20):08x}  sdout 0x{_u32(raw, 24):08x}  "
@@ -1042,7 +1116,7 @@ def main():
         "sidstop", "ls", "glitch", "blemode", "filedelete", "endmode",
         "engine", "stacks", "threads", "log", "accel",
         "playpause", "next", "prev", "subnext", "subprev", "subplay",
-        "state", "watch",
+        "state", "watch", "flpr", "flprsid", "flprbench",
         ],
     )
     ap.add_argument(
@@ -1108,6 +1182,9 @@ def main():
         "subplay": cmd_subplay,
         "state": cmd_state,
         "watch": cmd_watch,
+        "flpr": cmd_flpr,
+        "flprsid": cmd_flprsid,
+        "flprbench": cmd_flprbench,
     }[args.command]
     if args.command == "log":
         asyncio.run(fn(args.addr, args.peek, args.follow))
@@ -1122,7 +1199,8 @@ def main():
         asyncio.run(fn(args.addr, args.value))
     elif args.command == "fsformat":
         asyncio.run(fn(args.addr, args.yes))
-    elif args.command in ("glitch", "blemode"):
+    elif args.command in ("glitch", "blemode", "flpr", "flprsid",
+                          "flprbench"):
         asyncio.run(fn(args.addr, args.value))
     elif args.command == "sid":
         asyncio.run(fn(args.addr,

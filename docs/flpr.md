@@ -72,7 +72,7 @@ where the header says.
 ## On-device test
 
 ```sh
-SIDCLOCK_DEBUG=1 app/build.sh
+app/build.sh                    # FLPR works in both; debug adds the tone tests
 tools/flash_ota.py --now                    # arm + reboot + verify
 tools/sidclock_ble.py set-time
 tools/sidclock_ble.py sidname Last_Ninja_2.sid
