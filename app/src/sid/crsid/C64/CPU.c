@@ -56,34 +56,42 @@ static INLINE void wr (FASTVAR unsigned short address, FASTVAR unsigned char dat
  if ( MOSTLY ((address & 0xF000) != 0xD000) ) { cRSID_C64.RAMbank[address] = data; return; }
  *cRSID_getMemWritePtr(address)=data;
  if (RARELY (0xD400 <= address && address <= 0xDFFF)) { //OPT: any SID-reg write must force an envelope pass (see SID_ADSR.c)
-  if (TIGHTLY (cRSID_C64.SID[1].BaseAddress <= address && address < cRSID_C64.SID[1].BaseAddress+0x1C)) { cRSID_C64.SID[1].ADSRthr = 0; //the pending folded cycles must never be merged under the new state
+  int m;
+
+  for (m = 1; m <= CRSID_SIDCOUNT_MAX; ++m) {
+   cRSID_SIDinstance* SID = &cRSID_C64.SID[m];
+
+   if ( !SID->BaseAddress || address < SID->BaseAddress || address >= SID->BaseAddress + 0x1C ) continue;
+   SID->ADSRthr = 0; //the pending folded cycles must never be merged under the new state
 #ifdef CRSID_SPLIT
    /* Split engine. On the blob the CPU runs ahead of the M33's SID
     * rendering, so the write becomes an event the M33 applies right
-    * before rendering that sample. On the M33 (tune load/init) the SID
-    * registers are written straight into its own copy. */
+    * before it renders that sample. On the M33 (tune load/init) the SID
+    * registers are written straight into its own copy. The chip index
+    * keeps 2SID/3SID tunes working: every chip has its own register
+    * block, and only the blob knows which one a write went to. */
    if ( RARELY (cRSID_splitMode) ) {
 #if defined(CRSID_HOST_TEST) && defined(HOST_DIRECT_REGS)
     //harness A/B: bypass the event ring, write the SID copy directly
-    ((volatile unsigned char*)FLPR_SID_REGCOPY)[address - 0xD400] = data;
+    ((volatile unsigned char*)FLPR_SID_REGCOPY)[(m-1)*32 + (address - SID->BaseAddress)] = data;
 #elif defined(CRSID_SPLIT_CPU_SIDE)
-    uint32_t ev = FLPR_SPLIT->eprod % FLPR_EVENTS_MAX;
+    { uint32_t ev = FLPR_SPLIT->eprod % FLPR_EVENTS_MAX;
 
-    if ( (uint32_t)(FLPR_SPLIT->eprod - FLPR_SPLIT->econs) < FLPR_EVENTS_MAX ) {
-     FLPR_EVENTS[ev].pos = (unsigned short)(FLPR_SPLIT->prod & 0xFFFF);
-     FLPR_EVENTS[ev].reg = (unsigned char)(address - 0xD400);
-     FLPR_EVENTS[ev].val = data;
-     FLPR_SPLIT->eprod = FLPR_SPLIT->eprod + 1;
+      if ( (uint32_t)(FLPR_SPLIT->eprod - FLPR_SPLIT->econs) < FLPR_EVENTS_MAX ) {
+       FLPR_EVENTS[ev].pos = FLPR_SPLIT->prod;
+       FLPR_EVENTS[ev].cyc = (unsigned char)FLPR_SPLIT->cur_cyc;
+       FLPR_EVENTS[ev].chip = (unsigned char)m;
+       FLPR_EVENTS[ev].reg = (unsigned char)(address - SID->BaseAddress);
+       FLPR_EVENTS[ev].val = data;
+       FLPR_SPLIT->eprod = FLPR_SPLIT->eprod + 1;
+      }
     }
 #else
-    ((volatile unsigned char*)FLPR_SID_REGCOPY)[address - 0xD400] = data;
+    ((volatile unsigned char*)FLPR_SID_REGCOPY)[(m-1)*32 + (address - SID->BaseAddress)] = data;
 #endif
    }
 #endif
   }
-  if (cRSID_C64.SID[2].BaseAddress != 0 && cRSID_C64.SID[2].BaseAddress <= address && address < cRSID_C64.SID[2].BaseAddress+0x1C) cRSID_C64.SID[2].ADSRthr = 0;
-  if (cRSID_C64.SID[3].BaseAddress != 0 && cRSID_C64.SID[3].BaseAddress <= address && address < cRSID_C64.SID[3].BaseAddress+0x1C) cRSID_C64.SID[3].ADSRthr = 0;
-  if (cRSID_C64.SID[4].BaseAddress != 0 && cRSID_C64.SID[4].BaseAddress <= address && address < cRSID_C64.SID[4].BaseAddress+0x1C) cRSID_C64.SID[4].ADSRthr = 0;
  }
  if ( LIKELY (cRSID_C64.RealSIDmode && (cRSID_C64.RAMbank[1] & 3)) ) {
   //if(data&1) { //only writing 1 to $d019 bit0 would acknowledge, not any value (but RMW instructions write $d019 back before mod.)
@@ -97,35 +105,43 @@ static INLINE void wr2 (FASTVAR unsigned short address, FASTVAR unsigned char da
  //OPT: pages other than $D000-$DFFF always write plain RAM (slim banking).
  if ( MOSTLY ((address & 0xF000) != 0xD000) ) { cRSID_C64.RAMbank[address] = data; return; }
  *cRSID_getMemWritePtr(address)=data;
- if (RARELY (0xD400 <= address && address <= 0xDFFF)) { //OPT: any SID-reg write must force an envelope pass (see wr() and SID_ADSR.c)
-  if (TIGHTLY (cRSID_C64.SID[1].BaseAddress <= address && address < cRSID_C64.SID[1].BaseAddress+0x1C)) { cRSID_C64.SID[1].ADSRthr = 0; //the pending folded cycles must never be merged under the new state
+ if (RARELY (0xD400 <= address && address <= 0xDFFF)) { //OPT: any SID-reg write must force an envelope pass (see SID_ADSR.c)
+  int m;
+
+  for (m = 1; m <= CRSID_SIDCOUNT_MAX; ++m) {
+   cRSID_SIDinstance* SID = &cRSID_C64.SID[m];
+
+   if ( !SID->BaseAddress || address < SID->BaseAddress || address >= SID->BaseAddress + 0x1C ) continue;
+   SID->ADSRthr = 0; //the pending folded cycles must never be merged under the new state
 #ifdef CRSID_SPLIT
    /* Split engine. On the blob the CPU runs ahead of the M33's SID
     * rendering, so the write becomes an event the M33 applies right
-    * before rendering that sample. On the M33 (tune load/init) the SID
-    * registers are written straight into its own copy. */
+    * before it renders that sample. On the M33 (tune load/init) the SID
+    * registers are written straight into its own copy. The chip index
+    * keeps 2SID/3SID tunes working: every chip has its own register
+    * block, and only the blob knows which one a write went to. */
    if ( RARELY (cRSID_splitMode) ) {
 #if defined(CRSID_HOST_TEST) && defined(HOST_DIRECT_REGS)
     //harness A/B: bypass the event ring, write the SID copy directly
-    ((volatile unsigned char*)FLPR_SID_REGCOPY)[address - 0xD400] = data;
+    ((volatile unsigned char*)FLPR_SID_REGCOPY)[(m-1)*32 + (address - SID->BaseAddress)] = data;
 #elif defined(CRSID_SPLIT_CPU_SIDE)
-    uint32_t ev = FLPR_SPLIT->eprod % FLPR_EVENTS_MAX;
+    { uint32_t ev = FLPR_SPLIT->eprod % FLPR_EVENTS_MAX;
 
-    if ( (uint32_t)(FLPR_SPLIT->eprod - FLPR_SPLIT->econs) < FLPR_EVENTS_MAX ) {
-     FLPR_EVENTS[ev].pos = (unsigned short)(FLPR_SPLIT->prod & 0xFFFF);
-     FLPR_EVENTS[ev].reg = (unsigned char)(address - 0xD400);
-     FLPR_EVENTS[ev].val = data;
-     FLPR_SPLIT->eprod = FLPR_SPLIT->eprod + 1;
+      if ( (uint32_t)(FLPR_SPLIT->eprod - FLPR_SPLIT->econs) < FLPR_EVENTS_MAX ) {
+       FLPR_EVENTS[ev].pos = FLPR_SPLIT->prod;
+       FLPR_EVENTS[ev].cyc = (unsigned char)FLPR_SPLIT->cur_cyc;
+       FLPR_EVENTS[ev].chip = (unsigned char)m;
+       FLPR_EVENTS[ev].reg = (unsigned char)(address - SID->BaseAddress);
+       FLPR_EVENTS[ev].val = data;
+       FLPR_SPLIT->eprod = FLPR_SPLIT->eprod + 1;
+      }
     }
 #else
-    ((volatile unsigned char*)FLPR_SID_REGCOPY)[address - 0xD400] = data;
+    ((volatile unsigned char*)FLPR_SID_REGCOPY)[(m-1)*32 + (address - SID->BaseAddress)] = data;
 #endif
    }
 #endif
   }
-  if (cRSID_C64.SID[2].BaseAddress != 0 && cRSID_C64.SID[2].BaseAddress <= address && address < cRSID_C64.SID[2].BaseAddress+0x1C) cRSID_C64.SID[2].ADSRthr = 0;
-  if (cRSID_C64.SID[3].BaseAddress != 0 && cRSID_C64.SID[3].BaseAddress <= address && address < cRSID_C64.SID[3].BaseAddress+0x1C) cRSID_C64.SID[3].ADSRthr = 0;
-  if (cRSID_C64.SID[4].BaseAddress != 0 && cRSID_C64.SID[4].BaseAddress <= address && address < cRSID_C64.SID[4].BaseAddress+0x1C) cRSID_C64.SID[4].ADSRthr = 0;
  }
  if ( LIKELY (cRSID_C64.RAMbank[1] & 3) ) {
 

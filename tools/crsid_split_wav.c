@@ -40,7 +40,7 @@ extern char cRSID_splitMode;
 volatile struct flpr_split host_split;
 volatile uint16_t host_cycles[FLPR_SID_RING];
 volatile struct flpr_event host_events[FLPR_EVENTS_MAX];
-volatile uint8_t host_regcopy[32];
+volatile uint8_t host_regcopy[FLPR_SID_REGCOPY_SIZE];
 
 #define RATE 22050
 

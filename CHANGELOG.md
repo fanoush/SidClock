@@ -61,6 +61,18 @@
 
 **Fixes**
 
+- Split-engine fidelity: a tune with the `HighQualitySID` flag (Leviathan)
+  played thinner and gapped in split mode while cRSID was fine, because
+  the M33's SID side always used the light renderer. It now mirrors the
+  unsplit engine's output-stage selection (oversampled/HQ path). Two more
+  split-only bugs came out of the same investigation: a gate-off/gate-on
+  pair (hard restart) inside one sample collapsed into a single envelope
+  pass, so notes lost their attack - writes now carry their cycle offset
+  and are applied in order - and only writes to SID 1 became events, so
+  2SID/3SID tunes played without their extra chips (each chip now has its
+  own register block). The host harness renders Leviathan bit-identical
+  to the reference, Game Over within 2 LSB, and 2SID/3SID tunes within a
+  few LSB instead of thousands.
 - The split engine now keeps its whole hot path in the FLPR's SRAM: the
   26 KB 6510 interpreter (and the per-sample pump) were still executing
   from RRAM, where this cacheless core fetches at ~3 cycles per

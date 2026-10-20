@@ -157,9 +157,20 @@ static INLINE unsigned char cRSID_readMem (FASTVAR unsigned short address) {
 static INLINE void cRSID_writeMem (FASTVAR unsigned short address, FASTVAR unsigned char data) {
  *cRSID_getMemWritePtr(address)=data;
 #ifdef CRSID_SPLIT_SID_SIDE
- //Split B: the M33 renders the SID stage from its own register copy.
- if ( RARELY (cRSID_splitMode && 0xD400 <= address && address < 0xD420) )
-  ((volatile unsigned char*)FLPR_SID_REGCOPY)[address - 0xD400] = data;
+ //Split B: the M33 renders the SID stage from its own register copy
+ //(init/load writes land in the matching chip's 32-byte block).
+ if ( RARELY (cRSID_splitMode && 0xD400 <= address && address < 0xD800) ) {
+  int m;
+
+  for (m = 1; m <= CRSID_SIDCOUNT_MAX; ++m) {
+   cRSID_SIDinstance* SID = &cRSID_C64.SID[m];
+
+   if ( SID->BaseAddress && SID->BaseAddress <= address && address < SID->BaseAddress + 0x1C ) {
+    ((volatile unsigned char*)FLPR_SID_REGCOPY)[(m-1)*32 + (address - SID->BaseAddress)] = data;
+    break;
+   }
+  }
+ }
 #endif
 }
 

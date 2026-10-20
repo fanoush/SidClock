@@ -35,8 +35,11 @@ void cRSID_createSIDchip (cRSID_SIDinstance* SID, unsigned short model, char cha
  if( baseaddress>=0xD400 && (baseaddress<0xD800 || (0xDE00<=baseaddress && baseaddress<=0xDFE0)) ) { //check valid address, avoid Color-RAM
   SID->BaseAddress = baseaddress; SID->BasePtr = &cRSID_C64.IObankWR[((baseaddress) & 0xFFF)]; SID->BasePtrRD = &cRSID_C64.IObankRD[((baseaddress) & 0xFFF)];
 #ifdef CRSID_SPLIT_SID_SIDE
-  //Split B: the M33 renders the SID stage from its own register copy.
-  if ( cRSID_splitMode ) SID->BasePtr = (unsigned char*)FLPR_SID_REGCOPY;
+  //Split B: the M33 renders the SID stage from its own register copy,
+  //one 32-byte block per chip (2SID/3SID tunes write $D420+ as well).
+  if ( cRSID_splitMode )
+   SID->BasePtr = (unsigned char*)(FLPR_SID_REGCOPY +
+     (unsigned)(SID - cRSID_C64.SID - 1) * 32U);
 #endif
  }
  else { SID->BaseAddress=0x0000;

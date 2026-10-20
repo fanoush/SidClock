@@ -64,18 +64,28 @@
 
 #define FLPR_SID_CYCLES (FLPR_SPLIT_BASE + 0x0000UL) /* u16 per sample */
 #define FLPR_SID_RING 640U /* two audio buffers of cycle counts */
-#define FLPR_SID_REGCOPY (FLPR_SPLIT_BASE + 0x0800UL) /* M33 SID register copy */
+/* M33 SID register copy: 32 bytes per chip, so 2SID/3SID tunes see their
+ * extra chips' writes (the blob cannot touch the M33's IO bank). */
+#define FLPR_SID_REGCOPY (FLPR_SPLIT_BASE + 0x0800UL)
+#define FLPR_SID_REGCOPY_SIZE 128U /* 4 chips x 32 registers (CRSID_SIDCOUNT_MAX) */
 
 /* SID register-write events, FLPR -> M33. The blob (CPU) runs ahead of
  * the M33's SID rendering, so a write must carry the sample it belongs
  * to; the M33 applies it to its own register copy right before it
- * renders that sample. The ring shares the PCM ring region: the two
- * modes (whole engine on the blob, split) never run together. */
-#define FLPR_EVENTS_MAX 2048U
+ * renders that sample. `cyc` is the cycle offset inside that sample
+ * (cycles elapsed since the sample started), so the M33 can replay the
+ * sample's envelope cycles up to the write, apply it, and continue:
+ * without it a gate-off/gate-on pair (hard restart) in one sample
+ * collapses and the note-on is lost. The ring shares the PCM ring
+ * region: the two modes (whole engine on the blob, split) never run
+ * together. */
+#define FLPR_EVENTS_MAX 1024U /* 8 KB / sizeof(struct flpr_event) */
 struct flpr_event {
-	uint16_t pos; /* sample index (mod 65536) */
-	uint8_t reg;  /* $D400 + reg */
+	uint32_t pos; /* sample index */
+	uint8_t cyc;  /* cycle offset inside the sample (0..~50) */
+	uint8_t reg;  /* offset in the chip's 32-byte register file */
 	uint8_t val;
+	uint8_t chip; /* SID instance 1..CRSID_SIDCOUNT_MAX */
 };
 /* Shared split control (same page). */
 #define FLPR_SPLIT_CTRL (FLPR_SPLIT_BASE + 0x0E00UL)
@@ -86,6 +96,9 @@ struct flpr_split {
 	uint32_t cons;     /* samples the M33 has rendered (SID) */
 	uint32_t eprod;    /* SID write events produced */
 	uint32_t econs;    /* SID write events consumed */
+	/* Cycles elapsed in the sample being emulated (blob writes it after
+	 * every instruction): the cycle offset tagged on each SID write. */
+	uint32_t cur_cyc;
 	/* Health, all written by the M33's SID side:
 	 * lead = prod - cons (samples the blob is ahead). The blob pumps
 	 * to 320, so `lead_min` near 320 over a window means it keeps up
@@ -111,7 +124,7 @@ struct flpr_split {
 extern volatile struct flpr_split host_split;
 extern volatile uint16_t host_cycles[FLPR_SID_RING];
 extern volatile struct flpr_event host_events[FLPR_EVENTS_MAX];
-extern volatile uint8_t host_regcopy[32];
+extern volatile uint8_t host_regcopy[FLPR_SID_REGCOPY_SIZE];
 
 #undef FLPR_SID_REGCOPY
 #define FLPR_SPLIT (&host_split)

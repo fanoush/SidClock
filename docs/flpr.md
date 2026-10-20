@@ -230,6 +230,35 @@ tools/sidclock_ble.py log | grep 'split prof'
 waveform publish, event handling and the pump loop). Release builds do
 not write `prof[]`, so the log line never appears there.
 
+### Fidelity: what the split has to get exactly right
+
+The split runs the same core in two images, so differences come only from
+*splitting* the per-sample work. Three rules came out of tuning it, each
+found by a tune that broke:
+
+- **Same output stage as the unsplit engine.** A tune with the
+  `HighQualitySID` flag must take the oversampled path
+  (`cRSID_emulateOversampledSIDwaves`/`SIDoutputs`), not the light
+  renderer. The split used to force `cRSID_emulateLightSIDs()` for
+  everything: HQ tunes then played at a different oscillator pitch scale
+  through a different filter chain. Leviathan sounded like a thinner,
+  half-missing arrangement from the first note while cRSID was fine.
+  With the selection mirrored, the harness renders it bit-identical.
+- **Per-write cycle offsets.** The blob tags each SID write with the
+  cycle it happened at inside the sample (`FLPR_EVENTS[].cyc`, from
+  `FLPR_SHARED->cur_cyc`), and the M33 replays the sample's ADSR cycles
+  up to that point before applying it. Without it, all of a sample's
+  writes were applied first and one envelope pass ran afterwards: a
+  gate-off/gate-on pair (the hard restart almost every SID player uses
+  for note-on) collapsed, the rising edge was never seen, and notes
+  played without their attack - Leviathan again, on every note.
+- **Per-chip register files.** Each SID instance gets its own 32-byte
+  block (`FLPR_SID_REGCOPY + (chip-1)*32`) and writes are tagged with the
+  chip (`FLPR_EVENTS[].chip`). Before that, only writes inside SID 1's
+  range became events, so 2SID/3SID tunes played without their extra
+  chips. Probe: Odyssey 2SID went from max |diff| 16806 to 3,
+  Light Years 3SID from 5933 to 21.
+
 **ADSR windows must stay <= 7 cycles.** cRSID's envelope pass detects at
 most one shot per call and its quiet-voice folding assumes
 `cycles/call <= 7` (below any prescale period). Batching a whole sample
@@ -288,7 +317,11 @@ gcc -O2 -std=gnu99 -o /tmp/split_wav tools/crsid_split_wav.c \
 
 It reports the first differing sample with context, per-second RMS of the
 difference (spots where a part goes missing rather than a constant offset)
-and the per-second energy ratio of the two files. `-DHOST_DIRECT_REGS`
+and the per-second energy ratio of the two files. After the fixes in
+"Fidelity" above, the tunes tested here are identical or within a few
+LSBs: Leviathan 0 samples differing, Game Over max |diff| 2, Arkanoid 5,
+Odyssey 2SID 3, Light Years 3SID 21 - all inaudible, and a far cry from
+the hundreds-to-thousands RMS differences before. `-DHOST_DIRECT_REGS`
 bypasses the event ring (writes the SID copy directly) to separate event
 timing from the ADSR replay. `CRSID_HOST_TEST` maps the shared regions to
 plain arrays and enables both split roles in one binary (the device build

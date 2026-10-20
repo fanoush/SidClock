@@ -240,6 +240,13 @@ CRSID_HOT_CODE cRSID_Output* cRSID_emulateC64 () {
 #ifdef CRSID_SPLIT
  unsigned short SplitCycles = 0; //sum of this sample's instruction cycles
 #endif
+#ifdef CRSID_SPLIT_CPU_SIDE
+ /* Cycle offset of the next write inside this sample (see flpr_shared.h):
+  * reset here, advanced after every instruction below. A write executes
+  * before its instruction's cycles are added, so the value it reads is
+  * the instruction's start offset - exactly what the M33's replay needs. */
+ if (cRSID_splitMode) FLPR_SPLIT->cur_cyc = 0;
+#endif
  static unsigned char VUmeterUpdateCounter;
  static cRSID_Output* Output;
 #ifdef CRSID_SPLIT_PROF
@@ -310,6 +317,9 @@ CRSID_HOT_CODE cRSID_Output* cRSID_emulateC64 () {
 
 #ifdef CRSID_SPLIT
   SplitCycles += InstructionCycles;
+#endif
+#ifdef CRSID_SPLIT_CPU_SIDE
+  if (cRSID_splitMode) FLPR_SPLIT->cur_cyc = SplitCycles;
 #endif
 #ifdef CRSID_SPLIT_CPU_SIDE
   if (!cRSID_splitMode)
@@ -430,8 +440,9 @@ void cRSID_setSplit (char on) {
   int i;
 
   /* Split B: the M33 renders the SID stage from its own register copy
-   * (the blob's CPU runs ahead and pushes writes as events). */
-  for (i=0; i<32; ++i) ((volatile unsigned char*)FLPR_SID_REGCOPY)[i] = 0;
+   * (the blob's CPU runs ahead and pushes writes as events). One 32-byte
+   * block per chip, so clear them all. */
+  for (i=0; i<(int)FLPR_SID_REGCOPY_SIZE; ++i) ((volatile unsigned char*)FLPR_SID_REGCOPY)[i] = 0;
   for (i=1; i<=CRSID_SIDCOUNT_MAX; ++i) {
    cRSID_SIDinstance* SID = &cRSID_C64.SID[i];
 
@@ -445,12 +456,37 @@ void cRSID_setSplit (char on) {
 /* M33 side (split B): render one sample from the blob's cycle count and
  * the SID writes it recorded. Events are applied just before the sample
  * they belong to, so register timing stays within one sample. */
+/* Advance the envelope generators by `cycles` (<= 7 per pass, see
+ * SID_ADSR.c). The split replays a sample's cycles in order, stopping at
+ * each recorded SID write. */
+static void cRSID_splitReplayAdsr (unsigned short cycles) {
+ int n;
+
+ for (n=1; n<=CRSID_SIDCOUNT_MAX; ++n) {
+  cRSID_SIDinstance* SID = &cRSID_C64.SID[n];
+  FASTVAR unsigned short left = cycles;
+
+  if (n > 1 && SID->BaseAddress == 0) continue; //unused SID
+  /* The ADSR pass expects instruction-sized windows: it detects at most
+   * one envelope shot per call and the quiet-voice folding assumes
+   * cycles/call <= 7 (< any prescale period). */
+  while ( left ) {
+   FASTVAR unsigned short acc;
+   FASTVAR unsigned char w = (unsigned char)(left > 7 ? 7 : left);
+
+   acc = SID->ADSRacc + w;
+   if ( acc >= SID->ADSRthr ) { cRSID_emulateADSRs( SID, (unsigned short)(acc - w), w ); acc = 0; }
+   SID->ADSRacc = acc;
+   left -= w;
+  }
+ }
+}
+
 int cRSID_renderSplitSample (void) {
  uint32_t s = FLPR_SPLIT->cons;
- uint16_t pos = (uint16_t)(s & 0xFFFF);
  unsigned short cyc;
+ uint32_t done = 0; //cycles of this sample already replayed
  static cRSID_Output Out;
- int n;
 
  if ( FLPR_SPLIT->prod == s ) return 0; //blob has not reached this sample yet
  { uint32_t lead = FLPR_SPLIT->prod - s;
@@ -463,45 +499,77 @@ int cRSID_renderSplitSample (void) {
 
  while ( FLPR_SPLIT->econs != FLPR_SPLIT->eprod ) {
   uint32_t e = FLPR_SPLIT->econs % FLPR_EVENTS_MAX;
+  uint32_t at;
 
-  if ( (short)(FLPR_EVENTS[e].pos - pos) > 0 ) break; //belongs to a later sample
-  ((volatile unsigned char*)FLPR_SID_REGCOPY)[FLPR_EVENTS[e].reg] = FLPR_EVENTS[e].val;
-  /* A SID register write must force the envelope pass for this sample
-   * (gate/rate changes). The CPU side sets ADSRthr=0 too, but it runs up
-   * to a buffer ahead, so the M33 has already consumed that forcing by
-   * the time the write arrives - it has to force it here. */
-  { int m;
+  if ( (int32_t)(FLPR_EVENTS[e].pos - s) > 0 ) break; //belongs to a later sample
+  /* Replay the cycles before this write first: the envelope must be at
+   * the state the CPU saw when it issued it. */
+  at = FLPR_EVENTS[e].cyc;
+  if (at > cyc) at = cyc;
+  if (at > done) { cRSID_splitReplayAdsr((unsigned short)(at - done)); done = at; }
+  /* Apply the write to the chip's own 32-byte block (2SID/3SID tunes),
+   * then let the envelope pass latch it the way the per-instruction fold
+   * does on the unsplit engine: settle the cycles elapsed before the
+   * write (a pure fold - what the accumulated ADSRacc stands for), then
+   * evaluate the write itself. The CPU side runs ahead, so several
+   * writes of this sample are already in the ring; collapsing them into
+   * one pass loses a hard restart (gate off then on a few instructions
+   * later) and the envelope never restarts - Leviathan did exactly that
+   * on every note-on. */
+  { uint32_t chip = FLPR_EVENTS[e].chip;
+    cRSID_SIDinstance* SID;
 
-   for (m=1; m<=CRSID_SIDCOUNT_MAX; ++m) {
-    cRSID_SIDinstance* SID = &cRSID_C64.SID[m];
+    if ( chip < 1U || chip > CRSID_SIDCOUNT_MAX ) chip = 1U;
+    ((volatile unsigned char*)FLPR_SID_REGCOPY)[(chip - 1U) * 32U + FLPR_EVENTS[e].reg] =
+     FLPR_EVENTS[e].val;
+    SID = &cRSID_C64.SID[chip];
+    if ( SID->BaseAddress ) {
+     unsigned short pending = SID->ADSRacc;
 
-    if ( SID->BaseAddress && SID->BaseAddress <= 0xD400 + FLPR_EVENTS[e].reg &&
-        0xD400 + FLPR_EVENTS[e].reg < SID->BaseAddress + 0x1C ) SID->ADSRthr = 0;
-   }
+     SID->ADSRacc = 0;
+     if (pending) cRSID_emulateADSRs(SID, pending, 0);
+     SID->ADSRthr = 0;
+     cRSID_emulateADSRs(SID, 0, 0);
+    }
   }
   FLPR_SPLIT->econs = FLPR_SPLIT->econs + 1;
  }
 
- for (n=1; n<=CRSID_SIDCOUNT_MAX; ++n) {
-  cRSID_SIDinstance* SID = &cRSID_C64.SID[n];
-  FASTVAR unsigned short left = cyc;
+ /* Rest of the sample, after the last write. */
+ if ( cyc > done ) cRSID_splitReplayAdsr((unsigned short)(cyc - done));
 
-  if (n > 1 && SID->BaseAddress == 0) continue; //unused SID
-  /* The ADSR pass expects instruction-sized windows: it detects at most
-   * one envelope shot per call and the quiet-voice folding assumes
-   * cycles/call <= 7 (< any prescale period). Replay the sample's cycles
-   * in <=7-cycle chunks, exactly like the per-instruction fold. */
-  while ( left ) {
-   FASTVAR unsigned short acc;
-   FASTVAR unsigned char w = (unsigned char)(left > 7 ? 7 : left);
+ /* Same output-stage selection as the unsplit engine (the tail of
+  * cRSID_emulateC64): a tune with the HighQualitySID flag must take the
+  * oversampled path. Forcing the light renderer here made HQ tunes play
+  * at a different oscillator pitch scale and through a different
+  * filter/resampler chain - Leviathan sounded like a different, thinner
+  * arrangement from the first note in split mode while cRSID was fine. */
+ if ( TIGHTLY (cRSID_C64.HighQualitySID) ) {
+  if ( TIGHTLY (cRSID_C64.HighQualityResampler) ) cRSID_emulateHQresampledSIDs();
+  else cRSID_emulateOversampledSIDwaves();
+ }
 
-   acc = SID->ADSRacc + w;
-   if ( acc >= SID->ADSRthr ) { cRSID_emulateADSRs( SID, (unsigned short)(acc - w), w ); acc = 0; }
-   SID->ADSRacc = acc;
-   left -= w;
+ /* Samplerate-paced counters, exactly as the unsplit tail does them
+  * (PlayTime drives the >1h clamp, the TOD registers feed PSID tunes
+  * that read the CIA clock). */
+ if ( CALMLY (!cRSID_C64.RealSIDmode) ) {
+  --cRSID_C64.TenthSecondCnt;
+  if ( RARELY (cRSID_C64.TenthSecondCnt <= 0) ) {
+   cRSID_C64.TenthSecondCnt = cRSID_C64.SampleRate / 10;
+   ++( cRSID_C64.IObankRD[((0xDC08) & 0xFFF)] );
+   if ( RARELY (cRSID_C64.IObankRD[((0xDC08) & 0xFFF)] >= 10) ) {
+    cRSID_C64.IObankRD[((0xDC08) & 0xFFF)] = 0; ++( cRSID_C64.IObankRD[((0xDC09) & 0xFFF)] );
+   }
   }
  }
- Out = *cRSID_emulateLightSIDs();
+ if ( MOSTLY (cRSID_C64.SecondCnt < cRSID_C64.SampleRate) ) ++cRSID_C64.SecondCnt;
+ else { cRSID_C64.SecondCnt = 0; if ( MOSTLY (cRSID.PlayTime<3600) ) ++cRSID.PlayTime; }
+
+ if ( TIGHTLY (cRSID_C64.HighQualitySID) ) {
+  Out = TIGHTLY (cRSID_C64.HighQualityResampler) ? *cRSID_emulateHQresampledSIDoutputs()
+						 : *cRSID_emulateOversampledSIDoutputs();
+ }
+ else Out = *cRSID_emulateLightSIDs();
  FLPR_SPLIT->cons = s + 1;
  return Out.L;
 }
