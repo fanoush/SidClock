@@ -172,7 +172,6 @@ details[open] .chev { transform: rotate(90deg); }
   font-size: 13px;
   font-variant-numeric: tabular-nums;
 }
-.progressrow .dim { flex: 1; text-align: center; }
 
 /* ---------- buttons ---------- */
 
@@ -232,6 +231,23 @@ select:disabled { opacity: .35; }
   padding: 3px 10px;
   font-size: 12.5px;
   color: var(--dim);
+}
+/* the end-mode badge is the one pressable badge: cycles next sub ->
+ * next tune -> loop over Bluetooth (firmware command 0x22) */
+button.badge {
+  font: inherit;
+  font-size: 12.5px;
+  line-height: normal;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+button.badge:disabled { opacity: .35; cursor: default; }
+button.badge:active:not(:disabled) { transform: translateY(1px); }
+button.badge.action::after {
+  content: '↻';
+  margin-left: 6px;
+  color: var(--fg);
+  opacity: .6;
 }
 
 /* ---------- device rows ---------- */

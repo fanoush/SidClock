@@ -51,6 +51,7 @@ signals: they are only compiled into **debug builds**
 | `1B` / `1C` | step to the next / previous subtune |
 | `20` + u8 `sub` + name | play `/home/<name>` at subtune `sub` - `11` plus a subtune (`sub` is 1-based, like the UI counts, and `255` selects the PSID startSong) |
 | `21` + u8 `sub` | play subtune `sub` (1-based) of the loaded tune; `255` = the PSID startSong. Rejected when no tune is loaded. |
+| `22` + u8 `mode` | end-of-tune mode - the SID screen END button: `0` = next subtune, `1` = next tune, `2` = loop the subtune. Takes effect at the next song end, no reload. |
 | `1D` [+ u8 `page`] | stack telemetry for the overflow hunt, 4 rows per page: the **interrupt stack** first, then the threads in creation order. `(size, free)` u16 pairs at `[36..51]`, the matching 11-byte names at `[52..95]`; `[34]` marker, `[35]` page with bit 7 set to say the names follow and bit 6 set on the last page (bit 7 clear = the older 5-per-page layout without names; bit 6 clear everywhere = firmware from before the interrupt row). Only the requested page is latched, so one page costs 4 stack scans. Under 256 B free anywhere is the smoking gun. |
 | `1E` [+ u8 `mode`] | drain the SEGGER RTT log buffer - the `LOG_*` lines a debug probe would show; the next read returns up to 60 bytes of text at `[36..95]`, the byte count in `[35]`, `[34]` = marker. The bare opcode (or `mode` 0) **consumes** the chunk, so the device forgets it and a second call only shows newer lines. `mode` 1 restarts a *peek* at the oldest unread byte and 2 continues it; a peek never moves the read pointer, so it is repeatable and a later consume still sees the window. |
 | `1F` [+ u8 `mode`] | accelerometer diagnosis into the log (**read-only** in a release image): I2C scan 0x08-0x77, `WHO_AM_I` at both possible addresses (0x19/0x18), what the Zephyr driver and the built-in poller each return, registers 0x00-0x5F as eight-byte rows, single-register reads of the control block and of the six output bytes, and a `CTRL_REG1`/`CTRL_REG4` write/read-back. This is what showed that a unit serving all zeros only needed the missing initialization: `ctrl2=30 ctrl4=88` and a moving `reg 28` row mean the chip is configured and converting, `ctrl2=00` with frozen output bytes means it is not. `SIDCLOCK_DEBUG` builds also take `mode` 1 (reboot the register file from OTP via the `CTRL_REG5` BOOT bit, then walk the ODR settings logging the output registers after each) and `mode` 2 (drop the sensor rail P1.11 for 150 ms, then bring touch, ambient light and the accelerometer back up and watch the data registers). |
@@ -61,7 +62,7 @@ full 24-byte buffer - so a `.sid` and all of its sidecars stay addressable
 (a `.stil` is one character longer than its `.sid`; uploaded `.sid` names
 stay at 20, keeping the sidecars inside the limit with room to spare).
 
-Player commands (`0E`, `11`, `12`, `17` and `18`..`21`) are executed by
+Player commands (`0E`, `11`, `12`, `17`, `22` and `18`..`21`) are executed by
 the **main loop** a moment after the write - the same path as a button
 press. They must not run on the Bluetooth receive workqueue, whose small
 stack cannot hold the tune loader plus a directory scan, so the write

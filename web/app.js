@@ -18,7 +18,7 @@ const $ = (id) => document.getElementById(id);
 const sc = new SidClock();
 
 const CONTROLS = ['prev', 'play', 'next', 'stop', 'subprev', 'subnext',
-                  'subtune', 'settime'];
+                  'subtune', 'ends', 'settime'];
 
 let lastGeneration = -1;
 let noteTimer = null;
@@ -231,7 +231,7 @@ function renderState(st) {
   $('progressbar').style.width = `${pct}%`;
   $('pos').textContent = fmtSeconds(st.elapsed);
   $('len').textContent = st.length > 0 ? fmtSeconds(st.length) : '--:--';
-  $('ends').textContent = END_MODES[st.endMode] || '';
+  $('ends').textContent = `ends: ${END_MODES[st.endMode] || '?'}`;
 
   updateTrackHighlight();
 }
@@ -982,6 +982,14 @@ $('subprev').addEventListener('click',
 $('subnext').addEventListener('click',
   () => run(sc.nextSubtune(), 'next subtune'));
 $('stop').addEventListener('click', () => run(sc.stop(), 'stop'));
+
+/* the end-mode badge cycles: next sub -> next tune -> loop. The device
+ * pushes the new state, which updates the label. */
+$('ends').addEventListener('click', () => {
+  if (!sc.connected || !currentState) return;
+  run(sc.setEndMode((currentState.endMode + 1) % END_MODES.length),
+      'end mode');
+});
 
 $('subtune').addEventListener('change', () => {
   const n = Number($('subtune').value);

@@ -1635,6 +1635,7 @@ static ssize_t ble_dbg_write(struct bt_conn *conn,
 	      (len == 2U && p[0] >= 0x18U && p[0] <= 0x1CU) ||
 	      (len >= 3U && len <= SID_CMD_NAME_MAX + 2U && p[0] == 0x20U) ||
 	      (len == 2U && p[0] == 0x21U) ||
+	      (len == 2U && p[0] == 0x22U) ||
 #ifdef SID_ENGINE_DUAL
 	      (len == 2U && p[0] == 0x17U) ||
 #endif
@@ -1834,6 +1835,16 @@ static ssize_t ble_dbg_write(struct bt_conn *conn,
 			return BT_GATT_ERR(BT_ATT_ERR_VALUE_NOT_ALLOWED);
 		}
 		if (sid_req_post(0x21, p[1], NULL) != 0) {
+			return BT_GATT_ERR(BT_ATT_ERR_INSUFFICIENT_RESOURCES);
+		}
+		break;
+	case 0x22:
+		/* End-of-tune mode (the SID screen END button): 0 = next
+		 * subtune, 1 = next tune, 2 = loop the subtune. */
+		if (len != 2U || p[1] > 2U) {
+			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+		}
+		if (sid_req_post(0x22, p[1], NULL) != 0) {
 			return BT_GATT_ERR(BT_ATT_ERR_INSUFFICIENT_RESOURCES);
 		}
 		break;
@@ -4001,6 +4012,11 @@ static void sid_req_take(void)
 	case 0x21:
 		sid_play_sub(arg);
 		audio_sid_start();
+		break;
+	case 0x22:
+		/* same as the SID screen END button; sid_ui_sync() repaints
+		 * the label and player_ble_tick() pushes the new state */
+		sid_end_mode = (int)(arg % 3U);
 		break;
 	default:
 		break;

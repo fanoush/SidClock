@@ -24,6 +24,8 @@ User commands:
   filedelete <name>  delete a song file from /home (a .sid also removes
             its .len/.stil sidecars; config files are protected)
   chip M    SID chip model: auto (follow PSID flags) | 6581 | 8580
+  endmode M end-of-tune mode: nextsub | nexttune | loop (the SID screen
+            END button; takes effect at the next song end)
   engine E  SID engine (dual builds): new (cRSID) | old (cSID-light)
   ls        list the files in /home on the device
   log       print the device's SEGGER RTT log buffer (the LOG_* lines a
@@ -793,6 +795,17 @@ async def cmd_chip(addr, mode=None):
           f" (reloads the current tune)")
 
 
+async def cmd_endmode(addr, value=None):
+    """End-of-tune mode: what the SID screen's END button cycles."""
+    modes = {"nextsub": 0, "nexttune": 1, "loop": 2}
+    m = modes.get(str(value).lower()) if value is not None else None
+    if m is None:
+        raise SystemExit("end mode: nextsub | nexttune | loop")
+    async with connect(addr) as c:
+        await c.write_gatt_char(DBG_CHAR, bytes([0x22, m]), response=True)
+    print(f"end mode -> {END_MODES[m]}")
+
+
 def _rtt_chunk(raw):
     """Log text from a snapshot read served by the 0x1E debug command."""
     if len(raw) < 96 or raw[34] != 0x1E:
@@ -1026,7 +1039,7 @@ def main():
             "status", "set-time", "monitor", "audio", "click", "beep",
             "tone", "mute", "rate", "tonefreq",
         "tonestart", "tonestop", "fsformat", "sid", "sidname", "chip",
-        "sidstop", "ls", "glitch", "blemode", "filedelete",
+        "sidstop", "ls", "glitch", "blemode", "filedelete", "endmode",
         "engine", "stacks", "threads", "log", "accel",
         "playpause", "next", "prev", "subnext", "subprev", "subplay",
         "state", "watch",
@@ -1076,6 +1089,7 @@ def main():
         "sid": cmd_sid,
         "sidname": cmd_sidname,
         "chip": cmd_chip,
+        "endmode": cmd_endmode,
         "ls": cmd_ls,
         "sidstop": lambda a: cmd_tone(a, 0x0F),
         "glitch": cmd_glitch,
@@ -1101,7 +1115,8 @@ def main():
         asyncio.run(fn(args.addr, args.value))
     elif args.command == "sidname":
         asyncio.run(fn(args.addr, args.value, args.sub))
-    elif args.command in ("chip", "filedelete", "engine", "stacks", "threads"):
+    elif args.command in ("chip", "filedelete", "engine", "stacks",
+                          "threads", "endmode"):
         asyncio.run(fn(args.addr, args.value))
     elif args.command == "set-time":
         asyncio.run(fn(args.addr, args.value))

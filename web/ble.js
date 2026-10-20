@@ -11,7 +11,8 @@
  * Commands are one opcode byte plus arguments, written to the debug
  * characteristic: 0x18 play/pause, 0x19/0x1A next/prev tune,
  * 0x1B/0x1C next/prev subtune, 0x21 sub play (1-based, 255 = startSong),
- * 0x20 sub+name play file at subtune, 0x0F stop, 0x13 listing page,
+ * 0x20 sub+name play file at subtune, 0x22 end-of-tune mode (0 = next
+ * subtune, 1 = next tune, 2 = loop), 0x0F stop, 0x13 listing page,
  * 0x16 delete file.
  *
  * The device runs player commands in its main loop, so a command is
@@ -334,6 +335,11 @@ export class SidClock {
   /** Play subtune `n` (1-based; 255 = the PSID startSong). */
   playSubtune(n) {
     return this._cmd([0x21, n & 0xff]);
+  }
+  /** What happens when the tune ends (the SID screen END button):
+   *  0 = next subtune, 1 = next tune, 2 = loop the subtune. */
+  setEndMode(mode) {
+    return this._cmd([0x22, mode & 0xff]);
   }
   /** Play /home/<name> at subtune `sub` (1-based; 255 = startSong). */
   playFile(name, sub = 0xff) {

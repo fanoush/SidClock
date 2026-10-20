@@ -787,6 +787,14 @@ await test('ble: SidClock retries the CCC write once', () =>
     eq(clock.subs, 2, 'startNotifications attempted twice');
   }));
 
+await test('ble: SidClock end-mode command', () =>
+  withMockClock(async (clock) => {
+    const sc = new SidClock();
+    await sc.connect();
+    await sc.setEndMode(2);
+    eq(clock.dbgChar.writes, [[0x22, 2]], 'opcode 0x22 + mode');
+  }));
+
 await test('ble: SidClock retries a read but not after disconnect', () =>
   withMockClock(async (clock) => {
     const sc = new SidClock();

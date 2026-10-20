@@ -16,8 +16,10 @@
   Both reads work in every BLE access mode.
 - New player commands in the debug interface: `18` play/pause,
   `19`/`1A` next/previous tune, `1B`/`1C` next/previous subtune,
-  `20` + subtune + name (play a file at a specific subtune) and
-  `21` + subtune (jump to a subtune of the loaded tune).
+  `20` + subtune + name (play a file at a specific subtune),
+  `21` + subtune (jump to a subtune of the loaded tune) and `22` + mode
+  (end-of-tune mode - the SID screen END button: next subtune, next tune,
+  loop; `sidclock_ble.py endmode` drives it).
 - **Web remote**: `web/` is a static page (no build step) that connects
   over Web Bluetooth - battery, the device and browser clocks side by
   side (the device one turns amber while they disagree - no RTC, the time
@@ -76,6 +78,11 @@
   above the search card and is a collapsed `<details>` now - its header
   keeps the tune count and the refresh button - so a long result list
   cannot bury it, and neither can a long device list bury the search.
+- **Web remote: the end-mode badge**. The cryptic "next sub" text in the
+  progress row moved next to the chip/engine/snd badges and became the
+  one pressable badge: tapping it cycles next sub -> next tune -> loop
+  over the new firmware command `22` (the device pushes the new state and
+  repaints its own SID screen).
 - **Web remote: "already on the device" markers**. Search results now
   remember what this browser uploaded - the upload map plus the `/home`
   listing - so a tune that is still on the device shows a green
