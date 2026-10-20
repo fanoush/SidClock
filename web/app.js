@@ -722,7 +722,7 @@ function renderLibrary(failed = false) {
     play.type = 'button';
     play.className = 'btn small';
     play.textContent = 'play';
-    if (name.length > 20) {
+    if (name.length > 23) {
       play.dataset.locked = '1';
       play.title = 'name too long for the play command';
     } else {
@@ -733,7 +733,7 @@ function renderLibrary(failed = false) {
     del.type = 'button';
     del.className = 'btn small';
     del.textContent = '✕';
-    if (name.length > 20) {
+    if (name.length > 23) {
       del.dataset.locked = '1';
       del.title = 'name too long for the delete command';
     } else {
@@ -758,7 +758,8 @@ async function deleteTune(name) {
   refreshControls();
   try {
     const missing = await sc.deleteFile(name);
-    note(`${name} deleted${missing.length ? ' (sidecars were missing)' : ''}`);
+    note(`${name} deleted${missing.length
+      ? ` (could not remove ${missing.join(', ')})` : ''}`);
   } catch (e) {
     console.error(e);
     note(commandError(e, 'delete'), true);

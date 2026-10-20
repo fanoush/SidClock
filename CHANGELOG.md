@@ -40,8 +40,9 @@
   on first use and cached in IndexedDB (about 9 MB together) - the
   parsing, truncation and size caps match `tools/sid_add.py`, and a
   whole-file MD5 implementation (`web/md5.js`, WebCrypto has none) keys
-  the lookup. Uploaded names are shortened to the firmware's 20-character
-  command limit with the original HVSC path remembered. The page also
+  the lookup. Uploaded names are shortened to 20 characters - the
+  commands take up to 23, but a `.stil` sidecar is one longer - with the
+  original HVSC path remembered. The page also
   lists `/home` (debug command `13`), marks tunes that have sidecars and
   plays/deletes them (delete drops the sidecars, `16`), and while a tune
   plays it shows the HVSC info: song lengths, subtune names (tap to jump),
@@ -141,6 +142,15 @@
   punctuation and `_`/space ("RoboCop 3" = `RoboCop_3.sid`, "IK+" =
   `IK_plus.sid`), including the 16-character stem of a shortened file
   name.
+- Deleting a tune could leave its `.stil` sidecar behind: the delete
+  command (`16`) rejected names over 20 characters, so a tune whose stem
+  is 16 characters long (`Turrican_intro_s`) had its `.sid` and `.len`
+  removed and then the page gave up on `Turrican_intro_s.stil` (21
+  characters) with an error. The device now accepts names up to 23
+  characters - the full size of its buffers - for `11`, `16` and `20`,
+  the page and the CLI use the same limit, and a sidecar that still
+  cannot be removed is named in the status line instead of aborting the
+  delete half way.
 - Player commands from BLE now run in the main loop instead of the
   Bluetooth receive workqueue. That workqueue's 2 KB stack was already at
   96 % during a tune load and "next tune" adds a directory scan on top:

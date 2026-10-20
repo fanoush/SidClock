@@ -1591,6 +1591,13 @@ static volatile uint8_t sid_req_op; /* 0 = idle, else the opcode */
 static uint8_t sid_req_arg;         /* subtune / chip mode / engine */
 static char sid_req_name[24];       /* 0x11 and 0x20 file name */
 
+/* Longest file name the name-taking commands (0x11/0x16/0x20) accept: the
+ * buffers are 24 bytes and /home names run up to 23 characters. Anything
+ * shorter would lock a tune's sidecars out of the delete command: a
+ * `.stil` is one character longer than the `.sid` it belongs to, so the
+ * old 20-character cap left e.g. Turrican_intro_s.stil (21) behind. */
+#define SID_CMD_NAME_MAX 23U
+
 static int sid_req_post(uint8_t op, uint8_t arg, const char *name)
 {
 	if (sid_req_op != 0U) {
@@ -1623,10 +1630,10 @@ static ssize_t ble_dbg_write(struct bt_conn *conn,
 	      (len == 2U && p[0] == 0x1DU) ||
 	      (len == 2U && p[0] == 0x1EU) ||
 	      (len == 2U && p[0] == 0x1FU) ||
-	      (len >= 2U && len <= 21U && p[0] == 0x11U) ||
-	      (len >= 2U && len <= 21U && p[0] == 0x16U) ||
+	      (len >= 2U && len <= SID_CMD_NAME_MAX + 1U && p[0] == 0x11U) ||
+	      (len >= 2U && len <= SID_CMD_NAME_MAX + 1U && p[0] == 0x16U) ||
 	      (len == 2U && p[0] >= 0x18U && p[0] <= 0x1CU) ||
-	      (len >= 3U && len <= 22U && p[0] == 0x20U) ||
+	      (len >= 3U && len <= SID_CMD_NAME_MAX + 2U && p[0] == 0x20U) ||
 	      (len == 2U && p[0] == 0x21U) ||
 #ifdef SID_ENGINE_DUAL
 	      (len == 2U && p[0] == 0x17U) ||
@@ -1690,7 +1697,7 @@ static ssize_t ble_dbg_write(struct bt_conn *conn,
 	case 0x11: {
 		char name[24];
 
-		if (len < 2U || len > 21U) {
+		if (len < 2U || len > SID_CMD_NAME_MAX + 1U) {
 			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
 		}
 		memcpy(name, p + 1, len - 1U);
@@ -1707,7 +1714,7 @@ static ssize_t ble_dbg_write(struct bt_conn *conn,
 		 * config files cannot be removed by accident. */
 		char name[24], path[40];
 
-		if (len < 2U || len > 21U) {
+		if (len < 2U || len > SID_CMD_NAME_MAX + 1U) {
 			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
 		}
 		memcpy(name, p + 1, len - 1U);
@@ -1808,7 +1815,7 @@ static ssize_t ble_dbg_write(struct bt_conn *conn,
 		 * subtune */
 		char name[24];
 
-		if (len < 3U || len > 22U) {
+		if (len < 3U || len > SID_CMD_NAME_MAX + 2U) {
 			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
 		}
 		memcpy(name, p + 2, len - 2U);

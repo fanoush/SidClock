@@ -8,10 +8,10 @@
  *   - the device-side `.len` / `.stil` sidecars, built exactly like
  *     tools/sid_add.py builds them
  *
- * The device keeps tune names in 24-byte buffers and both the debug
- * play-by-name and delete commands take at most 20 characters, so a
- * longer HVSC file name is shortened for the device (the upload map
- * remembers the original for the info panel).
+ * The device keeps tune names in 24-byte buffers and its debug commands
+ * take up to 23 characters, but a `.stil` sidecar is one character longer
+ * than its `.sid`, so a longer HVSC file name is shortened to 20 for the
+ * device (the upload map remembers the original for the info panel).
  */
 
 import { md5 } from './md5.js';
@@ -28,7 +28,10 @@ const TUNE_CHARS = 200;
 const NOTE_CHARS = 160;
 const MAX_BYTES = 3000;
 
-/** Longest device file name the commands and the player accept. */
+/** Longest `.sid` name uploads use. The name-taking commands and the
+ *  player accept 23 characters (the full 24-byte buffer), but a `.stil`
+ *  sidecar is one character longer than its `.sid`: 20 keeps every
+ *  uploaded sidecar inside the limit (<= 21). */
 export const DEVICE_NAME_MAX = 20;
 
 /** The name the tune will have on the device (<= 20 chars). */

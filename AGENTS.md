@@ -161,9 +161,10 @@ Do not break these without discussing it in the PR/commit:
   libsidplayfp PSID fingerprint and does *not* match it (that one is only
   for the legacy `Songlengths.txt`). Change both implementations together.
 - The page shortens uploaded names to 20 characters (`sid_find_next` skips
-  names over 23, but play-by-name `0x20` and `filedelete` `0x16` take at
-  most 20) and remembers the original HVSC path per device name, because
-  several HVSC files can share one file name.
+  names over 23; the name-taking commands `11`/`16`/`20` take up to 23,
+  but a `.stil` sidecar is one character longer than its `.sid`, so 20
+  keeps every uploaded sidecar deletable) and remembers the original HVSC
+  path per device name, because several HVSC files can share one name.
 - Tune identity is exact now: the info characteristic is 96 bytes and its
   last 8 are the loaded file's whole-file MD5 prefix (`sid_player_md5_prefix`,
   `app/src/md5.c`; `00000000` = unknown - no HVSC file has that prefix).

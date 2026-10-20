@@ -56,6 +56,11 @@ signals: they are only compiled into **debug builds**
 | `1F` [+ u8 `mode`] | accelerometer diagnosis into the log (**read-only** in a release image): I2C scan 0x08-0x77, `WHO_AM_I` at both possible addresses (0x19/0x18), what the Zephyr driver and the built-in poller each return, registers 0x00-0x5F as eight-byte rows, single-register reads of the control block and of the six output bytes, and a `CTRL_REG1`/`CTRL_REG4` write/read-back. This is what showed that a unit serving all zeros only needed the missing initialization: `ctrl2=30 ctrl4=88` and a moving `reg 28` row mean the chip is configured and converting, `ctrl2=00` with frozen output bytes means it is not. `SIDCLOCK_DEBUG` builds also take `mode` 1 (reboot the register file from OTP via the `CTRL_REG5` BOOT bit, then walk the ODR settings logging the output registers after each) and `mode` 2 (drop the sensor rail P1.11 for 150 ms, then bring touch, ambient light and the accelerometer back up and watch the data registers). |
 | `50` | 1 s test tone |
 
+Name-taking commands (`11`, `16`, `20`) accept up to 23 characters - the
+full 24-byte buffer - so a `.sid` and all of its sidecars stay addressable
+(a `.stil` is one character longer than its `.sid`; uploaded `.sid` names
+stay at 20, keeping the sidecars inside the limit with room to spare).
+
 Player commands (`0E`, `11`, `12`, `17` and `18`..`21`) are executed by
 the **main loop** a moment after the write - the same path as a button
 press. They must not run on the Bluetooth receive workqueue, whose small

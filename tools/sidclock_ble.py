@@ -644,8 +644,8 @@ async def cmd_sidname(addr, name=None, sub=None):
     if not name:
         raise SystemExit("usage: sidname <name.sid>  (file in /home)")
     data = name.encode("ascii", "replace")
-    if len(data) > 20:
-        raise SystemExit("file name too long (max 20 chars)")
+    if len(data) > 23:
+        raise SystemExit("file name too long (max 23 chars)")
     if sub is not None and not 1 <= sub <= 255:
         raise SystemExit("subtune must be 1..255 (255 = the PSID default)")
     payload = (bytes([0x20, sub]) if sub is not None else bytes([0x11])) + data
@@ -764,19 +764,22 @@ async def cmd_filedelete(addr, name=None):
     async with connect(addr) as c:
         for i, n in enumerate(names):
             data = n.encode("ascii", "replace")
-            if len(data) > 20:
-                raise SystemExit("file name too long (max 20 chars)")
+            if len(data) > 23:
+                if i == 0:
+                    raise SystemExit("file name too long (max 23 chars)")
+                print(f"cannot delete (name too long): {n}")
+                continue
             try:
                 await c.write_gatt_char(DBG_CHAR, bytes([0x16]) + data,
                                         response=True)
                 print(f"deleted: {n}")
-            except Exception:
+            except Exception as e:
                 if i == 0:
                     raise SystemExit(
                         f"could not delete {n} - missing, or not a "
                         ".sid/.len/.stil file"
                     )
-                print(f"not present: {n}")
+                print(f"could not delete {n}: {e}")
 
 
 async def cmd_chip(addr, mode=None):

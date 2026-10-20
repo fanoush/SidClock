@@ -378,7 +378,14 @@ export class SidClock {
     const missing = [];
     for (let i = 0; i < targets.length; i++) {
       const data = new TextEncoder().encode(targets[i]);
-      if (data.length > 20) throw new Error('file name too long (max 20)');
+      if (data.length > 23) {
+        /* the device takes up to 23 characters; a sidecar that is over
+         * cannot be removed - report it instead of aborting the delete
+         * half way through (the .sid is already gone at that point) */
+        if (i === 0) throw new Error('file name too long (max 23)');
+        missing.push(targets[i]);
+        continue;
+      }
       try {
         await this._cmd([0x16, ...data]);
       } catch (e) {
