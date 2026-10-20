@@ -224,8 +224,7 @@ function renderState(st) {
   $('chip').textContent =
     `chip ${CHIP_NAMES[st.chip] || '?'} · ${MODEL_MODES[st.modelMode] || 'auto'}`;
   $('engine').textContent = st.legacyEngine ? 'legacy engine'
-    : st.splitEngine ? 'cRSID split (M33+FLPR)'
-    : st.flprEngine ? 'cRSID on FLPR' : 'cRSID';
+    : st.splitEngine ? 'cRSID split (FLPR CPU)' : 'cRSID';
   $('snd').textContent = st.sound ? 'snd on' : 'muted';
 
   const pct = st.length > 0

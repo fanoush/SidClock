@@ -137,7 +137,7 @@ void flpr_render_start(void)
 {
 	/* Drop whatever queued while stopped: engine state is about to be
 	 * (or just was) re-initialised, so those samples are stale. */
-	FLPR_SHARED->read_idx = FLPR_SHARED->write_idx;
+	FLPR_SHARED->read_idx = FLPR_SHARED->write_idx; /* retired */
 	FLPR_SHARED->run = 1U;
 }
 

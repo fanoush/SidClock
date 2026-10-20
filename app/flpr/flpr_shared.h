@@ -33,33 +33,31 @@
 #define FLPR_CODERAM_BASE 0x2002F000UL
 #define FLPR_CODERAM_SIZE 0x0000D000UL /* 52 KB: cRSID_emulateC64 */
 
-/* PCM ring: int16 mono frames, written by the FLPR, drained by the M33
- * audio path. 8 KB (4096 frames, ~0.19 s at 22 kHz) rides out the M33's
- * flash/UI stalls now that the hot engine code runs from SRAM and keeps
- * up with realtime.
+/* Event ring region (8 KB). The whole-engine mode used this as an int16
+ * PCM ring; it was removed (too slow on the FLPR), and the split engine
+ * uses the same window for SID-write events (FLPR_EVENTS below).
  *
- * FRAMES is derived from the byte size on purpose: it holds int16
- * samples, so the index range is exactly half the byte size. Both cores
- * bound their accesses with it, and a frames/bytes mix-up once walked
- * the ring past its reserved window into private RAM, the mailbox and
- * finally past the end of SRAM (M33 bus fault at 0x20043460).
- * blob_audit.py --check-ram enforces the relation and the layout. */
+ * The size is still expressed as int16 frames because blob_audit.py
+ * --check-ram validates the FLPR RAM map through FLPR_RING_BASE/SIZE
+ * (and a frames/bytes mix-up once walked this window into private RAM,
+ * the mailbox and past the end of SRAM: M33 bus fault at 0x20043460). */
 #define FLPR_RING_BASE 0x2003C000UL
-#define FLPR_RING_SIZE 0x00002000UL /* 8 KB of int16 frames */
-#define FLPR_RING_FRAMES (FLPR_RING_SIZE / 2U) /* 4096 frames */
+#define FLPR_RING_SIZE 0x00002000UL /* 8 KB event window */
+#define FLPR_RING_FRAMES (FLPR_RING_SIZE / 2U) /* 4096 entries */
 
-/* --- split mode: M33 runs the C64/CPU, the FLPR runs the SID ---------
+/* --- split engine (B): FLPR runs the C64/CPU, the M33 the SID stage --
  *
- * The SID stage is ~59% of the emulation and the 6510 interpreter ~41%,
- * so the engine is split at the existing boundary: the M33 runs the
- * per-instruction cycle loop (CPU, CIA/VIC, memory) and records the
- * instruction cycles of every sample, the FLPR advances the ADSR and
- * runs the per-sample SID waveform/filter stage into the audio ring.
+ * The 6510 interpreter is ~41% of the emulation and is cheaper on the
+ * FLPR (18 us/frame) than on the M33 (25.5 us), while the SID stage is
+ * ~5 us on the M33 but ~26 us on the FLPR. So the blob runs the
+ * per-instruction cycle loop (CPU, CIA/VIC, memory) ahead of the M33 and
+ * records each sample's instruction cycles plus every SID register
+ * write as a timestamped event; the M33 applies the events and runs the
+ * per-sample SID waveform/filter stage into I2S in its fill path.
  *
- * The SID instances live here (FLPR SRAM) so the blob touches them
- * locally; the M33 creates/initialises them through the same pointer
- * (both cores see all SRAM). The register block is mirrored by the M33
- * on every SID write, so the blob reads registers locally too.
+ * The SID instances stay in the M33 image (the blob never touches
+ * them); only the register copy below is shared, so the blob can record
+ * "$D4xx = value" events without knowing which SID chip is mapped where.
  */
 #define FLPR_SPLIT_BASE 0x2003E000UL
 #define FLPR_SPLIT_SIZE 0x00001000UL /* 4 KB */
@@ -83,11 +81,19 @@ struct flpr_event {
 #define FLPR_SPLIT_CTRL (FLPR_SPLIT_BASE + 0x0E00UL)
 
 struct flpr_split {
-	uint32_t enable; /* 1 = split mode active */
-	uint32_t prod;   /* samples the blob has emulated (CPU) */
-	uint32_t cons;   /* samples the M33 has rendered (SID) */
-	uint32_t eprod;  /* SID write events produced */
-	uint32_t econs;  /* SID write events consumed */
+	uint32_t enable;   /* 1 = split mode active */
+	uint32_t prod;     /* samples the blob has emulated (CPU) */
+	uint32_t cons;     /* samples the M33 has rendered (SID) */
+	uint32_t eprod;    /* SID write events produced */
+	uint32_t econs;    /* SID write events consumed */
+	/* Health, all written by the M33's SID side:
+	 * lead = prod - cons (samples the blob is ahead). The blob pumps
+	 * to 320, so `lead_min` near 320 over a window means it keeps up
+	 * easily; a lead that collapses towards 0 is the FLPR running at
+	 * (or past) 100% and the M33 starting to starve. `starved` counts
+	 * fill buffers that found no samples at all. */
+	uint32_t lead_min; /* lowest lead seen since the last start */
+	uint32_t starved;  /* buffers rendered with no data ready */
 };
 
 /* Split roles: the blob runs the CPU, the M33 (or the host harness) runs
@@ -127,17 +133,17 @@ struct flpr_shared {
 	uint32_t heartbeat; /* ++ each blob iteration */
 	uint32_t status;    /* blob-defined status flags */
 	uint32_t control;   /* reserved */
-	/* SID pipe (M33 writes run/rate/mode, blob writes the rest): */
-	uint32_t mode;      /* 1 = SID render, 2 = engine bench, 3 = ALU loop */
-	uint32_t rate_hz;   /* render rate (M33 hw_rate) */
-	uint32_t run;       /* 1 = render into the ring (M33 writes) */
+	/* Split control (M33 writes run/mode, blob writes the rest): */
+	uint32_t mode;      /* 3 = ALU probe, 4 = split CPU pump */
+	uint32_t rate_hz;   /* render rate (retired with the PCM ring) */
+	uint32_t run;       /* 1 = run the pump (M33 writes) */
 	uint32_t run_ack;   /* blob mirrors `run` each iteration, so the
-			     * M33 can wait for the render to actually stop
+			     * M33 can wait for the pump to actually stop
 			     * before it mutates engine state (load/play) */
-	uint32_t write_idx; /* absolute frames produced (blob) */
-	uint32_t read_idx;  /* absolute frames consumed (M33) */
-	uint32_t underruns; /* M33-side shortfall counter */
-	uint32_t rendered;  /* total frames produced (blob) */
+	uint32_t write_idx; /* retired (whole-engine PCM ring) */
+	uint32_t read_idx;  /* retired */
+	uint32_t underruns; /* retired; split health is in flpr_split */
+	uint32_t rendered;  /* retired */
 	/* One-shot bench (mode 2): M33 sets frames, blob renders that many
 	 * into the checksum (not the ring) and raises done; the M33 waiter
 	 * stamps bench_us and copies both to the snapshot tail. Advances
@@ -151,10 +157,13 @@ struct flpr_shared {
 	 * (cycles/frame, IPC) and derive the effective core clock. */
 	uint32_t bench_cycles;
 	uint32_t bench_instr;
-	uint32_t scratch[2]; /* spare */
+	/* Split: fraction of wall cycles the blob spent inside the CPU
+	 * pump, in permille over a ~0.25 s window (blob writes). 1000 means
+	 * the blob is saturated; the M33's lead starts shrinking there. */
+	uint32_t cpu_load;
+	uint32_t scratch;
 };
 
 #define FLPR_SHARED ((volatile struct flpr_shared *)FLPR_SHARED_BASE)
-#define FLPR_RING ((volatile int16_t *)FLPR_RING_BASE)
 
 #endif /* FLPR_SHARED_H */

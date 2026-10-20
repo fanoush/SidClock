@@ -1238,8 +1238,6 @@ static const char *sid_engine_label(void)
 	switch (sid_player_engine_mode()) {
 	case SID_ENGINE_LEGACY:
 		return "cSID";
-	case SID_ENGINE_FLPR:
-		return "FLPR";
 	case SID_ENGINE_SPLIT:
 		return "SPLIT";
 	default:
@@ -1382,16 +1380,21 @@ BT_GATT_SERVICE_DEFINE(ess_svc,
 /* [0..19] audio status/format/timing, [20..33] I2S registers,
  * [34..95] diag, [96..127] timekeeping telemetry, [128] BLE access mode,
  * [129..139] crash/filesystem/stall telemetry (see below),
- * [140..151] FLPR blob status: heartbeat u16 + flags, bench u32 pair,
+ * [140..151] FLPR blob status: heartbeat u16 + flags, then either the
+ *            bench pair or the split health block (see below),
  * [152..159] FLPR bench hardware counters: cycles, instructions */
 static uint8_t ble_dbg[160];
 
 /* FLPR tail (see docs/ble-services.md):
  * [140..141] blob heartbeat (u16 LE, 0 while not alive)
  * [142]      flags: bit 0 = alive (published its magic), bit 1 = started
- * [143]      spare
- * [144..147] FLPR bench microseconds (M33-measured render time)
- * [148..151] FLPR bench checksum (FNV-1a over the rendered int16s) */
+ * [143]      1 = split engine running, so [144..151] is the health block:
+ *            [144..145] blob CPU load (permille, 1000 = saturated)
+ *            [146..147] lowest lead since start (samples; 0xffff = n/a)
+ *            [148..149] lead now (samples the blob is ahead)
+ *            [150..151] starved fill buffers
+ *            [156..159] samples produced by the blob (monotonic)
+ *            (0 = the bench block: [144..147] us, [148..151] checksum) */
 
 /* Crash telemetry in retained RAM (survives watchdog resets): which boot
  * this is, why the last reset happened, thread heartbeats (a stalled
@@ -1616,10 +1619,38 @@ static ssize_t ble_dbg_read(struct bt_conn *conn,
 					 (FLPR_SHARED->run ? 2U : 0U));
 		ble_dbg[143] = 0U;
 	}
-	sys_put_le32(FLPR_SHARED->bench_us, ble_dbg + 144);
-	sys_put_le32(FLPR_SHARED->bench_sum, ble_dbg + 148);
-	sys_put_le32(FLPR_SHARED->bench_cycles, ble_dbg + 152);
-	sys_put_le32(FLPR_SHARED->bench_instr, ble_dbg + 156);
+	if (FLPR_SPLIT->enable != 0U) {
+		/* Split health: whether the FLPR keeps up with realtime. The
+		 * blob pumps to 320 samples of lead, so a `lead min` that
+		 * stays near 320 means it has plenty of headroom; one that
+		 * collapses towards 0 (and a growing starved count) is the
+		 * CPU side at or past 100%. */
+		uint32_t lead = FLPR_SPLIT->prod - FLPR_SPLIT->cons;
+		uint32_t lmin = FLPR_SPLIT->lead_min;
+		uint32_t load = FLPR_SHARED->cpu_load;
+
+		if (lmin > 0xFFFFU) {
+			lmin = 0xFFFFU; /* "not measured yet" */
+		}
+		ble_dbg[143] = 1U;
+		ble_dbg[144] = (uint8_t)load;
+		ble_dbg[145] = (uint8_t)(load >> 8);
+		ble_dbg[146] = (uint8_t)lmin;
+		ble_dbg[147] = (uint8_t)(lmin >> 8);
+		ble_dbg[148] = (uint8_t)lead;
+		ble_dbg[149] = (uint8_t)(lead >> 8);
+		ble_dbg[150] = (uint8_t)FLPR_SPLIT->starved;
+		ble_dbg[151] = (uint8_t)(FLPR_SPLIT->starved >> 8);
+		/* Samples the blob has produced so far (monotonic): read it
+		 * twice to get the production rate, which must track the
+		 * ~22050 Hz output rate. Bench counters are unused here. */
+		sys_put_le32(FLPR_SPLIT->prod, ble_dbg + 156);
+	} else {
+		sys_put_le32(FLPR_SHARED->bench_us, ble_dbg + 144);
+		sys_put_le32(FLPR_SHARED->bench_sum, ble_dbg + 148);
+		sys_put_le32(FLPR_SHARED->bench_cycles, ble_dbg + 152);
+		sys_put_le32(FLPR_SHARED->bench_instr, ble_dbg + 156);
+	}
 
 	return bt_gatt_attr_read(conn, attr, buf, len, offset, ble_dbg,
 				 sizeof(ble_dbg));
@@ -1683,8 +1714,6 @@ static ssize_t ble_dbg_write(struct bt_conn *conn,
 	      (len == 2U && p[0] == 0x1EU) ||
 	      (len == 2U && p[0] == 0x1FU) ||
 	      (len == 2U && p[0] == 0x30U) ||
-	      (len == 2U && p[0] == 0x31U) ||
-	      (len == 3U && p[0] == 0x32U) ||
 	      (len == 3U && p[0] == 0x33U) ||
 	      (len >= 2U && len <= SID_CMD_NAME_MAX + 1U && p[0] == 0x11U) ||
 	      (len >= 2U && len <= SID_CMD_NAME_MAX + 1U && p[0] == 0x16U) ||
@@ -1801,9 +1830,10 @@ static ssize_t ble_dbg_write(struct bt_conn *conn,
 #ifdef SID_ENGINE_DUAL
 	case 0x17:
 		/* Global SID engine: 0 = cRSID on the M33, 1 = legacy
-		 * cSID-light, 2 = cRSID on the FLPR blob. The main loop
-		 * stops, switches and restarts the current tune if one was
-		 * playing (same as the main-screen button). */
+		 * cSID-light, 2 = split (FLPR runs the C64/CPU, the M33 the
+		 * SID stage). The main loop stops, switches and restarts the
+		 * current tune if one was playing (same as the main-screen
+		 * button). */
 		if (len != 2U || p[1] > SID_ENGINE_SPLIT) {
 			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
 		}
@@ -1953,70 +1983,11 @@ static ssize_t ble_dbg_write(struct bt_conn *conn,
 			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
 		}
 		if (p[1] == 0U) {
-			audio_flpr_stop();
+			audio_sid_stop();
 			flpr_halt();
 		} else if (flpr_start() != 0) {
 			return BT_GATT_ERR(BT_ATT_ERR_VALUE_NOT_ALLOWED);
 		}
-		break;
-	}
-	case 0x31: {
-		/* FLPR SID pipe: the blob renders the loaded tune into the
-		 * ring (mode 1) instead of the M33. Bytes: u8 seconds
-		 * (0 = until stopped). Requires a tune loaded first;
-		 * stops M33-side SID render so the two never mix. Also
-		 * selects the FLPR engine, so the UI and the next play
-		 * stay consistent. */
-		if (len != 2U) {
-			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
-		}
-		if (sid_player_songs() <= 0) {
-			return BT_GATT_ERR(BT_ATT_ERR_VALUE_NOT_ALLOWED);
-		}
-		if (flpr_start() != 0) {
-			return BT_GATT_ERR(BT_ATT_ERR_VALUE_NOT_ALLOWED);
-		}
-		sid_player_set_engine_mode(SID_ENGINE_FLPR);
-		audio_flpr_start_sid(p[1]);
-		break;
-	}
-	case 0x32: {
-		/* FLPR bench: render N frames on the blob into a checksum
-		 * (not the ring) and time it. Bytes: u16 LE frames
-		 * (1..4096). Requires a tune loaded first; stops all
-		 * audio first (quiet bench) and advances tune state -
-		 * replay the tune after. Blocks (bounded) waiting for
-		 * completion like the tone commands. */
-		uint32_t n;
-		uint32_t c0, c1;
-
-		if (len != 3U) {
-			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
-		}
-		n = (uint32_t)p[1] | ((uint32_t)p[2] << 8);
-		if (n == 0U || n > 4096U) {
-			return BT_GATT_ERR(BT_ATT_ERR_VALUE_NOT_ALLOWED);
-		}
-		if (sid_player_songs() <= 0) {
-			return BT_GATT_ERR(BT_ATT_ERR_VALUE_NOT_ALLOWED);
-		}
-		if (flpr_start() != 0) {
-			return BT_GATT_ERR(BT_ATT_ERR_VALUE_NOT_ALLOWED);
-		}
-		audio_flpr_stop();
-		audio_sid_stop();
-		FLPR_SHARED->bench_frames = n;
-		FLPR_SHARED->bench_done = 0U;
-		FLPR_SHARED->mode = 2U;
-		FLPR_SHARED->run = 1U;
-		/* k_cycle runs at 1 MHz here: raw delta is microseconds. */
-		c0 = k_cycle_get_32();
-		while (FLPR_SHARED->bench_done == 0U &&
-		       (k_cycle_get_32() - c0) < n * 100U + 2000000U) {
-			k_sleep(K_MSEC(5));
-		}
-		c1 = k_cycle_get_32();
-		FLPR_SHARED->bench_us = c1 - c0;
 		break;
 	}
 	case 0x1F:
@@ -2056,7 +2027,6 @@ static ssize_t ble_dbg_write(struct bt_conn *conn,
 		if (n == 0U) {
 			return BT_GATT_ERR(BT_ATT_ERR_VALUE_NOT_ALLOWED);
 		}
-		audio_flpr_stop();
 		audio_sid_stop();
 		FLPR_SHARED->bench_frames = n;
 		FLPR_SHARED->bench_done = 0U;
@@ -2180,11 +2150,8 @@ static void player_state_fill(void)
 	if (sid_player_engine_mode() == SID_ENGINE_LEGACY) {
 		flags |= 0x08U;
 	}
-	if (sid_player_engine_mode() == SID_ENGINE_FLPR) {
-		flags |= 0x10U; /* rendered by the FLPR blob */
-	}
 	if (sid_player_engine_mode() == SID_ENGINE_SPLIT) {
-		flags |= 0x20U; /* SID stage on the FLPR, CPU on the M33 */
+		flags |= 0x20U; /* CPU on the FLPR, SID stage on the M33 */
 	}
 #endif
 	player_state[0] = flags;
@@ -4066,7 +4033,6 @@ static void sid_req_take(void)
 			}
 		}
 		LOG_INF("sid engine: %s", arg == SID_ENGINE_LEGACY ? "legacy" :
-			arg == SID_ENGINE_FLPR ? "flpr" :
 			arg == SID_ENGINE_SPLIT ? "split" : "new");
 		break;
 #endif
@@ -4864,8 +4830,8 @@ static void touch_poll(void)
 #ifdef SID_ENGINE_DUAL
 		if (first && hit(x, y, UB_X2, UB_Y2, UB_W, UB_H)) {
 			/* Engine choice: cRSID (M33) -> cSID-light (M33) ->
-			 * FLPR (blob). Full stop, switch, restart the same
-			 * tune if one was playing. */
+			 * SPLIT (FLPR CPU + M33 SID). Full stop, switch,
+			 * restart the same tune if one was playing. */
 			bool was = sid_player_is_playing();
 			char path[40];
 

@@ -121,13 +121,6 @@ extern "C" void sid_player_set_engine_mode(int mode)
  * mutation (load/play/chip switch) the M33 must stop it and wait for the
  * acknowledgement, otherwise the init routine and the render interleave
  * on the same C64 memory. flpr_render_start() resyncs the ring. */
-static inline bool engine_on_flpr(void)
-{
-	return sid_engine_mode == SID_ENGINE_FLPR;
-}
-
-/* Split mode renders its audio on the blob too (SID stage), but the M33
- * still runs the CPU emulation in the fill path. */
 static inline bool engine_on_split(void)
 {
 	return sid_engine_mode == SID_ENGINE_SPLIT;
@@ -135,7 +128,7 @@ static inline bool engine_on_split(void)
 
 static inline bool engine_quiesce(void)
 {
-	if (engine_on_flpr() && flpr_rendering()) {
+	if (engine_on_split() && flpr_rendering()) {
 		flpr_render_stop();
 		return true;
 	}

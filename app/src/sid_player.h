@@ -38,15 +38,13 @@ int sid_player_chip(void);
  * button cycles it; the next load (or reload) applies it. */
 #define SID_ENGINE_CRSID 0
 #define SID_ENGINE_LEGACY 1
-#define SID_ENGINE_FLPR 2 /* whole cRSID engine on the FLPR blob */
-#define SID_ENGINE_SPLIT 3 /* M33 runs the C64/CPU, FLPR runs the SID */
+#define SID_ENGINE_SPLIT 2 /* M33 runs the SID, FLPR runs the C64/CPU */
 void sid_player_set_engine_mode(int mode);
 int sid_player_engine_mode(void);
 #else
 #define SID_ENGINE_CRSID 0
 #define SID_ENGINE_LEGACY 1
-#define SID_ENGINE_FLPR 2
-#define SID_ENGINE_SPLIT 3
+#define SID_ENGINE_SPLIT 2
 int sid_player_engine_mode(void);
 void sid_player_set_engine_mode(int mode);
 #endif

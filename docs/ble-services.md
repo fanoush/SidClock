@@ -45,7 +45,7 @@ signals: they are only compiled into **debug builds**
 | `14` + u8 `mode` | developer test: inject a fake uptime glitch (`0` = counter reset, `1` = forward jump) to verify the clock guard |
 | `15` + u8 `mode` | set the BLE access mode (`0` = R/W, `1` = R/O, `2` = OFF); only accepted in R/W |
 | `16` + name | delete `/home/<name>` - only `.sid`, `.len` and `.stil` files (config files are protected); rejected in R/O and OFF |
-| `17` + u8 engine | global SID engine: `0` = cRSID on the M33, `1` = legacy cSID-light, `2` = whole cRSID engine on the FLPR blob, `3` = split (M33 runs the C64/CPU, FLPR runs the SID stage). Same as the main-screen button, which cycles all four: stops, switches, restarts the current tune |
+| `17` + u8 engine | global SID engine: `0` = cRSID on the M33, `1` = legacy cSID-light, `2` = split (FLPR runs the C64/CPU, the M33 the SID stage + I2S). Same as the main-screen button, which cycles all three: stops, switches, restarts the current tune. (`3`, the retired whole-engine-on-FLPR mode, is rejected.) |
 | `18` | toggle play/pause - the SID screen's transport button (a paused tune resumes where it stopped; with nothing loaded it starts the first tune) |
 | `19` / `1A` | play the next / previous tune in file name order |
 | `1B` / `1C` | step to the next / previous subtune |
@@ -53,8 +53,7 @@ signals: they are only compiled into **debug builds**
 | `21` + u8 `sub` | play subtune `sub` (1-based) of the loaded tune; `255` = the PSID startSong. Rejected when no tune is loaded. |
 | `22` + u8 `mode` | end-of-tune mode - the SID screen END button: `0` = next subtune, `1` = next tune, `2` = loop the subtune. Takes effect at the next song end, no reload. |
 | `30` + u8 `run` | FLPR (VPR RISC-V) blob control: `0` = halt the core (reset into the stopped state), `1` = start the embedded blob. The blob never runs at boot. See [flpr.md](flpr.md). |
-| `31` + u8 `sec` | FLPR SID pipe: the blob renders the loaded tune into the shared ring for `sec` seconds (`0` = until stopped). Requires a tune loaded; stops M33-side render so the two never mix. `0F` also stops the pipe. |
-| `32` + u16 LE `frames` | FLPR bench: render `frames` (1..4096) on the blob into a checksum (not the ring), timed by the M33. Requires a tune loaded; stops all audio first and advances tune state (replay the tune after). Result in snapshot `[144..151]`. |
+| `33` + u16 LE `iterations` | FLPR ALU probe: a register-only loop on the blob, core counters in snapshot `[152..159]` (cycles, instructions). Separates a slow core from fetch/memory stalls. |
 | `1D` [+ u8 `page`] | stack telemetry for the overflow hunt, 4 rows per page: the **interrupt stack** first, then the threads in creation order. `(size, free)` u16 pairs at `[36..51]`, the matching 11-byte names at `[52..95]`; `[34]` marker, `[35]` page with bit 7 set to say the names follow and bit 6 set on the last page (bit 7 clear = the older 5-per-page layout without names; bit 6 clear everywhere = firmware from before the interrupt row). Only the requested page is latched, so one page costs 4 stack scans. Under 256 B free anywhere is the smoking gun. |
 | `1E` [+ u8 `mode`] | drain the SEGGER RTT log buffer - the `LOG_*` lines a debug probe would show; the next read returns up to 60 bytes of text at `[36..95]`, the byte count in `[35]`, `[34]` = marker. The bare opcode (or `mode` 0) **consumes** the chunk, so the device forgets it and a second call only shows newer lines. `mode` 1 restarts a *peek* at the oldest unread byte and 2 continues it; a peek never moves the read pointer, so it is repeatable and a later consume still sees the window. |
 | `1F` [+ u8 `mode`] | accelerometer diagnosis into the log (**read-only** in a release image): I2C scan 0x08-0x77, `WHO_AM_I` at both possible addresses (0x19/0x18), what the Zephyr driver and the built-in poller each return, registers 0x00-0x5F as eight-byte rows, single-register reads of the control block and of the six output bytes, and a `CTRL_REG1`/`CTRL_REG4` write/read-back. This is what showed that a unit serving all zeros only needed the missing initialization: `ctrl2=30 ctrl4=88` and a moving `reg 28` row mean the chip is configured and converting, `ctrl2=00` with frozen output bytes means it is not. `SIDCLOCK_DEBUG` builds also take `mode` 1 (reboot the register file from OTP via the `CTRL_REG5` BOOT bit, then walk the ODR settings logging the output registers after each) and `mode` 2 (drop the sensor rail P1.11 for 150 ms, then bring touch, ambient light and the accelerometer back up and watch the data registers). |
@@ -157,8 +156,8 @@ have to parse the developer snapshot and does not have to poll:
 
 - **state** `73696463-6c6f-4b03-9c1d-77ce3f41a5c0`, 16 bytes:
   `[0]` flags - bit 0 playing, bit 1 paused, bit 2 sound on, bit 3 legacy
-  engine, bit 4 whole engine on the FLPR, bit 5 split engine (M33 CPU +
-  FLPR SID); `[1]` subtune (0-based), `[2]` song count, `[3]` end mode,
+  engine, bit 5 split engine (FLPR CPU + M33 SID; bit 4 is retired);
+  `[1]` subtune (0-based), `[2]` song count, `[3]` end mode,
   `[4]` chip model mode (0 = auto, 1 = 6581, 2 = 8580), `[5]` chip in use
   (1 = 6581, 2 = 8580), `[6]` **info generation**, `[7]` reserved;
   `[8..11]` elapsed seconds (u32 LE), `[12..15]` the current subsong

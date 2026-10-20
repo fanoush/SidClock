@@ -54,11 +54,9 @@ void audio_set_mck_raw(uint32_t v);
 void audio_sid_start(void);
 void audio_sid_stop(void);
 
-/* FLPR SID pipe: the blob renders the loaded tune into the shared ring,
- * which this module drains in the fill path. seconds 0 = until stopped. */
-void audio_flpr_start_sid(uint32_t seconds);
-void audio_flpr_stop(void);
-bool audio_flpr_active(void);
+/* Split engine (FLPR runs the C64/CPU, the M33 the SID stage): the M33
+ * renders the SID stage from the blob's cycle counts and SID-write
+ * events in the fill path. */
 
 /*
  * Debug snapshot for the BLE debug characteristic:

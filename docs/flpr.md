@@ -79,17 +79,40 @@ app/build.sh                    # FLPR works in both; debug adds the tone tests
 tools/flash_ota.py --now                    # arm + reboot + verify
 tools/sidclock_ble.py set-time
 tools/sidclock_ble.py sidname Last_Ninja_2.sid
-tools/sidclock_ble.py engine flpr           # or the main-screen engine button
-tools/sidclock_ble.py audio                 # "flpr pipe" line: underruns/peak
-tools/sidclock_ble.py flprbench 4096        # engine render time, snapshot [144..151]
+tools/sidclock_ble.py engine split          # or the main-screen engine button
+tools/sidclock_ble.py audio                 # split health line, see below
 tools/sidclock_ble.py engine new            # back to the M33 renderer
 ```
 
-`flprsid 0` forces the pipe directly without changing the engine choice
-(handy when the tune is already playing); `flprsid stop` (or `0F`) stops
-it. The blob never runs before the first command that needs it. A stalled
-or absent blob shows as a frozen heartbeat in snapshot `[140..141]` with
+The blob never runs before the first command that needs it. A stalled or
+absent blob shows as a frozen heartbeat in snapshot `[140..141]` with
 `alive` clear in `[142]`.
+
+`engine split` prints one extra line while the split runs:
+
+```
+split: flpr cpu 41.3%  lead 320 (min 144)  starved 0
+```
+
+- **`flpr cpu`** is the fraction of wall time the blob spends inside the
+  CPU pump (permille in `[144..145]`), measured with `mcycle` over a
+  ~0.25 s window. It is the FLPR half's utilisation: ~82% on Game Over
+  here, ~17% on a light tune. At 100% the blob is saturated and the M33
+  starts to starve.
+- **`lead`** is `prod - cons`, the samples the blob is ahead of the M33
+  (snapshot `[148..149]`). The blob pumps to 320, so it hovers there
+  while there is headroom and falls when there is not. **`min`** is the
+  lowest since playback started (`[146..147]`, `n/a` before the first
+  buffer): a minimum that keeps collapsing towards 0 - in particular
+  below one audio buffer (176 samples) - means the FLPR side is at or
+  past 100% even if `starved` is still 0.
+- **`starved`** counts fill buffers that found no samples ready at all
+  (`[150..151]`); the same counter is the `underruns` field of the
+  `flpr:` line in `audio`. A non-zero value is an audible gap.
+
+So: `flpr cpu` is the mean load, `lead min` is the worst-case margin
+between the two cores. Both are in the debug snapshot, so they can be
+recorded with `audio` while the tune plays.
 
 ## Engine selection
 
@@ -99,21 +122,28 @@ The main-screen engine button cycles three choices (BLE command `0x17`):
 |---|---|
 | `cRSID` | cRSID on the M33 (default) |
 | `cSID` | legacy cSID-light on the M33 (dual builds) |
-| `FLPR` | cRSID on the FLPR blob |
+| `SPLIT` | FLPR runs the C64/CPU, the M33 the SID stage + I2S |
+
+A fourth mode existed during bring-up (the whole cRSID engine on the
+blob). It is gone: at 44.5 us/frame it sat at ~98% of realtime with
+~1.7 underruns/s on the heaviest tune, while split B runs the same tune
+with the M33 at ~16% and the FLPR at ~82%.
 
 Switching stops playback, changes the core and reloads/restarts the tune.
-With `FLPR` selected, `audio_sid_start()` boots the blob (first use only)
-and the audio fill drains the ring instead of calling the M33 renderer;
-`audio_sid_stop()` idles the blob (`run = 0`) but leaves the core up, so
-switching tunes does not pay a boot each time. If the blob cannot start,
-the audio path falls back to the M33 renderer instead of going silent.
+With `SPLIT` selected, `audio_sid_start()` boots the blob (and powers the
+VPR block back up if an M33 engine had powered it down) and the M33
+renders the SID stage from the blob's cycle counts and register-write
+events in the audio fill path. `audio_sid_stop()` halts and powers the
+block down (see Power). If the blob cannot start, the audio path falls
+back to the M33 renderer instead of going silent.
 
-Pause/resume drives the blob too: paused sets `run = 0` (no rendering, no
-tune-clock advance), resume drops whatever queued up and restarts it.
+Pause/resume drives the blob too: paused sets `run = 0` (no CPU
+emulation, no tune-clock advance), resume drops whatever queued up and
+restarts it.
 
 The tune clock (UI time line, player-state characteristic, auto-advance)
-is driven by the frames the M33 actually drains from the ring, so it
-advances exactly with what is played, in all three modes.
+is driven by the samples the M33 renders, so it advances exactly with
+what is played, in every mode.
 
 ## Where the time goes (measured, Game Over - the heaviest tune here)
 
@@ -129,23 +159,35 @@ VPR cycle counter, blob bench, 22050 Hz frames (budget 45.3 us/frame):
 
 M33 for the same tune: 30.6 us/frame (69% of realtime).
 
-So the engine splits roughly **59% SID + 41% 6510 interpreter**. The
-current design runs all of it on the FLPR: it fits, but with ~2% margin,
-which shows up as ~1.7 underruns/second on this tune. Splitting the work
-across both cores is the way to get real headroom:
+So the engine splits roughly **59% SID + 41% 6510 interpreter**. Running
+all of it on the FLPR fits, but with ~2% margin, which shows up as ~1.7
+underruns/second on this tune (that mode was removed for this reason).
+Splitting the work across both cores is the way to get real headroom:
 
 | Split | M33 (measured) | FLPR (measured) |
 |---|---|---|
-| A: SID on the FLPR, C64/CPU on the M33 (implemented, `engine split`) | 25.5 us (56%) | ~26 us (58%) |
-| B: C64/CPU on the FLPR, SID + I2S on the M33 | ~5 us would stay (11%) | ~18 us (40%) |
-| whole engine on the FLPR (`engine flpr`) | ~0 (drains only) | 44.5 us (98%), ~1.7 underruns/s |
+| A: SID on the FLPR, C64/CPU on the M33 (superseded) | 25.5 us (56%) | ~26 us (58%) |
+| B: C64/CPU on the FLPR, SID + I2S on the M33 (current) | 7.3 us (16%) | 37 us (82%) |
+| whole engine on the FLPR (removed) | ~0 (drains only) | 44.5 us (98%), ~1.7 underruns/s |
 
-The measured split is lopsided: the SID stage costs ~5 us/frame on the
-M33 but ~26 us on the FLPR (it is table/branch heavy, and the VPR has no
-instruction cache), while the 6510 interpreter is *cheaper* on the FLPR
-(18 us) than on the M33 (25.5 us). So the SID stage is the wrong half to
-offload: the better split is B - the M33 keeps only the SID stage and
-I2S (~11%) and the FLPR runs the C64/CPU (~40%).
+The split is B because the SID stage costs ~5 us/frame on the M33 but
+~26 us on the FLPR (it is table/branch heavy, and the VPR has no
+instruction cache).
+
+Note the **40% estimate this section used to carry was too low**: it
+counted only the 6510 interpreter (18 us of the 44.5 us whole-engine
+bench). Split B's blob half also runs the VIC, the CIAs and the memory
+plumbing, so it carries most of the "everything but the SID output
+stage" cost: ~37 us/frame on Game Over, measured on the device as
+`split: flpr cpu 82%`. It still fits - `lead min` stays around 60-200
+samples and `starved` stays 0 - but the headroom is modest on the
+heaviest tunes, unlike the M33's 16%.
+
+What the split buys is the *screen*: the M33 spends ~7 us/frame on
+audio instead of ~30 us, so UI redraws no longer starve the
+emulation. If the FLPR half ever needs more headroom, the next step is
+cycle-counting the VIC/CIA calls (they dominate the 37 us), not moving
+work back to the M33.
 
 **ADSR windows must stay <= 7 cycles.** cRSID's envelope pass detects at
 most one shot per call and its quiet-voice folding assumes
@@ -175,14 +217,15 @@ remove it is to power the block down while keeping state in RAM).
 
 SidClock therefore:
 
-- **never starts the FLPR unless an FLPR engine is selected**
+- **never starts the FLPR unless the split engine is selected**
   (`NORDIC_VPR_LAUNCHER=n`), so the default cRSID/cSID builds pay nothing;
 - **powers the block down** (`flpr_halt()`: CPURUN off, NDMRESET, then
   clear `MEMCONF.POWER[1].RET` bit 0 - the same bit Zephyr's
   `z_sys_poweroff()` clears for the VPR) whenever playback stops or an
   M33 engine is selected. `flpr_start()` re-enables retention first and
   re-boots the blob, so switching back to split/FLPR is a few ms;
-- while playing, the blob is busy ~40% of the time and spins otherwise;
+- while playing, the blob is busy ~80% of the time on the heaviest
+  tunes and spins otherwise;
   it does not `WFI` because a bare-metal blob has no interrupt to wake it
   (adding the VEVIF wake is possible, but the core is powered anyway while
   playing).
@@ -212,13 +255,22 @@ has them in separate images).
 
 ## What to watch
 
-- **Underruns**: `audio` reports the pipe shortfall counter. Zero over a
-  long run means the blob keeps ahead of the 320-frame DMA buffers.
-- **Render time**: `flprbench` renders N frames on the blob, timed by
-  the M33 (includes the cross-core round trip, so it is an upper bound
-  per batch). Compare with the M33 render time in `audio`'s
-  `render ... us` field.
+- **FLPR load**: `audio`'s `split: flpr cpu N%` line (snapshot
+  `[144..145]`, permille). ~82% on Game Over, ~17% on a light tune; it
+  is measured inside the pump with `mcycle` (only the calls that
+  actually produce samples are charged), so it is the real duty cycle
+  rather than an estimate. Multiply by 45.35 us for the us/frame.
+- **Lead**: `lead N (min M)` (snapshot `[146..149]`). The blob pumps to
+  320 samples ahead, so `lead` sits there with headroom. A `min` that
+  keeps dropping towards 0 - especially below one fill buffer (176
+  samples) - is the FLPR side at or over 100%, even before an audible
+  gap.
+- **Starved buffers**: `starved N` (snapshot `[150..151]`) and the
+  `underruns` field of the `flpr:` line. Non-zero means the M33 found no
+  samples at a buffer boundary: an audible gap.
+- **M33 share**: `render N us` is the M33's SID-stage time per 320
+  frames (was ~5-7 us, against a 14.5 ms period).
 - **RRAM contention**: the blob XIPs from the same RRAM bank the M33
   fetches from, so heavy M33 flash traffic (UI draws) can stall it. The
-  32 KB ring rides through bursts; a persistent shortfall means growing
-  it or the M33 traffic was underestimated.
+  320-sample lead rides through bursts; a persistent shortfall is either
+  the FLPR at its limit (`flpr cpu` near 100%) or growing M33 stalls.

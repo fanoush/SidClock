@@ -20,7 +20,7 @@
  * constant "always split" flag instead of the variable. */
 #ifndef FLPR_BLOB
 static cRSID_SIDinstance cRSID_SIDlocal[CRSID_SIDCOUNT_MAX+1];
-char cRSID_splitMode; /* 1 = M33 runs the CPU, the FLPR the SID */
+char cRSID_splitMode; /* 1 = split engine: blob runs the CPU, M33 the SID */
 #endif
 #endif
 
@@ -389,6 +389,12 @@ int cRSID_renderSplitSample (void) {
  int n;
 
  if ( FLPR_SPLIT->prod == s ) return 0; //blob has not reached this sample yet
+ { uint32_t lead = FLPR_SPLIT->prod - s;
+
+   /* Skip the first second: the blob starts from an empty ring, so the
+    * initial fill is not a steady-state margin. */
+   if (s > 22050U && lead < FLPR_SPLIT->lead_min) FLPR_SPLIT->lead_min = lead;
+ }
  cyc = FLPR_SID_CYC[s % FLPR_SID_RING];
 
  while ( FLPR_SPLIT->econs != FLPR_SPLIT->eprod ) {
