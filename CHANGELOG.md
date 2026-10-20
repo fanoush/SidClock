@@ -89,6 +89,17 @@
 
 **Fixes**
 
+- Audio no longer stutters while the web remote lists `/home`: the `13`
+  listing built every 60-byte page with a fresh LittleFS directory scan,
+  and each scan (the port re-walks the metadata for every entry, on a
+  64-byte cache) kept the audio refill thread off the CPU - roughly
+  0.5 s of stutter per page. The listing is now a 2 KB RAM index built
+  once at boot, appended by fs_mgmt uploads through the MCUmgr
+  file-access hook, and kept current by deletes; the LittleFS cache grew
+  from 64 to 256 bytes so rebuilds and the uploads themselves are ~4x
+  cheaper. `/home/dir.txt` is gone - the index file, the
+  listing-triggered rebuild and the SAVE STATE rewrite were removed
+  (0x13 is the only listing path) and the stale copy is deleted at boot.
 - Player commands from BLE now run in the main loop instead of the
   Bluetooth receive workqueue. That workqueue's 2 KB stack was already at
   96 % during a tune load and "next tune" adds a directory scan on top:

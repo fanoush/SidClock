@@ -228,11 +228,9 @@ is not a terminal), then prints whether the fresh filesystem mounted.
 
 - Tunes and sidecars live in LittleFS at `/home` and are uploaded with
   MCUmgr `fs_mgmt` (`smpmgr file upload ...`). There is no directory
-  listing in `fs_mgmt`; use the `13` command (`tools/sidclock_ble.py ls`)
-  or download `/home/dir.txt`. The index is rebuilt from the main loop
-  shortly after a listing (up to 2 s later, at most once per 2 s), so a
-  `dir.txt` download made right after an upload can still be one
-  listing behind.
+  listing in `fs_mgmt`; use the `13` command (`tools/sidclock_ble.py ls`),
+  which pages through a RAM index built at boot and kept current from
+  uploads, so listing while a tune plays no longer touches the flash.
 - Firmware images are uploaded with `tools/flash_ota.py` (or `smpmgr
   upgrade --slot 1`; a plain `upgrade` uploads without arming the image) -
   see [ota.md](ota.md).

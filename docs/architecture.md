@@ -80,7 +80,6 @@ logical landscape frame. The idle face can use portrait rotations.
 | `alarms.cfg` | one line per alarm | `mode hour min len_sec days sub name title` |
 | `time.cfg` | 3 numbers | wall clock epoch + GRTC counter + k_uptime at save (no RTC on the board) |
 | `sid.cfg` | text | last loaded tune name (restored on boot, no auto-play) |
-| `dir.txt` | `name size` lines | directory index for hosts that only have smpmgr |
 
 LittleFS is mounted **without auto-format**: a corrupted or foreign
 filesystem is never wiped; the `fsformat` debug command formats explicitly.
@@ -105,7 +104,7 @@ to check before adding a buffer. Measured from the release ELF
 | MCUmgr (OTA) | 14 KB | 8 KB SMP packet pool (4x2048) + 4 KB workqueue stack + img/fs/os groups |
 | Kernel | 9 KB | main/idle/interrupt stacks, system work queue, thread objects |
 | Logging + RTT | 11 KB | 8 KB RTT buffer in `.rtt_buff_data` (start of RAM; shared with the bootloader, so the size must match `sidclock-mcuboot.conf`), log core |
-| LittleFS, drivers, alarms, configs | ~4 KB | filesystem object + caches, SPI/ADC/GPIOTE/I2S drivers |
+| LittleFS, drivers, alarms, configs | ~8 KB | filesystem object + 256-byte read/prog caches, file-cache heap, 2 KB `/home` listing cache, SPI/ADC/GPIOTE/I2S drivers |
 
 `stacks` (BLE debug command) reports stack high-water marks - the
 interrupt stack first, then every thread - the cheapest way to claw stack
@@ -117,7 +116,7 @@ back. Debug-only RAM sits behind
 - **No dynamic allocation** in hot paths; fixed buffers sized for the
   display band (448x16x2 bytes) and the audio double buffer. The whole
   system heap is disabled (`CONFIG_HEAP_MEM_POOL_SIZE=0`) - the linked
-  image has no `malloc`/`k_malloc` caller - which leaves ~9 KB of RAM
+  image has no `malloc`/`k_malloc` caller - which leaves ~5 KB of RAM
   unused for future features (the RTT buffer took 6 KB of the headroom in
   1.0.7: 8 KB instead of 2 KB, shared with the bootloader).
 - **Software rotation** instead of panel MADCTL (the panel's MADCTL

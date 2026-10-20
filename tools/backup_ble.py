@@ -71,7 +71,6 @@ DIS_NAMES = {
 }
 
 KNOWN_FILES = [
-    "/home/dir.txt",
     "/home/db/lifetime.bin",
     "/home/db/stat_log.bin",
     "/home/db/acc_info.bin",

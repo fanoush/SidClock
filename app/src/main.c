@@ -31,6 +31,8 @@
 #include <zephyr/bluetooth/conn.h>
 #include <zephyr/bluetooth/gatt.h>
 #include <zephyr/mgmt/mcumgr/transport/smp_bt.h>
+#include <zephyr/mgmt/mcumgr/mgmt/callbacks.h>
+#include <zephyr/mgmt/mcumgr/grp/fs_mgmt/fs_mgmt_callbacks.h>
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/dfu/mcuboot.h>
 #include <zephyr/logging/log.h>
@@ -163,7 +165,7 @@ LOG_MODULE_REGISTER(sidclock, LOG_LEVEL_INF);
 
 /* Settings screen: the three ambient profiles [NIGHT] [INDOOR] [OUTDOOR]
  * on top, then the LUX + brightness level sliders, a gap, the idle
- * timeout, and the SAVE STATE button (dir.txt + time + configs, in the
+ * timeout, and the SAVE STATE button (time + configs, in the
  * old frame-rate slot). */
 #define SET_BTN_W 136
 #define SET_BTN_H 38
@@ -449,17 +451,9 @@ static void sid_sub_step(int dir); /* defined with the UI below */
 static void sid_play_sub(uint8_t sub); /* defined with the UI below */
 static uint32_t sid_length_cur(void); /* defined with the UI below */
 static int home_list(uint16_t start, uint8_t *dst, int size); /* below */
-static void home_write_dir(void); /* below */
+static void home_list_cache_stale(void); /* below */
+static void home_list_cache_remove(const char *name); /* below */
 static int16_t ls_start = -1; /* pending /home listing request (page start) */
-
-/* The /home listing asks for a dir.txt refresh; the rebuild itself (a
- * 512-byte buffer plus a LittleFS commit) runs from the main loop, not
- * from the GATT read that served the listing: that read runs on the BT
- * RX workqueue, whose small stack cannot afford it (the listing alone
- * used 1.3 KB of it and overflowed the device once). Rate-limited so a
- * client paging through listings cannot wear the flash. */
-static volatile bool dir_dirty;
-static uint32_t dir_written_ms;
 
 /* Stack telemetry (debug command 0x1D [+ u8 page]): the interrupt stack
  * first, then per-thread stack (size, free) pairs in creation order, 4
@@ -648,6 +642,7 @@ static void fs_storage_init(bool format)
 	}
 	fs_mount_err = 0;
 	fs_ready = true;
+	home_list_cache_stale(); /* rebuilt lazily after a format */
 	LOG_INF("LittleFS mounted at /home");
 }
 static uint32_t last_touch_ms;
@@ -1510,11 +1505,6 @@ static ssize_t ble_dbg_read(struct bt_conn *conn,
 		int next = home_list((uint16_t)ls_start, ble_dbg + 34, 61);
 
 		ble_dbg[95] = (next < 0 || next > 254) ? 0xFFU : (uint8_t)next;
-		if (ls_start == 0) {
-			/* the listing wants dir.txt refreshed; the main loop
-			 * rebuilds it (see dir_dirty) */
-			dir_dirty = true;
-		}
 		ls_start = -1;
 	}
 
@@ -1730,6 +1720,7 @@ static ssize_t ble_dbg_write(struct bt_conn *conn,
 		if (fs_unlink(path) != 0) {
 			return BT_GATT_ERR(BT_ATT_ERR_VALUE_NOT_ALLOWED);
 		}
+		home_list_cache_remove(name);
 		if (strcmp(name, sid_cur_name) == 0) {
 			/* the loaded tune is gone: stop it and forget it */
 			sid_player_stop();
@@ -3484,16 +3475,124 @@ static void draw_ui(void)
 
 /* --- SID transport actions ----------------------------------------- */
 
-/* Rewrite /home/dir.txt with "name size" lines: hosts with only smpmgr
- * (MCUmgr fs_mgmt has no listing operation) can download it as an index. */
-static void home_write_dir(void)
+/* --- /home listing cache ------------------------------------------- */
+
+/*
+ * A LittleFS directory scan is expensive: the Zephyr port re-reads the
+ * metadata pair from the start for every entry it returns, and the tiny
+ * 64-byte cache turned that into a burst of small SPI transactions per
+ * file (~0.5 s for the ~90 files in /home). The 0x13 listing serves
+ * 60-byte pages, so a per-page scan kept the audio refill thread off the
+ * CPU for most of a transfer and playback stuttered for seconds.
+ *
+ * The listing is therefore built once into RAM (at boot, and again after
+ * a format) and pages are served from it. fs_mgmt uploads append their
+ * file name through the MCUmgr file-access hook and 0x16 deletes drop
+ * it, so neither needs a scan; a library refresh right after an upload
+ * or delete stays scan-free too.
+ *
+ * Entries are stored as "name\n"; if a directory ever outgrows the
+ * buffer the flag makes that listing fall back to the live scan.
+ */
+#define HOME_LIST_CACHE_SIZE 2048
+static K_MUTEX_DEFINE(home_list_lock);
+static char home_list_cache[HOME_LIST_CACHE_SIZE];
+static uint16_t home_list_cache_used; /* publish after the bytes are in */
+static bool home_list_cache_valid;
+static bool home_list_cache_overflow;
+
+static void home_list_cache_stale(void)
+{
+	k_mutex_lock(&home_list_lock, K_FOREVER);
+	home_list_cache_valid = false;
+	home_list_cache_overflow = false;
+	k_mutex_unlock(&home_list_lock);
+}
+
+/* Caller holds home_list_lock. Returns the start of the cache line for
+ * name, or NULL. */
+static char *home_list_cache_line_locked(const char *name, size_t l)
+{
+	char *p = home_list_cache;
+	char *end = home_list_cache + home_list_cache_used;
+
+	while (p < end) {
+		char *nl = memchr(p, '\n', (size_t)(end - p));
+
+		if (nl == NULL) {
+			break;
+		}
+		if ((size_t)(nl - p) == l && memcmp(p, name, l) == 0) {
+			return p;
+		}
+		p = nl + 1;
+	}
+	return NULL;
+}
+
+/* Append one name. Runs on the SMP workqueue while a GATT read may be
+ * serving a page on the BT workqueue, hence the lock. Copy first, then
+ * publish the length, so a partially copied name is never visible. */
+static void home_list_cache_add(const char *name)
+{
+	size_t l = strlen(name);
+
+	if (l == 0U || l > 23U) {
+		return;
+	}
+	k_mutex_lock(&home_list_lock, K_FOREVER);
+	if (home_list_cache_valid && !home_list_cache_overflow &&
+	    home_list_cache_line_locked(name, l) == NULL) {
+		if ((size_t)home_list_cache_used + l + 1U >
+		    sizeof(home_list_cache)) {
+			home_list_cache_overflow = true;
+		} else {
+			memcpy(home_list_cache + home_list_cache_used, name, l);
+			home_list_cache[home_list_cache_used + l] = '\n';
+			home_list_cache_used =
+				(uint16_t)(home_list_cache_used + l + 1U);
+		}
+	}
+	k_mutex_unlock(&home_list_lock);
+}
+
+/* Drop one name (0x16 delete); keeps the cache usable without a rescan. */
+static void home_list_cache_remove(const char *name)
+{
+	size_t l = strlen(name);
+
+	if (l == 0U) {
+		return;
+	}
+	k_mutex_lock(&home_list_lock, K_FOREVER);
+	if (home_list_cache_valid && !home_list_cache_overflow) {
+		char *line = home_list_cache_line_locked(name, l);
+
+		if (line != NULL) {
+			char *end = home_list_cache + home_list_cache_used;
+			char *nl = memchr(line, '\n', (size_t)(end - line));
+
+			if (nl != NULL) {
+				memmove(line, nl + 1,
+					(size_t)(end - (nl + 1)));
+				home_list_cache_used = (uint16_t)
+					(home_list_cache_used - (l + 1U));
+			}
+		}
+	}
+	k_mutex_unlock(&home_list_lock);
+}
+
+/* Caller holds home_list_lock. */
+static void home_list_cache_build_locked(void)
 {
 	struct fs_dir_t dirp;
 	static struct fs_dirent ent;
-	struct fs_file_t f;
-	char buf[512];
-	int used = 0;
+	uint16_t used = 0;
 
+	home_list_cache_valid = false;
+	home_list_cache_overflow = false;
+	home_list_cache_used = 0;
 	if (!fs_ready) {
 		return;
 	}
@@ -3502,33 +3601,38 @@ static void home_write_dir(void)
 		return;
 	}
 	while (fs_readdir(&dirp, &ent) == 0 && ent.name[0] != '\0') {
-		int n;
+		size_t l;
 
-		if (ent.type != FS_DIR_ENTRY_FILE ||
-		    strcmp(ent.name, "dir.txt") == 0) {
+		if (ent.type != FS_DIR_ENTRY_FILE) {
 			continue;
 		}
-		n = snprintf(buf + used, sizeof(buf) - (size_t)used, "%s %u\n",
-			     ent.name, (unsigned)ent.size);
-		if (n < 0 || used + n >= (int)sizeof(buf) - 1) {
+		l = strlen(ent.name);
+		if (used + (int)l + 1 > (int)sizeof(home_list_cache)) {
+			home_list_cache_overflow = true;
 			break;
 		}
-		used += n;
+		memcpy(home_list_cache + used, ent.name, l);
+		home_list_cache[used + l] = '\n';
+		used = (uint16_t)(used + l + 1U);
 	}
 	fs_closedir(&dirp);
-
-	fs_file_t_init(&f);
-	if (fs_open(&f, "/home/dir.txt",
-		    FS_O_WRITE | FS_O_CREATE | FS_O_TRUNC) == 0) {
-		(void)fs_write(&f, buf, (size_t)used);
-		fs_close(&f);
+	if (!home_list_cache_overflow) {
+		home_list_cache_used = used;
+		home_list_cache_valid = true;
 	}
 }
 
-/* Build one page of the /home listing into dst as "name\n" entries (never
- * splitting a name; the caller keeps one spare byte for the next index).
- * Returns the next entry index to continue from, or -1 when done. */
-static int home_list(uint16_t start, uint8_t *dst, int size)
+static void home_list_cache_build(void)
+{
+	k_mutex_lock(&home_list_lock, K_FOREVER);
+	home_list_cache_build_locked();
+	k_mutex_unlock(&home_list_lock);
+}
+
+/* One page of the /home listing as "name\n" entries (never splitting a
+ * name; the caller keeps one spare byte for the next index). Returns the
+ * next entry index to continue from, or -1 when done. */
+static int home_list_live(uint16_t start, uint8_t *dst, int size)
 {
 	struct fs_dir_t dirp;
 	static struct fs_dirent ent;
@@ -3564,6 +3668,92 @@ static int home_list(uint16_t start, uint8_t *dst, int size)
 	dst[used] = '\0';
 	return -1;
 }
+
+static int home_list(uint16_t start, uint8_t *dst, int size)
+{
+	const char *p, *end;
+	int used = 0;
+	int idx = 0;
+
+	k_mutex_lock(&home_list_lock, K_FOREVER);
+	if (!home_list_cache_valid) {
+		if (!home_list_cache_overflow) {
+			home_list_cache_build_locked();
+		}
+		if (!home_list_cache_valid) {
+			int next = home_list_live(start, dst, size);
+
+			k_mutex_unlock(&home_list_lock);
+			return next;
+		}
+	}
+	p = home_list_cache;
+	end = home_list_cache + home_list_cache_used;
+	while (p < end) {
+		const char *nl = memchr(p, '\n', (size_t)(end - p));
+		size_t l;
+
+		if (nl == NULL) {
+			break;
+		}
+		l = (size_t)(nl - p);
+		if (idx++ < (int)start) {
+			p = nl + 1;
+			continue;
+		}
+		if (used + (int)l + 1 > size - 1) {
+			dst[used] = '\0';
+			k_mutex_unlock(&home_list_lock);
+			return idx - 1;
+		}
+		memcpy(dst + used, p, l);
+		dst[used + l] = '\n';
+		used += (int)l + 1;
+		p = nl + 1;
+	}
+	k_mutex_unlock(&home_list_lock);
+	dst[used] = '\0';
+	return -1;
+}
+
+#if defined(CONFIG_MCUMGR_GRP_FS_FILE_ACCESS_HOOK)
+/* fs_mgmt uploads (web page, smpmgr, sid_add.py) append their file name
+ * to the listing cache: no directory scan on the next listing, so audio
+ * keeps playing while the library refreshes after an upload. */
+static enum mgmt_cb_return home_fs_access_cb(uint32_t event,
+					     enum mgmt_cb_return prev_status,
+					     int32_t *rc, uint16_t *group,
+					     bool *abort_more, void *data,
+					     size_t data_size)
+{
+	const struct fs_mgmt_file_access *fa = data;
+
+	ARG_UNUSED(prev_status);
+	ARG_UNUSED(rc);
+	ARG_UNUSED(group);
+	ARG_UNUSED(abort_more);
+
+	if (event == MGMT_EVT_OP_FS_MGMT_FILE_ACCESS &&
+	    data_size >= sizeof(*fa) &&
+	    fa->access == FS_MGMT_FILE_ACCESS_WRITE &&
+	    fa->filename != NULL) {
+		const char *name = fa->filename;
+
+		if (strncmp(name, "/home/", 6) == 0) {
+			name += 6;
+		}
+		if (name[0] != '\0' && strchr(name, '/') == NULL) {
+			home_list_cache_add(name);
+		}
+	}
+	return MGMT_CB_OK;
+}
+
+static struct mgmt_callback home_fs_access_mgmt_cb = {
+	.callback = home_fs_access_cb,
+	.event_id = MGMT_EVT_OP_FS_MGMT_FILE_ACCESS,
+};
+#endif /* CONFIG_MCUMGR_GRP_FS_FILE_ACCESS_HOOK */
 
 /* Alphabetically next (dir > 0) or previous .sid in /home, wrapping around.
  * Only the current name is kept as state; the directory is rescanned on
@@ -4105,8 +4295,8 @@ static void bri_cfg_load(void)
 		bri_lvl[2], bri_manual, idle_timeout_s);
 }
 
-/* SAVE STATE: rebuild dir.txt and flush the clock, brightness profiles,
- * alarms and the last tune to /home in one go. */
+/* SAVE STATE: flush the clock, brightness profiles, alarms and the last
+ * tune to /home in one go. */
 static void save_all_state(void)
 {
 	if (!fs_ready) {
@@ -4116,14 +4306,13 @@ static void save_all_state(void)
 			fs_mount_err);
 		return;
 	}
-	home_write_dir();
 	time_cfg_save();
 	bri_cfg_dirty = false;
 	alm_cfg_dirty = false;
 	bri_cfg_save();
 	alm_cfg_save();
 	sid_remember_save();
-	LOG_INF("state saved (dir.txt time brightness alarms sid)");
+	LOG_INF("state saved (time brightness alarms sid)");
 }
 
 /* LiPo discharge curve (mV -> percent), clamped. */
@@ -4683,7 +4872,7 @@ static void touch_poll(void)
 		}
 		if (first && hit(x, y, SET_SAVE_X, SET_SAVE_Y, SET_SAVE_W,
 				SET_SAVE_H)) {
-			save_all_state(); /* dir.txt + time + configs */
+			save_all_state(); /* time + configs */
 			return;
 		}
 		if (first && hit(x, y, ALM_ARR_X0, SET_SLD_IDLE_Y, ALM_ARR_W,
@@ -5778,6 +5967,9 @@ int main(void)
 		accel_direct = true;
 	}
 
+#if defined(CONFIG_MCUMGR_GRP_FS_FILE_ACCESS_HOOK)
+	mgmt_callback_register(&home_fs_access_mgmt_cb);
+#endif
 	bt_setup();
 
 	(void)battery_init();
@@ -5789,7 +5981,11 @@ int main(void)
 	}
 
 	fs_storage_init(false); /* mount /home (no format); see the BLE docs */
-	home_write_dir(); /* keep the directory index file current */
+	/* dir.txt was a generated index for hosts without a listing command;
+	 * 0x13 now serves from the RAM cache. Drop the stale copy and build
+	 * the cache once, before playback can start. */
+	(void)fs_unlink("/home/dir.txt");
+	home_list_cache_build();
 	bri_cfg_load();   /* restore the ambient brightness profiles */
 	for (int i = 0; i < 5; i++) {
 		alarms[i].hour = 7;
@@ -5824,16 +6020,6 @@ int main(void)
 			stacks_valid = true;
 			LOG_INF("stacks latched: page %u rows %u of %u",
 				stacks_page, stacks_latched, stacks_total);
-		}
-		/* dir.txt refresh requested by a /home listing (0x13): the
-		 * listing itself is cheap, the littlefs rebuild is not, so it
-		 * runs here instead of on the BT RX workqueue. At most one
-		 * rebuild per 2 s, however often a host lists. */
-		if (dir_dirty &&
-		    (uint32_t)(k_uptime_get_32() - dir_written_ms) >= 2000U) {
-			dir_dirty = false;
-			home_write_dir();
-			dir_written_ms = k_uptime_get_32();
 		}
 		/* the SID marquee only advances while its screen is on
 		 * show (idle face, other screens and the dark panel pause
