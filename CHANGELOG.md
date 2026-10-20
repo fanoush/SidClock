@@ -104,6 +104,30 @@
   previous read in byte [139], so a stall that starts after boot is
   visible even though the all-time maximum in [16] is already saturated
   by the boot-time load.
+- The web remote could get stuck in a half-connected state after a page
+  reload: the initial state read on a fresh Chrome/Android link is
+  rejected with "GATT operation failed", and the page only marked itself
+  connected after that read succeeded. State notifications were already
+  streaming, so the progress bar updated while the button still said
+  Connect and the transport stayed disabled; the next Connect click then
+  disconnected the live link (Reconnect worked until the next reload).
+  A resolved `gatt.connect()` is now the connection: the page enables the
+  controls first and a failed setup step cannot take that back, it only
+  leaves a note. The client also no longer reads the state before
+  subscribing - field feedback showed that on Android a read issued
+  before the CCC write is rejected and takes the CCC write down with it,
+  leaving a live link with no notifications. The device forces a
+  notification as soon as the CCC is written, which is the whole initial
+  value. Reads and the CCC write retry once, and if the CCC write still
+  fails the page reconnects silently once - Chrome on Android keeps
+  rejecting it on the same client until the client is recreated, which is
+  why a manual Reconnect used to fix the symptom. Concurrent info reads
+  (the connect flow and the first notification both ask for them) are
+  coalesced, and the connect itself retries once for the old link a
+  reload can still be tearing down. A new `tools/web-tests/connect.html`
+  page test drives the real page against a fake device that rejects a
+  state read before the CCC write (and a wedged CCC write), so the
+  ordering and the recovery cannot regress.
 - Player commands from BLE now run in the main loop instead of the
   Bluetooth receive workqueue. That workqueue's 2 KB stack was already at
   96 % during a tune load and "next tune" adds a directory scan on top:

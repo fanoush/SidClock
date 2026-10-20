@@ -45,9 +45,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.send_response(204)
         self.end_headers()
         server = self.server
-        server.result = body
+        # per-test reports are not awaited by the page: a straggler can
+        # arrive after the ?done=1 report, so latch the finished one
         if 'done' in parse_qs(url.query):
+            server.result = body
             server.done.set()
+        elif not server.done.is_set():
+            server.result = body
 
     def log_message(self, *args):
         pass  # keep the output clean; results are printed by main()

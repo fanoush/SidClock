@@ -9,7 +9,9 @@
  */
 
 import { md5 } from '../../web/md5.js';
-import { parseInfo } from '../../web/ble.js';
+import {
+  SidClock, parseInfo, DBG_CHAR, STATE_CHAR, INFO_CHAR, SIDCLOCK_SERVICE,
+} from '../../web/ble.js';
 import {
   cborUint, cborBytes, cborText, cborMap, cborDecode, SmpClient, SmpError,
 } from '../../web/smp.js';
@@ -97,6 +99,152 @@ function pattern(n, fn) {
 }
 
 const te = new TextEncoder();
+
+/* ---------- fake Web Bluetooth device for the SidClock tests ---------- */
+
+const gattError = () =>
+  new DOMException('GATT operation failed', 'NetworkError');
+
+function mockClock() {
+  const clock = {
+    requests: 0, connects: 0, stateReads: 0, infoReads: 0, subs: 0,
+    failConnect: 0, failState: 0, failInfo: 0, failSub: 0,
+    poisoned: false, subscribed: false,
+  };
+  const stateBytes = new Uint8Array(16);
+  stateBytes.set([1, 0, 2, 0, 0, 2, 1, 0, 5, 0, 0, 0, 100, 0, 0, 0]);
+  const infoBytes = new Uint8Array(96);
+  const put = (s, off, n) =>
+    infoBytes.set(te.encode(s).subarray(0, n - 1), off);
+  put('Test Tune', 0, 32);
+  put('test.sid', 32, 24);
+  put('Tester', 56, 32);
+  put('deadbeef', 88, 8);
+  const dbgBytes = new Uint8Array(132);
+  const view = (b) => new DataView(b.buffer, b.byteOffset, b.byteLength);
+
+  const listeners = new Set();
+  const stateChar = {
+    value: view(stateBytes),
+    properties: {},
+    async readValue() {
+      clock.stateReads++;
+      /* a read before the CCC write wedges a fresh Android link: the
+       * CCC write that follows is then rejected too */
+      if (!clock.subscribed) clock.poisoned = true;
+      if (clock.failState > 0) {
+        clock.failState--;
+        throw gattError();
+      }
+      return view(stateBytes);
+    },
+    async startNotifications() {
+      clock.subs++;
+      if (clock.poisoned) throw gattError();
+      if (clock.failSub > 0) {
+        clock.failSub--;
+        throw gattError();
+      }
+      clock.subscribed = true;
+    },
+    async stopNotifications() {
+      clock.subscribed = false;
+    },
+    addEventListener(type, fn) {
+      if (type === 'characteristicvaluechanged') listeners.add(fn);
+    },
+    removeEventListener(type, fn) {
+      listeners.delete(fn);
+    },
+    emit(bytes) {
+      if (bytes) stateBytes.set(bytes);
+      stateChar.value = view(stateBytes);
+      for (const fn of [...listeners]) fn({ target: stateChar });
+    },
+  };
+  const infoChar = {
+    async readValue() {
+      clock.infoReads++;
+      if (clock.failInfo > 0) {
+        clock.failInfo--;
+        throw gattError();
+      }
+      return view(infoBytes);
+    },
+  };
+  const dbgChar = {
+    async readValue() { return view(dbgBytes); },
+    async writeValue(bytes) { dbgChar.writes.push([...bytes]); },
+    writes: [],
+  };
+
+  const chars = new Map([
+    [DBG_CHAR, dbgChar], [STATE_CHAR, stateChar], [INFO_CHAR, infoChar],
+  ]);
+  const sid = {
+    async getCharacteristic(uuid) { return chars.get(uuid); },
+  };
+  const server = {
+    async getPrimaryService(uuid) {
+      if (uuid === SIDCLOCK_SERVICE) return sid;
+      throw new DOMException('not found', 'NotFoundError');
+    },
+  };
+
+  const gone = new Set();
+  const device = {
+    name: 'SidClock',
+    gatt: {
+      connected: false,
+      async connect() {
+        clock.connects++;
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        if (clock.failConnect > 0) {
+          clock.failConnect--;
+          throw gattError();
+        }
+        this.connected = true;
+        return server;
+      },
+      disconnect() {
+        this.connected = false;
+        clock.subscribed = false;
+        for (const fn of [...gone]) fn();
+      },
+    },
+    addEventListener(type, fn) {
+      if (type === 'gattserverdisconnected') gone.add(fn);
+    },
+    removeEventListener(type, fn) {
+      gone.delete(fn);
+    },
+  };
+  clock.device = device;
+  clock.stateChar = stateChar;
+  clock.dbgChar = dbgChar;
+  return clock;
+}
+
+/** Run `fn(clock)` with navigator.bluetooth backed by mockClock(). */
+async function withMockClock(fn) {
+  const clock = mockClock();
+  const saved = Object.getOwnPropertyDescriptor(navigator, 'bluetooth');
+  Object.defineProperty(navigator, 'bluetooth', {
+    value: {
+      requestDevice: async () => {
+        clock.requests++;
+        return clock.device;
+      },
+    },
+    configurable: true,
+  });
+  try {
+    await fn(clock);
+  } finally {
+    if (saved) Object.defineProperty(navigator, 'bluetooth', saved);
+    else delete navigator.bluetooth;
+  }
+}
 
 async function main() {
 
@@ -602,6 +750,95 @@ await test('ble: parseInfo (88-byte and 96-byte info reads)', () => {
      'NUL-filled id');
   eq(parseInfo(new Uint8Array(40)), null, 'short value rejected');
 });
+
+await test('ble: SidClock coalesces concurrent connect() calls', () =>
+  withMockClock(async (clock) => {
+    const sc = new SidClock();
+    const [a, b] = await Promise.all([sc.connect(), sc.connect()]);
+    eq(a, 'SidClock', 'first name');
+    eq(b, 'SidClock', 'same in-flight attempt');
+    eq(clock.requests, 1, 'picker shown once');
+    eq(clock.connects, 1, 'gatt.connect() called once');
+    ok(sc.connected, 'connected');
+  }));
+
+await test('ble: SidClock subscribes before reading the state', () =>
+  withMockClock(async (clock) => {
+    const sc = new SidClock();
+    const seen = [];
+    sc.onState = (st) => seen.push(st);
+    await sc.connect();
+    await sc.startUpdates();
+    eq(clock.stateReads, 0, 'no read before the CCC write');
+    ok(!clock.poisoned, 'the link is not wedged');
+    eq(clock.subs, 1, 'one CCC write');
+    clock.stateChar.emit([1, 0, 2, 0, 0, 2, 1, 0, 42, 0, 0, 0, 100, 0, 0, 0]);
+    eq(seen.length, 1, 'notification reaches the page');
+    eq(seen[0].elapsed, 42, 'pushed value');
+  }));
+
+await test('ble: SidClock retries the CCC write once', () =>
+  withMockClock(async (clock) => {
+    const sc = new SidClock();
+    await sc.connect();
+    clock.failSub = 1;
+    await sc.startUpdates();
+    eq(clock.subs, 2, 'startNotifications attempted twice');
+  }));
+
+await test('ble: SidClock retries a read but not after disconnect', () =>
+  withMockClock(async (clock) => {
+    const sc = new SidClock();
+    await sc.connect();
+    clock.failInfo = 1;
+    eq((await sc.readInfo()).title, 'Test Tune', 'retry recovers');
+    eq(clock.infoReads, 2, 'one retry');
+
+    clock.failInfo = 2;
+    await throws(() => sc.readInfo(), /GATT operation failed/);
+    eq(clock.infoReads, 4, 'gives up after one retry');
+
+    clock.device.gatt.connected = false;
+    clock.failInfo = 1;
+    await throws(() => sc.readInfo(), /GATT operation failed/);
+    eq(clock.infoReads, 5, 'no retry on a dead link');
+  }));
+
+await test('ble: SidClock replaces listeners on reconnect', () =>
+  withMockClock(async (clock) => {
+    const sc = new SidClock();
+    const seen = [];
+    sc.onState = (st) => seen.push(st);
+    await sc.connect();
+    await sc.startUpdates();
+    await sc.connect();
+    await sc.startUpdates();
+    clock.stateChar.emit();
+    eq(seen.length, 1, 'one listener after two connects');
+  }));
+
+await test('ble: SidClock retries the first GATT connect once', () =>
+  withMockClock(async (clock) => {
+    const sc = new SidClock();
+    clock.failConnect = 1;
+    eq(await sc.connect(), 'SidClock', 'second attempt succeeds');
+    eq(clock.connects, 2, 'one retry');
+    ok(sc.connected, 'connected');
+  }));
+
+await test('ble: SidClock can retry after a failed connect', () =>
+  withMockClock(async (clock) => {
+    const sc = new SidClock();
+    clock.failConnect = 2; // the attempt and its retry
+    await throws(() => sc.connect(), /GATT operation failed/);
+    ok(!sc.connected, 'not connected');
+    eq(clock.requests, 1, 'device picked once');
+    eq(clock.connects, 2, 'first attempt and retry failed');
+    await sc.connect();
+    ok(sc.connected, 'next connect call works');
+    eq(clock.connects, 3, 'a fresh GATT attempt');
+    eq(clock.requests, 1, 'same device, no picker');
+  }));
 
 await test('hvsc: STIL entry parsing', () => {
   const idx = stilIndex(STIL_FIXTURE);

@@ -180,6 +180,11 @@ Do not break these without discussing it in the PR/commit:
   `tools/web-tests/page.html?record` drives the real page (search boxes,
   paging, status line) in an iframe against the live API; wrap the headless
   Chrome in `timeout` - the report arrives before Chrome exits.
+  `tools/web-tests/connect.html?record` drives the real page against a
+  fake Web Bluetooth device (offline, no hardware): it fails the CCC write
+  and info read the way a fresh Chrome/Android link does, checks that a
+  rejected CCC write heals with one silent reconnect, and that the page
+  stays connected and usable throughout.
 
 ## Testing checklist (run on hardware)
 

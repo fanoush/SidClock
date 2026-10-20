@@ -144,6 +144,8 @@ those want the repository root as the server root instead:
 ```sh
 python3 -m http.server 8899                     # repository root
 # http://localhost:8899/tools/web-tests/index.html  (+ ?live for network checks)
+# .../page.html drives the real page against the live API (network)
+# .../connect.html drives it against a fake Bluetooth device (offline)
 python3 tools/web-tests/record.py --out /tmp/wt.txt   # headless runner
 ```
 

@@ -136,6 +136,11 @@ export class SidClock {
     this.device = null;
     this.server = null;
     this.connected = false;
+    this._connecting = null;
+    this._stateChar = null;
+    this._stateHandler = null;
+    this._batteryChar = null;
+    this._batteryHandler = null;
     this.onState = () => {};
     this.onInfo = () => {};
     this.onBattery = () => {};
@@ -148,7 +153,19 @@ export class SidClock {
 
   /** Open (or re-open) the device. Shows the browser's picker on the
    *  first call, reconnects silently afterwards. */
-  async connect() {
+  connect() {
+    /* A double click or a retry while the first attempt is still in
+     * progress must not start a second gatt.connect() - the loser of that
+     * race comes back as "connected to another app". */
+    if (!this._connecting) {
+      this._connecting = this._open().finally(() => {
+        this._connecting = null;
+      });
+    }
+    return this._connecting;
+  }
+
+  async _open() {
     if (!this.device) {
       this.device = await navigator.bluetooth.requestDevice({
         // The device advertises flags + name only, so the name is the
@@ -166,12 +183,13 @@ export class SidClock {
         this.onDisconnect();
       });
     }
-    this.server = await this.device.gatt.connect();
+    this.server = await this._connectGatt();
 
-    const svc = await this.server.getPrimaryService(SIDCLOCK_SERVICE);
-    this.dbg = await svc.getCharacteristic(DBG_CHAR);
-    this.state = await svc.getCharacteristic(STATE_CHAR);
-    this.info = await svc.getCharacteristic(INFO_CHAR);
+    const svc = await this._retryGatt(() =>
+      this.server.getPrimaryService(SIDCLOCK_SERVICE));
+    this.dbg = await this._retryGatt(() => svc.getCharacteristic(DBG_CHAR));
+    this.state = await this._retryGatt(() => svc.getCharacteristic(STATE_CHAR));
+    this.info = await this._retryGatt(() => svc.getCharacteristic(INFO_CHAR));
 
     this.battery = await this._optional(BATTERY_SERVICE, BATTERY_LEVEL_CHAR);
     this.cts = await this._optional(CTS_SERVICE, CTS_CHAR);
@@ -182,47 +200,107 @@ export class SidClock {
     return this.device.name || 'SidClock';
   }
 
+  /** Connect the GATT link, retrying a failed attempt once: right after
+   *  a page reload the previous page's link can still be up, and Android
+   *  answers the new connect with "connected to another app" until the
+   *  stack has dropped it. */
+  async _connectGatt() {
+    try {
+      return await this.device.gatt.connect();
+    } catch (e) {
+      if (e.name !== 'NetworkError' && e.name !== 'InvalidStateError') throw e;
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      return this.device.gatt.connect();
+    }
+  }
+
+  /** One retry for a GATT operation that failed while the link is up.
+   *  Chrome on Android sometimes rejects the first operation on a fresh
+   *  connection ("GATT operation failed") even though it is fine; the
+   *  retry after the queue settles is enough. A real disconnect fails
+   *  the retry too. */
+  async _retryGatt(fn, delayMs = 250) {
+    try {
+      return await fn();
+    } catch (e) {
+      if (!this.device || !this.device.gatt.connected) throw e;
+      if (e.name !== 'NetworkError' && e.name !== 'InvalidStateError') throw e;
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      return fn();
+    }
+  }
+
+  _read(char) {
+    return this._retryGatt(() => char.readValue(), 200);
+  }
+
+  /** Subscribe to notifications, retrying the CCC write once for the
+   *  same reason as _read(). */
+  _subscribe(char) {
+    return this._retryGatt(() => char.startNotifications());
+  }
+
   async _optional(service, characteristic) {
     try {
-      const s = await this.server.getPrimaryService(service);
-      return await s.getCharacteristic(characteristic);
+      const s = await this._retryGatt(() =>
+        this.server.getPrimaryService(service));
+      return await this._retryGatt(() => s.getCharacteristic(characteristic));
     } catch (e) {
       return null; // service not present: the rest still works
     }
   }
 
-  /** Subscribe to the pushed values; reads the initial ones so the page
-   *  is correct before the first notification arrives. */
+  /** Subscribe to the pushed values. No initial read: the device forces
+   *  a notification as soon as the CCC is written (player_state_dirty in
+   *  the firmware), and a read issued before that CCC write is what made
+   *  a fresh Android connection fail - the read is rejected and the CCC
+   *  write that follows it too ("GATT operation failed"), leaving a live
+   *  link with no notifications. Subscribe first, then let the device
+   *  push. */
   async startUpdates() {
-    this.state.addEventListener('characteristicvaluechanged', (e) => {
+    /* Replace the previous connection's listener (if any): a reconnect
+     * hands us new characteristic objects, and the old ones must not keep
+     * feeding the UI. */
+    if (this._stateChar && this._stateHandler) {
+      this._stateChar.removeEventListener('characteristicvaluechanged',
+                                          this._stateHandler);
+    }
+    this._stateChar = this.state;
+    this._stateHandler = (e) => {
       const st = parseState(e.target.value);
       if (st) this.onState(st);
-    });
-    await this.state.startNotifications();
-    const initial = parseState(await this.state.readValue());
-    if (initial) this.onState(initial);
+    };
+    this.state.addEventListener('characteristicvaluechanged',
+                                this._stateHandler);
+
+    await this._subscribe(this.state);
 
     if (this.battery) {
-      this.battery.addEventListener('characteristicvaluechanged', (e) =>
-        this.onBattery(e.target.value.getUint8(0))
-      );
+      if (this._batteryChar && this._batteryHandler) {
+        this._batteryChar.removeEventListener('characteristicvaluechanged',
+                                              this._batteryHandler);
+      }
+      this._batteryChar = this.battery;
+      this._batteryHandler = (e) => this.onBattery(e.target.value.getUint8(0));
+      this.battery.addEventListener('characteristicvaluechanged',
+                                    this._batteryHandler);
       try {
-        await this.battery.startNotifications();
+        await this._subscribe(this.battery);
       } catch (e) {
         /* notifications unsupported: fall back to a one-shot read */
       }
       try {
-        this.onBattery((await this.battery.readValue()).getUint8(0));
+        this.onBattery((await this._read(this.battery)).getUint8(0));
       } catch (e) {}
     }
   }
 
   async readInfo() {
-    return parseInfo(await this.info.readValue());
+    return parseInfo(await this._read(this.info));
   }
 
   async readTime() {
-    return this.cts ? parseTime(await this.cts.readValue()) : null;
+    return this.cts ? parseTime(await this._read(this.cts)) : null;
   }
 
   async setTime(d = new Date()) {
@@ -267,7 +345,7 @@ export class SidClock {
 
   /** The debug snapshot; a pending listing fills bytes [34..95]. */
   async readSnapshot() {
-    return bytesOf(await this.dbg.readValue());
+    return bytesOf(await this._read(this.dbg));
   }
 
   /** Every name in /home, fetched one 0x13 listing page at a time. */
@@ -315,6 +393,9 @@ export class SidClock {
     this.connected = false;
     try {
       if (this.state) await this.state.stopNotifications();
+    } catch (e) {}
+    try {
+      if (this.battery) await this.battery.stopNotifications();
     } catch (e) {}
     try {
       if (this.device && this.device.gatt.connected) {

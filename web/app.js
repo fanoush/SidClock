@@ -30,6 +30,9 @@ let smp = null;              // SMP client while connected in R/W mode
 let library = null;          // names in /home, or null when unknown
 let busy = null;             // what long operation is running, if any
 let metaKey = '';            // what the HVSC info card currently shows
+let infoReading = null;      // an info read in flight
+let infoAgain = false;       // another read was asked for meanwhile
+let recovering = false;      // a silent reconnect, no disconnect note
 
 /* ---------- helpers ---------- */
 
@@ -100,35 +103,86 @@ function setConnected(ok) {
   refreshControls();
 }
 
+/* Chrome on Android sits on the platform GATT client, which can reject the
+ * CCC write on a fresh link and keep rejecting it on that client; BlueZ
+ * (Chrome on Linux) tolerates the same sequence. A disconnect + connect
+ * hands us a clean client - exactly what a manual Reconnect did in the
+ * field - so do that once by itself instead of leaving the page without
+ * pushed state. Returns null on success, the last error otherwise. */
+async function startLiveUpdates() {
+  try {
+    await sc.startUpdates();
+    return null;
+  } catch (e) {
+    console.warn('state subscribe failed', e);
+  }
+  recovering = true;
+  try {
+    await sc.disconnect();
+    await sc.connect();
+    await sc.startUpdates();
+    return null;
+  } catch (e) {
+    console.warn('state subscribe still failing', e);
+    return e;
+  } finally {
+    recovering = false;
+  }
+}
+
 $('connect').addEventListener('click', async () => {
   if (sc.connected) {
     await sc.disconnect();
     setConnected(false);
     return;
   }
-  $('connect').disabled = true;
+  const btn = $('connect');
+  btn.disabled = true;
+  btn.textContent = 'Connecting…';
   setStatus('connecting…', 'busy');
   try {
     const name = await sc.connect();
-    await sc.startUpdates();
-    lastGeneration = -1;
-    await refreshInfo();
-    await readClock();
+
+    /* The GATT link is up: enable the controls now, before the setup
+     * below. On a fresh Android connection a read or the CCC write can
+     * fail transiently ("GATT operation failed") while the link is fine;
+     * leaving the page half-connected used to make the next Connect
+     * click disconnect it. */
     setConnected(true);
     setStatus(name, 'ok');
+    lastGeneration = -1;
+
+    const failed = await startLiveUpdates();
+    if (failed) {
+      console.error('state updates', failed);
+      note(`live updates failed: ${errorText(failed)}`, true);
+      if (!sc.connected) {
+        /* the recovery reconnect failed: there is no link left */
+        setConnected(false);
+        return;
+      }
+    }
+    try {
+      await refreshInfo();
+    } catch (e) {
+      console.error('info', e);
+      note(`tune info failed: ${errorText(e)}`, true);
+    }
+    await readClock();
     await setupSmp();
     refreshControls();
     refreshLibrary();
   } catch (e) {
     console.error(e);
-    setStatus('not connected');
+    setConnected(false);
     note(errorText(e), true);
   } finally {
-    $('connect').disabled = false;
+    btn.disabled = false;
   }
 });
 
 sc.onDisconnect = () => {
+  if (recovering) return; // our own recovery reconnect, not a lost link
   setConnected(false);
   note('device disconnected');
 };
@@ -199,7 +253,7 @@ function rebuildSubtune(songs) {
 
 /* ---------- tune strings ---------- */
 
-async function refreshInfo() {
+async function readInfoOnce() {
   const i = await sc.readInfo();
   if (!i) return;
   currentInfo = i;
@@ -209,6 +263,25 @@ async function refreshInfo() {
   if (i.name) bits.push(i.name);
   $('subtitle').textContent = bits.join(' · ');
   renderMetadata().catch((e) => console.warn('hvsc info', e));
+}
+
+/** Read the info value, one read at a time. The connect flow and the
+ *  first state notification both ask for it; overlapping GATT reads are
+ *  what a fresh Android link rejects. */
+function refreshInfo() {
+  if (infoReading) {
+    infoAgain = true;
+    return infoReading;
+  }
+  infoReading = (async () => {
+    do {
+      infoAgain = false;
+      await readInfoOnce();
+    } while (infoAgain);
+  })().finally(() => {
+    infoReading = null;
+  });
+  return infoReading;
 }
 
 /* ---------- clocks: device vs. this browser ---------- */
