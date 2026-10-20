@@ -22,6 +22,9 @@
 
 #include "md5.h"
 #include "sid_player.h"
+extern "C" {
+#include "flpr.h"
+}
 
 extern "C" {
 #include "sid/libcsid.h"
@@ -77,17 +80,70 @@ static int model_arg(void)
 
 #ifdef SID_ENGINE_DUAL
 /* Global engine mode, switched from the main-screen button (default is the
- * new core). Applied on every load; see libcsid_select_engine(). */
-static int sid_engine_legacy;
+ * new core): 0 = cRSID on the M33, 1 = legacy cSID-light, 2 = cRSID on the
+ * FLPR core. The core choice is applied on every load (see
+ * libcsid_select_engine()); the FLPR part is handled by the audio path. */
+static int sid_engine_mode;
 
-extern "C" void sid_player_set_engine_mode(int legacy)
+extern "C" void sid_player_set_engine_mode(int mode)
 {
-	sid_engine_legacy = legacy ? 1 : 0;
+	if (mode < SID_ENGINE_CRSID || mode > SID_ENGINE_FLPR) {
+		mode = SID_ENGINE_CRSID;
+	}
+	sid_engine_mode = mode;
 }
 
-extern "C" int sid_player_engine_legacy(void)
+extern "C" int sid_player_engine_mode(void)
 {
-	return sid_engine_legacy;
+	return sid_engine_mode;
+}
+#else
+/* Single-engine image: no switch, the FLPR mode is never selected. */
+extern "C" int sid_player_engine_mode(void)
+{
+	return SID_ENGINE_CRSID;
+}
+
+extern "C" void sid_player_set_engine_mode(int mode)
+{
+	ARG_UNUSED(mode);
+}
+#endif /* SID_ENGINE_DUAL */
+
+#ifdef SID_ENGINE_DUAL
+/* The blob renders engine state without the M33's sid_lock. Before any
+ * mutation (load/play/chip switch) the M33 must stop it and wait for the
+ * acknowledgement, otherwise the init routine and the render interleave
+ * on the same C64 memory. flpr_render_start() resyncs the ring. */
+static inline bool engine_on_flpr(void)
+{
+	return sid_engine_mode == SID_ENGINE_FLPR;
+}
+
+static inline bool engine_quiesce(void)
+{
+	if (engine_on_flpr() && flpr_rendering()) {
+		flpr_render_stop();
+		return true;
+	}
+	return false;
+}
+
+static inline void engine_resume(bool was_running)
+{
+	if (was_running) {
+		flpr_render_start();
+	}
+}
+#else
+static inline bool engine_quiesce(void)
+{
+	return false;
+}
+
+static inline void engine_resume(bool was_running)
+{
+	ARG_UNUSED(was_running);
 }
 #endif /* SID_ENGINE_DUAL */
 
@@ -176,7 +232,7 @@ static int sid_load_file(const char *path)
 	}
 
 #ifdef SID_ENGINE_DUAL
-	libcsid_select_engine(sid_engine_legacy);
+	libcsid_select_engine(sid_engine_mode == SID_ENGINE_LEGACY);
 #endif
 	libcsid_init(SID_RATE, model_arg());
 	libcsid_stream_fill = sid_stream_read;
@@ -230,7 +286,7 @@ static int sid_load_file(const char *path)
 		const char *base = strrchr(path, '/');
 
 		dbg_record_tune(base != NULL ? base + 1 : path,
-				sid_engine_legacy);
+				sid_engine_mode);
 	}
 #endif
 	LOG_INF("SID: %s (%d B) \"%s\" by \"%s\", %u song(s)", path, (int)sz,
@@ -242,9 +298,14 @@ static int sid_load_file(const char *path)
 extern "C" int sid_player_load(const char *path)
 {
 	int rc;
+	bool quiesced;
 
 	k_mutex_lock(&sid_lock, K_FOREVER);
+	/* Loading writes C64 memory: stop the blob first. Rendering stays
+	 * off until sid_player_play()/audio_sid_start(). */
+	quiesced = engine_quiesce();
 	rc = sid_load_file(path);
+	ARG_UNUSED(quiesced);
 	k_mutex_unlock(&sid_lock);
 	return rc;
 }
@@ -271,6 +332,8 @@ extern "C" void sid_player_set_render_rate(uint32_t hz)
 	was_elapsed = sid_elapsed_samples;
 
 	if (loaded) {
+		bool quiesced = engine_quiesce();
+
 		sid_load_file(sid_path);
 		playing = was_playing;
 		paused = was_paused;
@@ -278,6 +341,7 @@ extern "C" void sid_player_set_render_rate(uint32_t hz)
 		if (playing) {
 			libcsid_play(was_sub);
 		}
+		engine_resume(quiesced);
 	} else {
 		libcsid_init((int)hz, model_arg());
 	}
@@ -290,16 +354,19 @@ extern "C" void sid_player_set_model(int mode)
 {
 	int was_playing, was_sub, was_paused;
 	uint32_t was_elapsed;
+	bool quiesced;
 
 	if (mode < 0 || mode > 2 || mode == model_mode) {
 		return;
 	}
 
 	k_mutex_lock(&sid_lock, K_FOREVER);
+	quiesced = engine_quiesce();
 	model_mode = mode;
 
 	if (!loaded) {
 		libcsid_init(SID_RATE, model_arg());
+		engine_resume(quiesced);
 		k_mutex_unlock(&sid_lock);
 		return;
 	}
@@ -316,6 +383,7 @@ extern "C" void sid_player_set_model(int mode)
 	if (playing) {
 		libcsid_play(was_sub);
 	}
+	engine_resume(quiesced);
 	k_mutex_unlock(&sid_lock);
 }
 
@@ -331,13 +399,17 @@ extern "C" int sid_player_chip(void)
 
 extern "C" void sid_player_play(int song)
 {
+	bool quiesced;
+
 	k_mutex_lock(&sid_lock, K_FOREVER);
+	quiesced = engine_quiesce();
 	if (loaded) {
 		libcsid_play(song);
 		playing = true;
 		paused = false;
 		sid_elapsed_samples = 0;
 	}
+	engine_resume(quiesced);
 	k_mutex_unlock(&sid_lock);
 }
 

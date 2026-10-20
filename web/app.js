@@ -223,7 +223,8 @@ function renderState(st) {
 
   $('chip').textContent =
     `chip ${CHIP_NAMES[st.chip] || '?'} · ${MODEL_MODES[st.modelMode] || 'auto'}`;
-  $('engine').textContent = st.legacyEngine ? 'legacy engine' : 'cRSID';
+  $('engine').textContent = st.legacyEngine ? 'legacy engine'
+    : st.flprEngine ? 'cRSID on FLPR' : 'cRSID';
   $('snd').textContent = st.sound ? 'snd on' : 'muted';
 
   const pct = st.length > 0

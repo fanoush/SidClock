@@ -48,7 +48,10 @@ struct flpr_shared {
 	/* SID pipe (M33 writes run/rate/mode, blob writes the rest): */
 	uint32_t mode;      /* 1 = SID render, 2 = one-shot bench */
 	uint32_t rate_hz;   /* render rate (M33 hw_rate) */
-	uint32_t run;       /* 1 = render into the ring */
+	uint32_t run;       /* 1 = render into the ring (M33 writes) */
+	uint32_t run_ack;   /* blob mirrors `run` each iteration, so the
+			     * M33 can wait for the render to actually stop
+			     * before it mutates engine state (load/play) */
 	uint32_t write_idx; /* absolute frames produced (blob) */
 	uint32_t read_idx;  /* absolute frames consumed (M33) */
 	uint32_t underruns; /* M33-side shortfall counter */

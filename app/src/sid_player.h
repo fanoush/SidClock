@@ -34,10 +34,19 @@ int sid_player_model_mode(void);
 int sid_player_chip(void);
 
 #ifdef SID_ENGINE_DUAL
-/* Global engine mode for all tunes (default: new core). The main-screen
- * engine button flips it; the next load (or reload) applies it. */
-void sid_player_set_engine_mode(int legacy);
-int sid_player_engine_legacy(void);
+/* Engine choice for all tunes (default: cRSID on the M33). The engine
+ * button cycles it; the next load (or reload) applies it. */
+#define SID_ENGINE_CRSID 0
+#define SID_ENGINE_LEGACY 1
+#define SID_ENGINE_FLPR 2 /* cRSID rendered by the FLPR blob */
+void sid_player_set_engine_mode(int mode);
+int sid_player_engine_mode(void);
+#else
+#define SID_ENGINE_CRSID 0
+#define SID_ENGINE_LEGACY 1
+#define SID_ENGINE_FLPR 2
+int sid_player_engine_mode(void);
+void sid_player_set_engine_mode(int mode);
 #endif
 
 bool sid_player_is_playing(void);

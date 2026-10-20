@@ -41,6 +41,7 @@
 
 #include "audio.h"
 #include "sid_player.h"
+#include "flpr.h"
 #include "flpr_shared.h"
 
 LOG_MODULE_REGISTER(audio, LOG_LEVEL_INF);
@@ -267,7 +268,7 @@ static void fill_buffer(int32_t *dst)
 {
 	if (muted) {
 		fill_zeros(dst);
-	} else if (flpr_pipe) {
+	} else if (flpr_pipe && !sid_player_is_paused()) {
 		uint32_t w = FLPR_SHARED->write_idx;
 		uint32_t r = FLPR_SHARED->read_idx;
 		uint32_t avail = w - r;
@@ -534,6 +535,22 @@ static void audio_thread(void *a, void *b, void *c)
 		if (flpr_pipe && flpr_pipe_until != 0U &&
 		    (int32_t)(k_uptime_get_32() - flpr_pipe_until) >= 0) {
 			audio_flpr_stop();
+		}
+
+		/* Pause/resume the blob with the player. While paused it must
+		 * not render: the ring would overrun and the next drain would
+		 * play stale samples (and the tune clock would jump). On
+		 * resume, drop whatever piled up. */
+		if (flpr_pipe) {
+			if (sid_player_is_paused()) {
+				if (FLPR_SHARED->run != 0U) {
+					FLPR_SHARED->run = 0U;
+				}
+			} else if (FLPR_SHARED->run == 0U) {
+				FLPR_SHARED->read_idx =
+					FLPR_SHARED->write_idx;
+				FLPR_SHARED->run = 1U;
+			}
 		}
 
 		audio_service();
@@ -805,8 +822,32 @@ void audio_tone_release(void)
 #endif /* SIDCLOCK_DEBUG */
 
 /*
+ * Put the pipe in render mode and start draining. Shared by
+ * audio_sid_start() (engine = FLPR) and the debug pipe command.
+ */
+static void flpr_pipe_start(uint32_t seconds)
+{
+	FLPR_SHARED->rate_hz = hw_rate();
+	FLPR_SHARED->mode = 1U; /* SID render */
+	FLPR_SHARED->read_idx = FLPR_SHARED->write_idx; /* drain stale */
+	FLPR_SHARED->underruns = 0U;
+	flpr_underruns = 0U;
+	pipe_peak = 0U;
+	dbg[2] = 0U;
+	dbg[4] = 0U;
+	dbg[12] = 0U;
+	FLPR_SHARED->run = 1U;
+	flpr_pipe = true;
+	dbg[3] = 1U;
+	flpr_pipe_until = seconds ? k_uptime_get_32() + seconds * 1000U : 0U;
+	last_sound_ms = k_uptime_get_32();
+}
+
+/*
  * SID playback mode. The stream is forced to 22050 Hz (the emulator's rate)
- * and kept awake while the emulator is producing samples.
+ * and kept awake while the emulator is producing samples. With the FLPR
+ * engine selected the blob produces them and this module only drains the
+ * ring; otherwise the M33 renders into sid_scratch in the fill path.
  */
 void audio_sid_start(void)
 {
@@ -820,8 +861,26 @@ void audio_sid_start(void)
 	} else if (!stream_running) {
 		stream_resume();
 	}
+	/* A rate change reloads the tune: stop the blob before it. */
+	flpr_render_stop();
 	sid_player_set_render_rate(hw_rate());
-	sid_mode = true;
+	/* Engine choice: cRSID on the FLPR blob, or either core on the M33.
+	 * The blob only boots when this engine is actually selected; if it
+	 * cannot start, fall back to the M33 render rather than go silent. */
+	if (sid_player_engine_mode() == SID_ENGINE_FLPR && flpr_start() == 0) {
+		sid_mode = false;
+		flpr_pipe_start(0U); /* until audio_sid_stop() */
+	} else {
+		flpr_pipe = false;
+		FLPR_SHARED->run = 0U;
+		sid_mode = true;
+		/* M33 engine: do not leave the VPR core looping (it costs
+		 * current and renders nothing). The next FLPR start boots it
+		 * fresh. */
+		if (flpr_alive()) {
+			flpr_halt();
+		}
+	}
 	last_sound_ms = k_uptime_get_32();
 }
 
@@ -856,20 +915,7 @@ void audio_flpr_start_sid(uint32_t seconds)
 	} else if (!stream_running) {
 		stream_resume();
 	}
-	FLPR_SHARED->rate_hz = hw_rate();
-	FLPR_SHARED->mode = 1U; /* SID render */
-	FLPR_SHARED->read_idx = FLPR_SHARED->write_idx; /* drain stale */
-	FLPR_SHARED->underruns = 0U;
-	flpr_underruns = 0U;
-	pipe_peak = 0U;
-	dbg[2] = 0U;
-	dbg[4] = 0U;
-	dbg[12] = 0U;
-	FLPR_SHARED->run = 1U;
-	flpr_pipe = true;
-	dbg[3] = 1U;
-	flpr_pipe_until = seconds ? k_uptime_get_32() + seconds * 1000U : 0U;
-	last_sound_ms = k_uptime_get_32();
+	flpr_pipe_start(seconds);
 }
 
 void audio_flpr_stop(void)

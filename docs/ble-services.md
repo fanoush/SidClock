@@ -45,7 +45,7 @@ signals: they are only compiled into **debug builds**
 | `14` + u8 `mode` | developer test: inject a fake uptime glitch (`0` = counter reset, `1` = forward jump) to verify the clock guard |
 | `15` + u8 `mode` | set the BLE access mode (`0` = R/W, `1` = R/O, `2` = OFF); only accepted in R/W |
 | `16` + name | delete `/home/<name>` - only `.sid`, `.len` and `.stil` files (config files are protected); rejected in R/O and OFF |
-| `17` + u8 engine | global SID engine, dual-engine builds only: `0` = new cRSID, `1` = legacy cSID-light (same as the main-screen button: stops, flips, restarts the current tune) |
+| `17` + u8 engine | global SID engine, dual-engine builds only: `0` = cRSID on the M33, `1` = legacy cSID-light, `2` = cRSID rendered by the FLPR blob (same as the main-screen button, which cycles the three: stops, switches, restarts the current tune) |
 | `18` | toggle play/pause - the SID screen's transport button (a paused tune resumes where it stopped; with nothing loaded it starts the first tune) |
 | `19` / `1A` | play the next / previous tune in file name order |
 | `1B` / `1C` | step to the next / previous subtune |
@@ -91,8 +91,8 @@ showing an empty directory. Byte [139] is the worst audio-loop gap in ms
 after boot, when the all-time maximum in [16] is already saturated.
 Bytes [140..151] are the FLPR tail: the blob heartbeat (u16 LE at
 [140..141], 0 while not alive), flags at [142] (bit 0 = alive, i.e. it
-published its magic; bit 1 = started by a command), a spare byte at
-[143], the FLPR bench microseconds (u32 LE at [144..147]) and its
+published its magic; bit 1 = rendering, i.e. `run` is set), a spare byte
+at [143], the FLPR bench microseconds (u32 LE at [144..147]) and its
 checksum (u32 LE at [148..151]).
 
 The stack telemetry (`1D`) reports **peaks, not current depth**: stacks are
@@ -157,7 +157,7 @@ have to parse the developer snapshot and does not have to poll:
 
 - **state** `73696463-6c6f-4b03-9c1d-77ce3f41a5c0`, 16 bytes:
   `[0]` flags - bit 0 playing, bit 1 paused, bit 2 sound on, bit 3 legacy
-  engine; `[1]` subtune (0-based), `[2]` song count, `[3]` end mode,
+  engine, bit 4 FLPR engine (cRSID rendered by the blob); `[1]` subtune (0-based), `[2]` song count, `[3]` end mode,
   `[4]` chip model mode (0 = auto, 1 = 6581, 2 = 8580), `[5]` chip in use
   (1 = 6581, 2 = 8580), `[6]` **info generation**, `[7]` reserved;
   `[8..11]` elapsed seconds (u32 LE), `[12..15]` the current subsong

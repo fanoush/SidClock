@@ -65,6 +65,8 @@ int main(void)
 	FLPR_SHARED->bench_done = 0u;
 	FLPR_SHARED->bench_sum = 0u;
 	FLPR_SHARED->bench_us = 0u;
+	FLPR_SHARED->run = 0u;
+	FLPR_SHARED->run_ack = 0u;
 	/* Publish last: the M33 treats magic as "blob alive". */
 	FLPR_SHARED->magic = FLPR_MAGIC;
 
@@ -77,6 +79,9 @@ int main(void)
 				pump_sid();
 			}
 		}
+		/* Acknowledge `run` after the burst: the M33 waits for 0
+		 * before it touches engine state (load/play/subtune). */
+		FLPR_SHARED->run_ack = FLPR_SHARED->run;
 		FLPR_SHARED->heartbeat++;
 	}
 

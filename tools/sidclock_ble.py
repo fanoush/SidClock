@@ -310,7 +310,7 @@ async def cmd_blemode(addr, mode=None):
 
 
 def _flpr(raw):
-    """(heartbeat, alive, started) from the snapshot, or None (old fw)."""
+    """(heartbeat, alive, rendering) from the snapshot, or None (old fw)."""
     if raw is None or len(raw) < 143:
         return None
     return (raw[140] | (raw[141] << 8), raw[142] & 1, (raw[142] >> 1) & 1)
@@ -330,7 +330,7 @@ async def cmd_flpr(addr, mode=None):
         print("no FLPR telemetry (old firmware?)")
     else:
         print(f"flpr: {'start' if code else 'stop'} -> "
-              f"heartbeat {hb[0]}, alive {hb[1]}, started {hb[2]}")
+              f"heartbeat {hb[0]}, alive {hb[1]}, rendering {hb[2]}")
 
 
 async def cmd_flprbench(addr, value=None):
@@ -377,7 +377,7 @@ async def cmd_flprsid(addr, value=None):
         print("no FLPR telemetry (old firmware?)")
     else:
         print(f"flprsid {sec}s -> heartbeat {hb[0]}, alive {hb[1]}, "
-              f"started {hb[2]}")
+              f"rendering {hb[2]}")
 
 
 async def cmd_glitch(addr, mode=None):
@@ -821,11 +821,13 @@ async def cmd_watch(addr):
 
 
 async def cmd_engine(addr, value=None):
-    """Switch the SID engine (dual-engine builds): new (cRSID) | old (cSID)."""
-    if value not in ("new", "old"):
-        raise SystemExit("usage: engine new|old  (cRSID / cSID-light)")
+    """Switch the SID engine (dual-engine builds): new | old | flpr."""
+    if value not in ("new", "old", "flpr"):
+        raise SystemExit("usage: engine new|old|flpr  "
+                         "(cRSID / cSID-light / cRSID on the FLPR)")
+    code = {"new": 0, "old": 1, "flpr": 2}[value]
     async with connect(addr) as c:
-        await c.write_gatt_char(DBG_CHAR, bytes([0x17, 1 if value == "old" else 0]),
+        await c.write_gatt_char(DBG_CHAR, bytes([0x17, code]),
                                 response=True)
         print(f"SID engine: {value}")
 

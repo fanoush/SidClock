@@ -67,6 +67,7 @@ export function parseState(view) {
     paused: !!(b[0] & 0x02),
     sound: !!(b[0] & 0x04),
     legacyEngine: !!(b[0] & 0x08),
+    flprEngine: !!(b[0] & 0x10), // cRSID rendered by the FLPR core
     subtune: b[1], // 0-based; +1 for display
     songs: b[2],
     endMode: b[3],

@@ -79,15 +79,41 @@ app/build.sh                    # FLPR works in both; debug adds the tone tests
 tools/flash_ota.py --now                    # arm + reboot + verify
 tools/sidclock_ble.py set-time
 tools/sidclock_ble.py sidname Last_Ninja_2.sid
-tools/sidclock_ble.py flprsid 0             # blob renders the tune (M33 render off)
+tools/sidclock_ble.py engine flpr           # or the main-screen engine button
 tools/sidclock_ble.py audio                 # "flpr pipe" line: underruns/peak
 tools/sidclock_ble.py flprbench 4096        # engine render time, snapshot [144..151]
-tools/sidclock_ble.py flprsid stop          # (or 0F, or flpr stop)
+tools/sidclock_ble.py engine new            # back to the M33 renderer
 ```
 
-The blob never runs before the first command that needs it. A stalled
+`flprsid 0` forces the pipe directly without changing the engine choice
+(handy when the tune is already playing); `flprsid stop` (or `0F`) stops
+it. The blob never runs before the first command that needs it. A stalled
 or absent blob shows as a frozen heartbeat in snapshot `[140..141]` with
 `alive` clear in `[142]`.
+
+## Engine selection
+
+The main-screen engine button cycles three choices (BLE command `0x17`):
+
+| Choice | Rendering |
+|---|---|
+| `cRSID` | cRSID on the M33 (default) |
+| `cSID` | legacy cSID-light on the M33 (dual builds) |
+| `FLPR` | cRSID on the FLPR blob |
+
+Switching stops playback, changes the core and reloads/restarts the tune.
+With `FLPR` selected, `audio_sid_start()` boots the blob (first use only)
+and the audio fill drains the ring instead of calling the M33 renderer;
+`audio_sid_stop()` idles the blob (`run = 0`) but leaves the core up, so
+switching tunes does not pay a boot each time. If the blob cannot start,
+the audio path falls back to the M33 renderer instead of going silent.
+
+Pause/resume drives the blob too: paused sets `run = 0` (no rendering, no
+tune-clock advance), resume drops whatever queued up and restarts it.
+
+The tune clock (UI time line, player-state characteristic, auto-advance)
+is driven by the frames the M33 actually drains from the ring, so it
+advances exactly with what is played, in all three modes.
 
 ## What to watch
 
