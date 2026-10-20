@@ -45,7 +45,7 @@ signals: they are only compiled into **debug builds**
 | `14` + u8 `mode` | developer test: inject a fake uptime glitch (`0` = counter reset, `1` = forward jump) to verify the clock guard |
 | `15` + u8 `mode` | set the BLE access mode (`0` = R/W, `1` = R/O, `2` = OFF); only accepted in R/W |
 | `16` + name | delete `/home/<name>` - only `.sid`, `.len` and `.stil` files (config files are protected); rejected in R/O and OFF |
-| `17` + u8 engine | global SID engine, dual-engine builds only: `0` = cRSID on the M33, `1` = legacy cSID-light, `2` = cRSID rendered by the FLPR blob (same as the main-screen button, which cycles the three: stops, switches, restarts the current tune) |
+| `17` + u8 engine | global SID engine: `0` = cRSID on the M33, `1` = legacy cSID-light, `2` = whole cRSID engine on the FLPR blob, `3` = split (M33 runs the C64/CPU, FLPR runs the SID stage). Same as the main-screen button, which cycles all four: stops, switches, restarts the current tune |
 | `18` | toggle play/pause - the SID screen's transport button (a paused tune resumes where it stopped; with nothing loaded it starts the first tune) |
 | `19` / `1A` | play the next / previous tune in file name order |
 | `1B` / `1C` | step to the next / previous subtune |
@@ -157,7 +157,8 @@ have to parse the developer snapshot and does not have to poll:
 
 - **state** `73696463-6c6f-4b03-9c1d-77ce3f41a5c0`, 16 bytes:
   `[0]` flags - bit 0 playing, bit 1 paused, bit 2 sound on, bit 3 legacy
-  engine, bit 4 FLPR engine (cRSID rendered by the blob); `[1]` subtune (0-based), `[2]` song count, `[3]` end mode,
+  engine, bit 4 whole engine on the FLPR, bit 5 split engine (M33 CPU +
+  FLPR SID); `[1]` subtune (0-based), `[2]` song count, `[3]` end mode,
   `[4]` chip model mode (0 = auto, 1 = 6581, 2 = 8580), `[5]` chip in use
   (1 = 6581, 2 = 8580), `[6]` **info generation**, `[7]` reserved;
   `[8..11]` elapsed seconds (u32 LE), `[12..15]` the current subsong
