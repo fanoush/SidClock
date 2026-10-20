@@ -259,7 +259,7 @@ CRSID_HOT_CODE cRSID_Output* cRSID_emulateC64 () {
 #ifdef CRSID_SPLIT
   SplitCycles += InstructionCycles;
 #endif
-#if defined(CRSID_SPLIT) && defined(FLPR_BLOB)
+#ifdef CRSID_SPLIT_CPU_SIDE
   if (!cRSID_splitMode)
 #endif
   {
@@ -294,7 +294,7 @@ CRSID_HOT_CODE cRSID_Output* cRSID_emulateC64 () {
  cRSID_C64.SampleCycleCnt -= cRSID_C64.SampleClockRatio;
 
 
-#if defined(CRSID_SPLIT) && defined(FLPR_BLOB)
+#ifdef CRSID_SPLIT_CPU_SIDE
  if ( RARELY (cRSID_splitMode) ) { //CPU side: publish this sample's cycles, no SID
   uint32_t sx = FLPR_SPLIT->prod % FLPR_SID_RING;
 
@@ -396,6 +396,19 @@ int cRSID_renderSplitSample (void) {
 
   if ( (short)(FLPR_EVENTS[e].pos - pos) > 0 ) break; //belongs to a later sample
   ((volatile unsigned char*)FLPR_SID_REGCOPY)[FLPR_EVENTS[e].reg] = FLPR_EVENTS[e].val;
+  /* A SID register write must force the envelope pass for this sample
+   * (gate/rate changes). The CPU side sets ADSRthr=0 too, but it runs up
+   * to a buffer ahead, so the M33 has already consumed that forcing by
+   * the time the write arrives - it has to force it here. */
+  { int m;
+
+   for (m=1; m<=CRSID_SIDCOUNT_MAX; ++m) {
+    cRSID_SIDinstance* SID = &cRSID_C64.SID[m];
+
+    if ( SID->BaseAddress && SID->BaseAddress <= 0xD400 + FLPR_EVENTS[e].reg &&
+        0xD400 + FLPR_EVENTS[e].reg < SID->BaseAddress + 0x1C ) SID->ADSRthr = 0;
+   }
+  }
   FLPR_SPLIT->econs = FLPR_SPLIT->econs + 1;
  }
 

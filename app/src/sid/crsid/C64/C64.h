@@ -71,7 +71,7 @@ typedef struct cRSID_VICinstance {
 /* Split engine: the SID stage runs on the FLPR (see flpr_shared.h). The
  * M33 side owns the flag; the blob is always the split side. */
 #include "flpr_shared.h"
-#ifdef FLPR_BLOB
+#if defined(FLPR_BLOB) && !defined(CRSID_HOST_TEST)
 #define cRSID_splitMode 1
 #else
 extern char cRSID_splitMode;

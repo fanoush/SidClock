@@ -165,6 +165,26 @@ waveform generation stay cycle-exact. OSC3 reads would need the blob to
 publish the oscillator value each sample (cRSID tolerates ~22 cycles of
 delay there).
 
+## Host harness (tools/crsid_split_wav.c)
+
+The split is deterministic, so both paths can be rendered on the host from
+an identical state and compared sample by sample - no device needed:
+
+```sh
+gcc -O2 -std=gnu99 -o /tmp/split_wav tools/crsid_split_wav.c \
+    app/src/sid/crsid/libcRSID.c -I app/src/sid -I app/src/sid/crsid \
+    -I app/flpr -DCRSID_SPLIT -DCRSID_HOST_TEST -lm
+/tmp/split_wav sids/Game_Over.sid 60 1 out   # -> out_ref.wav / out_split.wav
+```
+
+It reports the first differing sample with context, per-second RMS of the
+difference (spots where a part goes missing rather than a constant offset)
+and the per-second energy ratio of the two files. `-DHOST_DIRECT_REGS`
+bypasses the event ring (writes the SID copy directly) to separate event
+timing from the ADSR replay. `CRSID_HOST_TEST` maps the shared regions to
+plain arrays and enables both split roles in one binary (the device build
+has them in separate images).
+
 ## What to watch
 
 - **Underruns**: `audio` reports the pipe shortfall counter. Zero over a

@@ -79,8 +79,6 @@ struct flpr_event {
 	uint8_t reg;  /* $D400 + reg */
 	uint8_t val;
 };
-#define FLPR_EVENTS ((volatile struct flpr_event *)FLPR_RING_BASE)
-
 /* Shared split control (same page). */
 #define FLPR_SPLIT_CTRL (FLPR_SPLIT_BASE + 0x0E00UL)
 
@@ -92,9 +90,33 @@ struct flpr_split {
 	uint32_t econs;  /* SID write events consumed */
 };
 
+/* Split roles: the blob runs the CPU, the M33 (or the host harness) runs
+ * the SID side. The host harness simulates both in one binary. */
+#if defined(CRSID_SPLIT) && (defined(FLPR_BLOB) || defined(CRSID_HOST_TEST))
+#define CRSID_SPLIT_CPU_SIDE
+#endif
+#if defined(CRSID_SPLIT) && !defined(FLPR_BLOB)
+#define CRSID_SPLIT_SID_SIDE
+#endif
+
+#ifdef CRSID_HOST_TEST
+/* Host harness (tools/crsid_split_wav.c): the shared regions become plain
+ * arrays instead of absolute SRAM addresses. */
+extern volatile struct flpr_split host_split;
+extern volatile uint16_t host_cycles[FLPR_SID_RING];
+extern volatile struct flpr_event host_events[FLPR_EVENTS_MAX];
+extern volatile uint8_t host_regcopy[32];
+
+#undef FLPR_SID_REGCOPY
+#define FLPR_SPLIT (&host_split)
+#define FLPR_SID_CYC (host_cycles)
+#define FLPR_EVENTS (host_events)
+#define FLPR_SID_REGCOPY ((uintptr_t)host_regcopy)
+#else
 #define FLPR_SPLIT ((volatile struct flpr_split *)FLPR_SPLIT_CTRL)
 #define FLPR_SID_CYC ((volatile uint16_t *)FLPR_SID_CYCLES)
-#define FLPR_SID_REGP ((volatile uint8_t *)FLPR_SID_REGS)
+#define FLPR_EVENTS ((volatile struct flpr_event *)FLPR_RING_BASE)
+#endif
 #define FLPR_SHARED_BASE 0x2003FC00UL
 #define FLPR_SHARED_SIZE 0x00000400UL
 

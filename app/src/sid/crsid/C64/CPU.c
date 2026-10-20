@@ -63,7 +63,10 @@ static INLINE void wr (FASTVAR unsigned short address, FASTVAR unsigned char dat
     * before rendering that sample. On the M33 (tune load/init) the SID
     * registers are written straight into its own copy. */
    if ( RARELY (cRSID_splitMode) ) {
-#ifdef FLPR_BLOB
+#if defined(CRSID_HOST_TEST) && defined(HOST_DIRECT_REGS)
+    //harness A/B: bypass the event ring, write the SID copy directly
+    ((volatile unsigned char*)FLPR_SID_REGCOPY)[address - 0xD400] = data;
+#elif defined(CRSID_SPLIT_CPU_SIDE)
     uint32_t ev = FLPR_SPLIT->eprod % FLPR_EVENTS_MAX;
 
     if ( (uint32_t)(FLPR_SPLIT->eprod - FLPR_SPLIT->econs) < FLPR_EVENTS_MAX ) {
@@ -102,7 +105,10 @@ static INLINE void wr2 (FASTVAR unsigned short address, FASTVAR unsigned char da
     * before rendering that sample. On the M33 (tune load/init) the SID
     * registers are written straight into its own copy. */
    if ( RARELY (cRSID_splitMode) ) {
-#ifdef FLPR_BLOB
+#if defined(CRSID_HOST_TEST) && defined(HOST_DIRECT_REGS)
+    //harness A/B: bypass the event ring, write the SID copy directly
+    ((volatile unsigned char*)FLPR_SID_REGCOPY)[address - 0xD400] = data;
+#elif defined(CRSID_SPLIT_CPU_SIDE)
     uint32_t ev = FLPR_SPLIT->eprod % FLPR_EVENTS_MAX;
 
     if ( (uint32_t)(FLPR_SPLIT->eprod - FLPR_SPLIT->econs) < FLPR_EVENTS_MAX ) {
