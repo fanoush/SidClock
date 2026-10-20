@@ -54,9 +54,17 @@ void audio_set_mck_raw(uint32_t v);
 void audio_sid_start(void);
 void audio_sid_stop(void);
 
+/* FLPR SID pipe: the blob renders the loaded tune into the shared ring,
+ * which this module drains in the fill path. seconds 0 = until stopped. */
+void audio_flpr_start_sid(uint32_t seconds);
+void audio_flpr_stop(void);
+bool audio_flpr_active(void);
+
 /*
  * Debug snapshot for the BLE debug characteristic:
- *   [0] ready  [1] init_rc  [6] enabled  [7] volume  [9] play attempts
+ *   [0] ready  [1] init_rc  [2] FLPR pipe underruns
+ *   [3] pipe active  [4]+[12] pipe taken-peak u16 LE
+ *   [6] enabled  [7] volume  [9] play attempts
  *   [17] tone buffers left  [18] amp combo  [19] combo flags
  */
 const uint8_t *audio_debug(void);

@@ -399,6 +399,17 @@ extern "C" uint32_t sid_player_elapsed_s(void)
 	return sid_elapsed_samples / SID_RATE;
 }
 
+/* FLPR pipe accounting: the blob renders, but the UI clock,
+ * screensaver redraws and auto-advance all read sid_elapsed_samples,
+ * which only sid_player_render() advances. The drain mirrors consumed
+ * pipe frames here so timekeeping works in either render mode. */
+extern "C" void sid_player_add_elapsed(int frames)
+{
+	k_mutex_lock(&sid_lock, K_FOREVER);
+	sid_elapsed_samples += (uint32_t)frames;
+	k_mutex_unlock(&sid_lock);
+}
+
 extern "C" void sid_player_render(int16_t *dst, int frames)
 {
 	unsigned int c0;

@@ -41,6 +41,7 @@
 
 #include "audio.h"
 #include "sid_player.h"
+#include "flpr_shared.h"
 
 LOG_MODULE_REGISTER(audio, LOG_LEVEL_INF);
 
@@ -107,6 +108,14 @@ static uint32_t tone_hold_phase;
 /* SID mode: the fill pulls samples from the emulator instead of tones */
 static volatile bool sid_mode;
 static int16_t sid_scratch[AUDIO_FRAMES];
+
+/* FLPR SID pipe: the fill drains the shared ring the blob renders into
+ * (see flpr/flpr_shared.h). The M33-side render stays off while it runs,
+ * so the two sources never mix. */
+static volatile bool flpr_pipe;
+static uint32_t flpr_pipe_until; /* k_uptime deadline; 0 = until stopped */
+static uint32_t flpr_underruns;
+static uint16_t pipe_peak; /* max |taken sample| since pipe start */
 
 static uint8_t volume = 100;
 static uint8_t dbg[20];
@@ -258,6 +267,50 @@ static void fill_buffer(int32_t *dst)
 {
 	if (muted) {
 		fill_zeros(dst);
+	} else if (flpr_pipe) {
+		uint32_t w = FLPR_SHARED->write_idx;
+		uint32_t r = FLPR_SHARED->read_idx;
+		uint32_t avail = w - r;
+		uint32_t take;
+		uint32_t i;
+
+		if (avail > FLPR_RING_FRAMES) {
+			/* reader fell behind the overwrite window: take
+			 * the latest buffer instead of stale samples */
+			r = w - AUDIO_FRAMES;
+			avail = AUDIO_FRAMES;
+		}
+		take = MIN(avail, AUDIO_FRAMES);
+		for (i = 0; i < take; i++) {
+			int16_t v =
+				FLPR_RING[(r + i) % FLPR_RING_FRAMES];
+			int32_t s = ((int32_t)v * (int32_t)volume) >> 8;
+			int a = v < 0 ? -v : v;
+
+			if (a > pipe_peak) {
+				pipe_peak = (uint16_t)a;
+			}
+			s = (s * (int32_t)volume) >> 8;
+			stage[i * 2U] = (int16_t)s;
+			stage[i * 2U + 1U] = (int16_t)s;
+		}
+		if (take < AUDIO_FRAMES) {
+			for (; i < AUDIO_FRAMES; i++) {
+				stage[i * 2U] = 0;
+				stage[i * 2U + 1U] = 0;
+			}
+			flpr_underruns++;
+			dbg[2]++;
+		}
+		FLPR_SHARED->read_idx = r + take;
+		FLPR_SHARED->underruns = flpr_underruns;
+		sid_player_add_elapsed((int)take);
+		if ((dbg[4] | (dbg[12] << 8)) < pipe_peak) {
+			dbg[4] = (uint8_t)(pipe_peak & 0xFFU);
+			dbg[12] = (uint8_t)(pipe_peak >> 8);
+		}
+		pack(dst);
+		last_sound_ms = k_uptime_get_32();
 	} else if (sid_mode && sid_player_is_playing() &&
 		   !sid_player_is_paused()) {
 		uint32_t c0 = k_cycle_get_32();
@@ -477,6 +530,11 @@ static void audio_thread(void *a, void *b, void *c)
 			}
 		}
 #endif
+
+		if (flpr_pipe && flpr_pipe_until != 0U &&
+		    (int32_t)(k_uptime_get_32() - flpr_pipe_until) >= 0) {
+			audio_flpr_stop();
+		}
 
 		audio_service();
 
@@ -770,6 +828,61 @@ void audio_sid_start(void)
 void audio_sid_stop(void)
 {
 	sid_mode = false;
+	/* A stopped SID also stops a running FLPR pipe (UI stop, 0x0F,
+	 * engine switch): the pipe drains nothing after this, and the
+	 * blob idles on run=0. Started explicitly by 0x31 after. */
+	flpr_pipe = false;
+	flpr_pipe_until = 0U;
+	dbg[3] = 0U;
+	FLPR_SHARED->run = 0U;
+}
+
+/*
+ * FLPR SID pipe: same ring drain as the M33 render path, but the blob
+ * renders the loaded tune instead. Stops M33-side SID render first so
+ * the two never mix (and the M33 stops spending RRAM bandwidth on its
+ * own render). The blob always renders at the SID rate so the ring
+ * consumption and the output configuration stay consistent; the caller
+ * (debug command 0x31) makes sure the blob is alive first.
+ */
+void audio_flpr_start_sid(uint32_t seconds)
+{
+	audio_sid_stop();
+	if (cfg_rate != AUDIO_RATE_HZ) {
+		cfg_rate = AUDIO_RATE_HZ;
+		(void)hfxo_start();
+		hw_config_variant(cfg_lrck4, cfg_fmt32, cfg_en_high);
+		stream_start();
+	} else if (!stream_running) {
+		stream_resume();
+	}
+	FLPR_SHARED->rate_hz = hw_rate();
+	FLPR_SHARED->mode = 1U; /* SID render */
+	FLPR_SHARED->read_idx = FLPR_SHARED->write_idx; /* drain stale */
+	FLPR_SHARED->underruns = 0U;
+	flpr_underruns = 0U;
+	pipe_peak = 0U;
+	dbg[2] = 0U;
+	dbg[4] = 0U;
+	dbg[12] = 0U;
+	FLPR_SHARED->run = 1U;
+	flpr_pipe = true;
+	dbg[3] = 1U;
+	flpr_pipe_until = seconds ? k_uptime_get_32() + seconds * 1000U : 0U;
+	last_sound_ms = k_uptime_get_32();
+}
+
+void audio_flpr_stop(void)
+{
+	flpr_pipe = false;
+	flpr_pipe_until = 0U;
+	dbg[3] = 0U;
+	FLPR_SHARED->run = 0U;
+}
+
+bool audio_flpr_active(void)
+{
+	return flpr_pipe;
 }
 
 #ifdef SIDCLOCK_DEBUG

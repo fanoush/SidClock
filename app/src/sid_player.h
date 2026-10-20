@@ -43,6 +43,7 @@ int sid_player_engine_legacy(void);
 bool sid_player_is_playing(void);
 bool sid_player_is_paused(void);
 uint32_t sid_player_elapsed_s(void); /* seconds since the (sub)song started */
+void sid_player_add_elapsed(int frames); /* FLPR pipe drain mirror (audio.c) */
 int sid_player_songs(void);
 const char *sid_player_title(void);
 const char *sid_player_author(void);
