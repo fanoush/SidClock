@@ -75,11 +75,19 @@ export PATH="$SDK/tools/zephyr-sdk-0.17.0/riscv64-zephyr-elf/bin:$PATH"
 ARMNM="$SDK/tools/zephyr-sdk-0.17.0/arm-zephyr-eabi/bin/arm-zephyr-eabi-nm"
 GEN="$HERE/flpr" # generated memmap.ld/datamap.ld (gitignored)
 
+# Engine optimisation flags (one knob for both the blob build and the
+# standalone engine object below; A/B on device with the bench).
+# Default -O2: measurably faster than -O3/-funroll-loops and -Os on the
+# VPR (see docs/flpr.md) - the core is instruction-fetch bound, so the
+# smaller code wins. A/B with:  FLPR_ENGINE_OPT="-O3 -funroll-loops" app/build.sh
+FLPR_ENGINE_OPT="${FLPR_ENGINE_OPT:--O2}"
+
 flpr_build() { # $1 = OFF (no engine) | ON (full render engine)
     cmake -GNinja \
         -S "$HERE/flpr" -B "$HERE/build-flpr" \
         -DCMAKE_TOOLCHAIN_FILE="$HERE/flpr/toolchain-rv32emc.cmake" \
-        -DFLPR_WITH_ENGINE="$1"
+        -DFLPR_WITH_ENGINE="$1" \
+        -DFLPR_ENGINE_OPT="$FLPR_ENGINE_OPT"
     ninja -C "$HERE/build-flpr"
     riscv64-zephyr-elf-objcopy -O binary "$HERE/build-flpr/flpr.elf" \
         "$HERE/build-flpr/flpr.bin"
@@ -92,7 +100,7 @@ printf 'MEMORY {\n\tROM (rx)  : ORIGIN = 0x0, LENGTH = 0x28000\n}\n' \
 printf '/* phase 1: no engine map */\n' > "$GEN/datamap.ld"
 flpr_build OFF
 python3 "$HERE/flpr/blob_audit.py" --check-relocs \
-    "$HERE/build-flpr/flpr.elf" 0x2003E000 0x1C00
+    "$HERE/build-flpr/flpr.elf" "$HERE/flpr/flpr_shared.h"
 python3 "$HERE/flpr/blob_audit.py" --check-ram \
     "$HERE/flpr/flpr_shared.h" "$HERE/flpr.overlay"
 
@@ -110,6 +118,12 @@ cmake -GNinja \
 
 ninja -C "$HERE/build"
 
+# FLPR_BLOB_STUB=1 stops after phase 1: the small stub blob is then
+# copied to FLPR private RAM by flpr_start_blob() instead of being XIPed
+# from RRAM, which is how the SRAM-vs-RRAM fetch cost is measured.
+if [ "${FLPR_BLOB_STUB:-0}" = "1" ]; then
+    echo "FLPR_BLOB_STUB=1: stub blob only (SRAM execution probe)"
+else
 # --- Phase 2: full engine blob against the M33 address map ---
 # Extract the flpr_blob[] address plus every engine data address from
 # the M33 link, pin the blob onto them (zero-copy shared state),
@@ -118,7 +132,7 @@ ARRAY_VMA=$("$ARMNM" --print-size "$HERE/build/zephyr/zephyr.elf" |
     awk '/ R flpr_blob$/ {print "0x" $1}')
 [ -n "$ARRAY_VMA" ] || { echo "error: flpr_blob missing in M33 link" >&2; exit 1; }
 # Standalone engine object for section names (same flags as the blob build).
-riscv64-zephyr-elf-gcc -march=rv32emc_zicsr -mabi=ilp32e -O3 -funroll-loops \
+riscv64-zephyr-elf-gcc -march=rv32emc_zicsr -mabi=ilp32e $FLPR_ENGINE_OPT \
     -std=gnu99 -fno-pie -msmall-data-limit=0 -ffunction-sections \
     -fdata-sections -I"$HERE/src/sid" -I"$HERE/src/sid/crsid" \
     -c "$HERE/src/sid/crsid/libcRSID.c" -o "$HERE/build-flpr/engine.o"
@@ -128,7 +142,7 @@ python3 "$HERE/flpr/blob_audit.py" --gen-map "$ARMNM" \
 cp "$GEN/memmap.ld.json" "$GEN/map1.json"
 flpr_build ON
 python3 "$HERE/flpr/blob_audit.py" --check-final \
-    "$HERE/build-flpr/flpr.elf" "$ARRAY_VMA" 0x2003E000 0x1C00 \
+    "$HERE/build-flpr/flpr.elf" "$ARRAY_VMA" "$HERE/flpr/flpr_shared.h" \
     "$GEN/map1.json"
 ninja -C "$HERE/build"
 # Stability: the array and every engine address must be identical.
@@ -137,6 +151,7 @@ ARRAY_VMA2=$("$ARMNM" --print-size "$HERE/build/zephyr/zephyr.elf" |
 python3 "$HERE/flpr/blob_audit.py" --gen-map "$ARMNM" \
     "$HERE/build/zephyr/zephyr.elf" "$HERE/build-flpr/engine.o" \
     "$ARRAY_VMA2" "$GEN/memmap.ld" "$GEN/datamap.ld" --expect "$GEN/map1.json"
+fi
 
 # Guard: the whole image (app + embedded blob) must fit MCUboot slot0.
 python3 - "$HERE" <<'PY'

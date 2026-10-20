@@ -341,7 +341,7 @@ async def cmd_flprbench(addr, value=None):
         raise SystemExit("flprbench [FRAMES]")
     if not 1 <= n <= 4096:
         raise SystemExit("flprbench [FRAMES]")
-    async with BleakClient(addr) as c:
+    async with connect(addr) as c:
         await c.write_gatt_char(DBG_CHAR,
                                 bytes([0x32, n & 0xFF, (n >> 8) & 0xFF]),
                                 response=True)
@@ -350,8 +350,16 @@ async def cmd_flprbench(addr, value=None):
     if len(after) < 152:
         print("no bench telemetry (old firmware?)")
     else:
-        print(f"flprbench {n} frames: {int.from_bytes(after[144:148], 'little')} us "
+        us = int.from_bytes(after[144:148], "little")
+        cyc = int.from_bytes(after[152:156], "little") if len(after) >= 160 else 0
+        ins = int.from_bytes(after[156:160], "little") if len(after) >= 160 else 0
+        print(f"flprbench {n} frames: {us} us "
               f"sum=0x{int.from_bytes(after[148:152], 'little'):08x}")
+        if cyc and us:
+            print(f"  {cyc} cycles ({cyc / n:.0f}/frame), "
+                  f"{ins} instr ({ins / cyc:.2f} IPC), "
+                  f"clock ~{cyc / us:.1f} MHz, "
+                  f"{us / n:.1f} us/frame (budget 45.3)")
 
 
 async def cmd_flprsid(addr, value=None):
@@ -378,6 +386,30 @@ async def cmd_flprsid(addr, value=None):
     else:
         print(f"flprsid {sec}s -> heartbeat {hb[0]}, alive {hb[1]}, "
               f"rendering {hb[2]}")
+
+
+async def cmd_flpralu(addr, value=None):
+    """Core-speed probe on the blob: N register-only loop iterations."""
+    try:
+        n = int(value or 100000)
+    except ValueError:
+        raise SystemExit("flpralu [ITERATIONS]")
+    if not 1 <= n <= 65000:
+        raise SystemExit("flpralu [ITERATIONS]")
+    async with connect(addr) as c:
+        await c.write_gatt_char(DBG_CHAR,
+                                bytes([0x33, n & 0xFF, (n >> 8) & 0xFF]),
+                                response=True)
+        await asyncio.sleep(0.5)
+        after = await c.read_gatt_char(DBG_CHAR)
+    if len(after) < 160 or not int.from_bytes(after[152:156], "little"):
+        print("no probe telemetry (old firmware?)")
+        return
+    cyc = int.from_bytes(after[152:156], "little")
+    ins = int.from_bytes(after[156:160], "little")
+    us = int.from_bytes(after[144:148], "little")
+    print(f"flpralu {n} iter: {cyc} cycles, {ins} instr, "
+          f"IPC {ins / cyc:.2f}, clock ~{cyc / us:.0f} MHz")
 
 
 async def cmd_glitch(addr, mode=None):
@@ -574,6 +606,12 @@ async def cmd_audio(addr):
                       f"audio_hb {raw[132] | (raw[133] << 8)}  "
                       f"main_hb {raw[134] | (raw[135] << 8)}  "
                       f"engine {raw[136]}")
+            if len(raw) >= 160 and _u32(raw, 152):
+                cyc, ins, us = _u32(raw, 152), _u32(raw, 156), _u32(raw, 144)
+                ipc = ins / cyc if cyc else 0
+                mhz = cyc / us if us else 0
+                print(f"flpr bench: {us} us  {cyc} cycles  {ins} instr  "
+                      f"IPC {ipc:.2f}  clock ~{mhz:.0f} MHz")
             if len(raw) > 68:
                 mode = "direct" if raw[10] == 255 else f"step {raw[10]}"
                 print(f"{mode}  rate {_rate_of(raw)} Hz")
@@ -1118,7 +1156,7 @@ def main():
         "sidstop", "ls", "glitch", "blemode", "filedelete", "endmode",
         "engine", "stacks", "threads", "log", "accel",
         "playpause", "next", "prev", "subnext", "subprev", "subplay",
-        "state", "watch", "flpr", "flprsid", "flprbench",
+        "state", "watch", "flpr", "flprsid", "flprbench", "flpralu",
         ],
     )
     ap.add_argument(
@@ -1187,6 +1225,7 @@ def main():
         "flpr": cmd_flpr,
         "flprsid": cmd_flprsid,
         "flprbench": cmd_flprbench,
+        "flpralu": cmd_flpralu,
     }[args.command]
     if args.command == "log":
         asyncio.run(fn(args.addr, args.peek, args.follow))
@@ -1202,7 +1241,7 @@ def main():
     elif args.command == "fsformat":
         asyncio.run(fn(args.addr, args.yes))
     elif args.command in ("glitch", "blemode", "flpr", "flprsid",
-                          "flprbench"):
+                          "flprbench", "flpralu"):
         asyncio.run(fn(args.addr, args.value))
     elif args.command == "sid":
         asyncio.run(fn(args.addr,

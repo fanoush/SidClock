@@ -21,20 +21,28 @@ target_include_directories(flpr.elf PRIVATE
 	${CMAKE_CURRENT_SOURCE_DIR}
 	${CMAKE_CURRENT_SOURCE_DIR}/../src/sid)
 
+# Engine optimisation flags: one knob, shared with build.sh's standalone
+# engine object (the two must agree or the two-phase section map drifts).
+# Default -O2 (fetch-bound core, see docs/flpr.md); override with
+# FLPR_ENGINE_OPT to A/B
+# variants on the device (the bench reports cycles/frame and IPC).
+if(NOT DEFINED FLPR_ENGINE_OPT OR FLPR_ENGINE_OPT STREQUAL "")
+	set(FLPR_ENGINE_OPT "-O2")
+endif()
+# Arrives as one string (e.g. "-Os"), split into a real list.
+separate_arguments(FLPR_ENGINE_OPT UNIX_COMMAND "${FLPR_ENGINE_OPT}")
+message(STATUS "FLPR engine opt: ${FLPR_ENGINE_OPT}")
+
 if(FLPR_WITH_ENGINE)
 	target_compile_definitions(flpr.elf PRIVATE FLPR_WITH_ENGINE=1)
 	target_sources(flpr.elf PRIVATE
 		${CMAKE_CURRENT_SOURCE_DIR}/../src/sid/crsid/libcRSID.c)
-	# Same hot-path flags the M33 build proved (-O3 -funroll-loops).
-	# Absolute codegen: the blob runs exactly where it is linked
-	# (build.sh pins ROM base to the array address), so
-	# position-independence buys nothing and costs a GOT (-fno-pie).
-	# -msmall-data-limit=0: gp is never set up, so no gp-relative
-	# access may be generated.
 	set_source_files_properties(
 		${CMAKE_CURRENT_SOURCE_DIR}/../src/sid/crsid/libcRSID.c
 		PROPERTIES COMPILE_OPTIONS
-		"-O3;-funroll-loops;-std=gnu99;-fno-pie;-msmall-data-limit=0;-ffunction-sections;-fdata-sections")
+		"${FLPR_ENGINE_OPT};-std=gnu99;-fno-pie;-msmall-data-limit=0;-ffunction-sections;-fdata-sections"
+		COMPILE_DEFINITIONS
+		"CRSID_HOT_CODE=__attribute__((section(\".flprhot\"),noinline,optimize(\"Os\")))")
 endif()
 
 # No libc, no syscalls: pure number crunching on shared memory.

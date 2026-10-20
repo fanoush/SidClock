@@ -22,10 +22,10 @@ _start:
 	lui sp, %hi(_stack_top)
 	addi sp, sp, %lo(_stack_top)
 
-	/* .got/.data are one contiguous init image (_sgot.._edata). */
-	la a1, _sgot
-	la a2, _edata
-	la a3, _sgot_load
+	/* Hot code: ROM image -> FLPR SRAM, before anything calls it. */
+	la a1, _sicoderam
+	la a2, _ecoderam
+	la a3, _sicoderam_load
 	bgeu a1, a2, 1f
 0:
 	lw t0, 0(a3)
@@ -34,15 +34,27 @@ _start:
 	addi a3, a3, 4
 	bltu a1, a2, 0b
 1:
+	/* .got/.data are one contiguous init image (_sgot.._edata). */
+	la a1, _sgot
+	la a2, _edata
+	la a3, _sgot_load
+	bgeu a1, a2, 2f
+0:
+	lw t0, 0(a3)
+	sw t0, 0(a1)
+	addi a1, a1, 4
+	addi a3, a3, 4
+	bltu a1, a2, 0b
+2:
 	/* .bss: zero (private only - engine state is M33-owned). */
 	la a0, _sbss
 	la a1, _ebss
-	bgeu a0, a1, 2f
+	bgeu a0, a1, 3f
 0:
 	sw zero, 0(a0)
 	addi a0, a0, 4
 	bltu a0, a1, 0b
-2:
+3:
 	call main
 
 	/* main must never return; park here if it does (no wfi: no trap

@@ -2,12 +2,12 @@
 """Build-time checks and link maps for the FLPR bare-metal blob.
 
 Usage:
-    blob_audit.py --check-relocs <flpr.elf> <priv_base> <priv_size>
+    blob_audit.py --check-relocs <flpr.elf> <flpr_shared.h>
     blob_audit.py --check-ram <flpr_shared.h> <flpr.overlay>
     blob_audit.py --gen-map <armnm> <m33.elf> <engine.o> <array_vma>
                    <memmap.ld> <datamap.ld> [--expect <map.json>]
-    blob_audit.py --check-final <flpr.elf> <array_base> <priv_base>
-                  <priv_size> <map.json>
+    blob_audit.py --check-final <flpr.elf> <array_base> <flpr_shared.h>
+                  <map.json>
 
 The blob itself is linked in with .incbin (flpr/flpr_blob.S) - no
 generated C array. This tool only audits and maps:
@@ -41,7 +41,9 @@ def check_ram(header, overlay):
             defines[m.group(1)] = int(m.group(2), 0)
     ov = open(overlay).read()
     regions = []
-    for name, base, size in (("priv", "FLPR_PRIV_BASE", "FLPR_PRIV_SIZE"),
+    for name, base, size in (("code", "FLPR_CODERAM_BASE",
+                              "FLPR_CODERAM_SIZE"),
+                             ("priv", "FLPR_PRIV_BASE", "FLPR_PRIV_SIZE"),
                              ("shared", "FLPR_SHARED_BASE",
                               "FLPR_SHARED_SIZE"),
                              ("ring", "FLPR_RING_BASE", "FLPR_RING_SIZE")):
@@ -84,7 +86,17 @@ def check_ram(header, overlay):
     print("ram map: header/overlay agree, ring frames match, no overlap")
 
 
-def check_relocs(elf, priv_base, priv_size):
+def header_defines(header):
+    out = {}
+    for line in open(header):
+        m = re.match(r"#define\s+(\w+)\s+(0x[0-9a-fA-F]+|\d+)"
+                     r"(?:U?L?)?\s*(?:/\*.*)?$", line)
+        if m:
+            out[m.group(1)] = int(m.group(2), 0)
+    return out
+
+
+def check_relocs(elf, header):
     """Audit the linked blob for the startup.S address model.
 
     - no dynamic relocations at all (code is PC-relative; any absolute
@@ -121,6 +133,9 @@ def check_relocs(elf, priv_base, priv_size):
             sys.exit(f"error: blob has non-empty {name} (fixed RAM is "
                      "unreachable to compiled C under load bias)")
 
+    d = header_defines(header)
+    priv_base = d["FLPR_PRIV_BASE"]
+    priv_size = d["FLPR_PRIV_SIZE"]
     r = subprocess.run(["riscv64-zephyr-elf-readelf", "-sW", elf],
                        capture_output=True, text=True)
     if r.returncode != 0:
@@ -245,7 +260,7 @@ def gen_map(armnm, m33elf, engine_o, array_vma, memmap_out, datamap_out,
         json.dump(amap, f, indent=0, sort_keys=True)
 
 
-def check_final(elf, array_base, priv_base, priv_size, mapjson):
+def check_final(elf, array_base, header, mapjson):
     """Audit the production blob link (bias-0 absolute):
     - zero dynamic relocations (nothing to fix up at boot),
     - every ALLOC section lives in flash (the array window), private
@@ -258,8 +273,9 @@ def check_final(elf, array_base, priv_base, priv_size, mapjson):
     import subprocess
 
     array_base = int(array_base, 0)
-    priv_base = int(priv_base, 0)
-    priv_size = int(priv_size, 0)
+    d = header_defines(header)
+    priv_base = d["FLPR_PRIV_BASE"]
+    priv_size = d["FLPR_PRIV_SIZE"]
     expect = json.load(open(mapjson))
     syms = {k: v for k, v in expect.items() if k != "_array"}
 
@@ -283,9 +299,12 @@ def check_final(elf, array_base, priv_base, priv_size, mapjson):
             continue
         in_flash = array_base <= addr < array_base + 0x28000
         in_priv = priv_base <= addr < priv_base + priv_size
-        if not (in_flash or in_priv):
+        # The rest of the FLPR-side SRAM window (hot code, ring,
+        # mailbox) is the VPR's own; the M33 never links it.
+        in_flpr_sram = 0x2002F000 <= addr < 0x20040000
+        if not (in_flash or in_priv or in_flpr_sram):
             sys.exit(f"error: ALLOC section {name} at 0x{addr:x} "
-                     "outside flash+priv")
+                     "outside flash/FLPR SRAM")
         if in_priv:
             priv_used += size
     # Mapped sections gc'd away (nothing references them) vanish from
@@ -315,7 +334,7 @@ def check_final(elf, array_base, priv_base, priv_size, mapjson):
 
 if __name__ == "__main__":
     if sys.argv[1] == "--check-relocs":
-        check_relocs(sys.argv[2], int(sys.argv[3], 0), int(sys.argv[4], 0))
+        check_relocs(sys.argv[2], sys.argv[3])
     elif sys.argv[1] == "--check-ram":
         check_ram(sys.argv[2], sys.argv[3])
     elif sys.argv[1] == "--gen-map":
@@ -324,8 +343,7 @@ if __name__ == "__main__":
         gen_map(sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5],
                 sys.argv[6], sys.argv[7], exp)
     elif sys.argv[1] == "--check-final":
-        check_final(sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5],
-                    sys.argv[6])
+        check_final(sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5])
     else:
         sys.exit("usage: blob_audit.py --check-relocs|--check-ram|"
                  "--gen-map|--check-final ...")

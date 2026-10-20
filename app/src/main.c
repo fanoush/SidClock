@@ -1380,8 +1380,9 @@ BT_GATT_SERVICE_DEFINE(ess_svc,
 /* [0..19] audio status/format/timing, [20..33] I2S registers,
  * [34..95] diag, [96..127] timekeeping telemetry, [128] BLE access mode,
  * [129..139] crash/filesystem/stall telemetry (see below),
- * [140..151] FLPR blob status: heartbeat u16 + flags, bench u32 pair */
-static uint8_t ble_dbg[152];
+ * [140..151] FLPR blob status: heartbeat u16 + flags, bench u32 pair,
+ * [152..159] FLPR bench hardware counters: cycles, instructions */
+static uint8_t ble_dbg[160];
 
 /* FLPR tail (see docs/ble-services.md):
  * [140..141] blob heartbeat (u16 LE, 0 while not alive)
@@ -1615,6 +1616,8 @@ static ssize_t ble_dbg_read(struct bt_conn *conn,
 	}
 	sys_put_le32(FLPR_SHARED->bench_us, ble_dbg + 144);
 	sys_put_le32(FLPR_SHARED->bench_sum, ble_dbg + 148);
+	sys_put_le32(FLPR_SHARED->bench_cycles, ble_dbg + 152);
+	sys_put_le32(FLPR_SHARED->bench_instr, ble_dbg + 156);
 
 	return bt_gatt_attr_read(conn, attr, buf, len, offset, ble_dbg,
 				 sizeof(ble_dbg));
@@ -1680,6 +1683,7 @@ static ssize_t ble_dbg_write(struct bt_conn *conn,
 	      (len == 2U && p[0] == 0x30U) ||
 	      (len == 2U && p[0] == 0x31U) ||
 	      (len == 3U && p[0] == 0x32U) ||
+	      (len == 3U && p[0] == 0x33U) ||
 	      (len >= 2U && len <= SID_CMD_NAME_MAX + 1U && p[0] == 0x11U) ||
 	      (len >= 2U && len <= SID_CMD_NAME_MAX + 1U && p[0] == 0x16U) ||
 	      (len == 2U && p[0] >= 0x18U && p[0] <= 0x1CU) ||
@@ -1794,10 +1798,11 @@ static ssize_t ble_dbg_write(struct bt_conn *conn,
 	}
 #ifdef SID_ENGINE_DUAL
 	case 0x17:
-		/* Global SID engine (0 = new cRSID, 1 = legacy cSID-light);
-		 * the main loop stops, flips and restarts the current tune
-		 * if one was playing (same as the main-screen button). */
-		if (len != 2U || p[1] > 1U) {
+		/* Global SID engine: 0 = cRSID on the M33, 1 = legacy
+		 * cSID-light, 2 = cRSID on the FLPR blob. The main loop
+		 * stops, switches and restarts the current tune if one was
+		 * playing (same as the main-screen button). */
+		if (len != 2U || p[1] > SID_ENGINE_FLPR) {
 			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
 		}
 		if (sid_req_post(0x17, p[1], NULL) != 0) {
@@ -2030,6 +2035,40 @@ static ssize_t ble_dbg_write(struct bt_conn *conn,
 #endif
 		accel_dump();
 		break;
+	case 0x33: {
+		/* FLPR core-speed probe: run N register-only loop iterations
+		 * on the blob and report cycles/instructions (snapshot
+		 * [144..159]). It answers "is the core slow per instruction
+		 * or is the engine stalling on fetch/memory?" - no tune
+		 * needed, but it stops audio like the bench. */
+		uint32_t n;
+		uint32_t c0, c1;
+
+		if (len != 3U) {
+			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+		}
+		if (flpr_start() != 0) {
+			return BT_GATT_ERR(BT_ATT_ERR_VALUE_NOT_ALLOWED);
+		}
+		n = (uint32_t)p[1] | ((uint32_t)p[2] << 8);
+		if (n == 0U) {
+			return BT_GATT_ERR(BT_ATT_ERR_VALUE_NOT_ALLOWED);
+		}
+		audio_flpr_stop();
+		audio_sid_stop();
+		FLPR_SHARED->bench_frames = n;
+		FLPR_SHARED->bench_done = 0U;
+		FLPR_SHARED->mode = 3U;
+		FLPR_SHARED->run = 1U;
+		c0 = k_cycle_get_32();
+		while (FLPR_SHARED->bench_done == 0U &&
+		       (k_cycle_get_32() - c0) < 2000000U) {
+			k_sleep(K_MSEC(2));
+		}
+		c1 = k_cycle_get_32();
+		FLPR_SHARED->bench_us = c1 - c0;
+		break;
+	}
 #ifdef SIDCLOCK_DEBUG
 	case 0x07:
 		audio_rate_next();

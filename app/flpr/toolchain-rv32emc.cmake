@@ -9,5 +9,5 @@ set(CMAKE_OBJCOPY riscv64-zephyr-elf-objcopy CACHE FILEPATH "objcopy")
 set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
 
 # VPR core: RV32E + M + C (see riscv,isa in the SoC DTS).
-add_compile_options(-march=rv32emc -mabi=ilp32e)
-add_link_options(-march=rv32emc -mabi=ilp32e)
+add_compile_options(-march=rv32emc_zicsr -mabi=ilp32e)
+add_link_options(-march=rv32emc_zicsr -mabi=ilp32e)

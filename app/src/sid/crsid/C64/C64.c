@@ -177,7 +177,15 @@ void cRSID_initC64 () { //C64 Reset
 
 
 
-cRSID_Output* cRSID_emulateC64 () {
+/* Optional section/optimisation attribute for the hottest function: the
+ * FLPR blob links it into the VPR's own SRAM (code fetched from RRAM
+ * costs ~3 cycles/instruction on that core, from SRAM ~1 - see
+ * docs/flpr.md). Empty for the M33 build and for RISC-V builds without
+ * the blob. */
+#ifndef CRSID_HOT_CODE
+#define CRSID_HOT_CODE
+#endif
+CRSID_HOT_CODE cRSID_Output* cRSID_emulateC64 () {
  //static cRSID_C64instance* C64 = &cRSID_C64;
 
  //static enum { VOLUME_MAX=0xF, CHANNELS=3+1 } SIDspecs; //digi-channel is counted too in attenuation
