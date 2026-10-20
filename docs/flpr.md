@@ -115,6 +115,41 @@ The tune clock (UI time line, player-state characteristic, auto-advance)
 is driven by the frames the M33 actually drains from the ring, so it
 advances exactly with what is played, in all three modes.
 
+## Where the time goes (measured, Game Over - the heaviest tune here)
+
+VPR cycle counter, blob bench, 22050 Hz frames (budget 45.3 us/frame):
+
+| Configuration | cycles/frame | us/frame |
+|---|---|---|
+| all engine code XIP from RRAM, -O3 -funroll-loops | 8,735 | 69.2 |
+| CPU interpreter in SRAM | 6,889 | 54.4 |
+| cRSID_emulateC64 in SRAM, -O3 | 5,901 | 49.4 |
+| **cRSID_emulateC64 in SRAM, -O2** | **5,668** | **44.5** |
+| ...with the CPU interpreter stubbed out | 3,367 | 26.3 |
+
+M33 for the same tune: 30.6 us/frame (69% of realtime).
+
+So the engine splits roughly **59% SID + 41% 6510 interpreter**. The
+current design runs all of it on the FLPR: it fits, but with ~2% margin,
+which shows up as ~1.7 underruns/second on this tune. Splitting the work
+across both cores is the way to get real headroom:
+
+| Split | M33 | FLPR |
+|---|---|---|
+| **A: SID on the FLPR, C64/CPU on the M33** | ~12.5 us (27%) | ~26 us (58%) |
+| B: C64/CPU on the FLPR, SID + I2S on the M33 | ~18 us (40%) | ~18 us (40%) |
+| current: everything on the FLPR | ~0 (drains only) | ~44.5 us (98%) |
+
+A is the better split for UI responsiveness and the natural boundary:
+the per-sample SID stage (`cRSID_emulateLightSIDs`) is already separate
+from the per-instruction cycle loop. It needs the SID instance (voices,
+ADSR, filter - about 1 KB, fits in the FLPR's SRAM) to move to the blob,
+and the M33 to send per-sample cycle counts plus the SID register writes
+($D400-$D41C) with their cycle offsets, so the ADSR gating and the
+waveform generation stay cycle-exact. OSC3 reads would need the blob to
+publish the oscillator value each sample (cRSID tolerates ~22 cycles of
+delay there).
+
 ## What to watch
 
 - **Underruns**: `audio` reports the pipe shortfall counter. Zero over a
