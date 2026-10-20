@@ -263,7 +263,9 @@ static INLINE unsigned char pop (void)
 
 
 
-unsigned char cRSID_emulateCPU (void) { //the CPU emulation for SID/PRG playback (ToDo: CIA/VIC-IRQ/NMI/RESET vectors, BCD-mode)
+/* Hottest loop in the engine (~70% of the split CPU half): the blob keeps
+ * it in SRAM (see the CRSID_HOT_CODE defaults in C64.c). */
+CRSID_HOT_CODE_SPEED unsigned char cRSID_emulateCPU (void) { //the CPU emulation for SID/PRG playback (ToDo: CIA/VIC-IRQ/NMI/RESET vectors, BCD-mode)
 
  //enum cRSID_StatusFlagBitValues { N=0x80, V=0x40, B=0x10, D=0x08, I=0x04, Z=0x02, C=0x01 };
 

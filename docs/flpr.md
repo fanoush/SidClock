@@ -68,7 +68,9 @@ embeds it, then links the M33 image twice:
 2. blob with the engine linked against that map -> re-embed -> relink.
 
 The second M33 link must produce the identical map, otherwise the build
-fails. `blob_audit.py` also audits the blob link: zero dynamic
+fails. The blob's `.flprhot` section (engine code executed from the FLPR
+SRAM - see "Where the time goes") is copied by `startup.S` before
+`main`; it currently carries ~28 KB against the 52 KB window. `blob_audit.py` also audits the blob link: zero dynamic
 relocations, no `gp`-relative code, no small-data sections, stack top
 where the header says.
 
@@ -96,9 +98,9 @@ split: flpr cpu 41.3%  lead 320 (min 144)  starved 0
 
 - **`flpr cpu`** is the fraction of wall time the blob spends inside the
   CPU pump (permille in `[144..145]`), measured with `mcycle` over a
-  ~0.25 s window. It is the FLPR half's utilisation: ~82% on Game Over
-  here, ~17% on a light tune. At 100% the blob is saturated and the M33
-  starts to starve.
+  ~0.25 s window. It is the FLPR half's utilisation: ~49% on Game Over,
+  ~63% on Arkanoid, ~10% on a light tune. At 100% the blob is saturated
+  and the M33 starts to starve.
 - **`lead`** is `prod - cons`, the samples the blob is ahead of the M33
   (snapshot `[148..149]`). The blob pumps to 320, so it hovers there
   while there is headroom and falls when there is not. **`min`** is the
@@ -127,7 +129,7 @@ The main-screen engine button cycles three choices (BLE command `0x17`):
 A fourth mode existed during bring-up (the whole cRSID engine on the
 blob). It is gone: at 44.5 us/frame it sat at ~98% of realtime with
 ~1.7 underruns/s on the heaviest tune, while split B runs the same tune
-with the M33 at ~16% and the FLPR at ~82%.
+with the M33 at ~19% and the FLPR at ~50%.
 
 Switching stops playback, changes the core and reloads/restarts the tune.
 With `SPLIT` selected, `audio_sid_start()` boots the blob (and powers the
@@ -145,49 +147,88 @@ The tune clock (UI time line, player-state characteristic, auto-advance)
 is driven by the samples the M33 renders, so it advances exactly with
 what is played, in every mode.
 
-## Where the time goes (measured, Game Over - the heaviest tune here)
+## Where the time goes (measured, 22050 Hz frames, budget 45.3 us/frame)
 
-VPR cycle counter, blob bench, 22050 Hz frames (budget 45.3 us/frame):
+The VPR has **no instruction cache**: code fetched from RRAM costs ~3
+cycles per instruction, code fetched from SRAM ~1 (measured with the same
+4-instruction loop: 15.3 vs 5.1 cycles/iteration). That makes *code
+placement* the dominant tuning knob on this core - far more than the
+optimisation level - and it is easy to get wrong:
 
-| Configuration | cycles/frame | us/frame |
+| Blob layout | what runs from where | split CPU half |
 |---|---|---|
-| all engine code XIP from RRAM, -O3 -funroll-loops | 8,735 | 69.2 |
-| CPU interpreter in SRAM | 6,889 | 54.4 |
-| cRSID_emulateC64 in SRAM, -O3 | 5,901 | 49.4 |
-| **cRSID_emulateC64 in SRAM, -O2** | **5,668** | **44.5** |
-| ...with the CPU interpreter stubbed out | 3,367 | 26.3 |
+| early bring-up | only `cRSID_emulateC64` in SRAM, the 26 KB 6510 interpreter and `cRSID_generateSample` XIP from RRAM | 37 us/frame (82%), Arkanoid 98% |
+| **current** | `cRSID_emulateCPU` + `cRSID_emulateC64` + `cRSID_generateSample` + the pump in `.flprhot` (28.4 KB of the 52 KB window) | **22 us/frame (49%)**, Arkanoid 63% |
 
-M33 for the same tune: 30.6 us/frame (69% of realtime).
+The interpreter was the one that mattered: it is ~70% of the frame's work
+and was being fetched at ~3 cycles/instruction. Moving it into SRAM cut
+its own cost by ~2.8x and the whole blob half by ~40% (Arkanoid 98% ->
+63%, Game Over 83% -> 49%, ACE II 17% -> 11%, Last Ninja 2 ~10%).
 
-So the engine splits roughly **59% SID + 41% 6510 interpreter**. Running
-all of it on the FLPR fits, but with ~2% margin, which shows up as ~1.7
-underruns/second on this tune (that mode was removed for this reason).
-Splitting the work across both cores is the way to get real headroom:
+Rule: **anything executed per audio frame belongs in `.flprhot`.** The
+section is copied to FLPR SRAM by `startup.S` before `main`, the build
+audit caps it to the window, and `nm` should show every engine function
+at 0x2002F000+:
+
+```sh
+riscv64-zephyr-elf-nm -S --size-sort app/build-flpr/flpr.elf | tail
+```
+
+Optimisation level, measured again once the code was in SRAM: `-O2` beats
+`-O3` slightly (68.8% vs 71.4% on Arkanoid); `CRSID_HOT_CODE` uses
+`-O2` too (it used to force `-Os` to fit the window, but 24 KB of the
+52 KB are still free and `-O2` measured a little better).
+
+Per-section cycles on Arkanoid (profiling build, see below), cycles per
+audio frame at 128 MHz:
+
+| Section | cycles/frame | share |
+|---|---|---|
+| 6510 interpreter (`cRSID_emulateCPU`) | 1600-2200 | ~50% |
+| both CIAs (`cRSID_emulateCIA` x2) | 1050-1550 | ~40% |
+| VIC raster/IRQ (`cRSID_emulateVIC`) | 220-350 | ~10% |
+
+Both heavy tunes here are RSID, so the VIC and both CIAs run once per
+instruction (PSID calls neither). A fast path for "timer stopped, no
+strobe" was tried and measured flat: these tunes keep their timers
+running, so it never triggered - reverted rather than kept as dead
+weight. The remaining cost is the emulation itself, now running from
+SRAM.
+
+Historical whole-engine numbers (the removed mode, measured when only
+`cRSID_emulateC64` was in SRAM): 44.5 us/frame, ~98% of realtime. With
+today's placement that engine would be far cheaper, but split B is still
+the better use of the second core:
 
 | Split | M33 (measured) | FLPR (measured) |
 |---|---|---|
 | A: SID on the FLPR, C64/CPU on the M33 (superseded) | 25.5 us (56%) | ~26 us (58%) |
-| B: C64/CPU on the FLPR, SID + I2S on the M33 (current) | 7.3 us (16%) | 37 us (82%) |
+| B: C64/CPU on the FLPR, SID + I2S on the M33 (current) | 8.8 us (19%) | 22 us (49%) |
 | whole engine on the FLPR (removed) | ~0 (drains only) | 44.5 us (98%), ~1.7 underruns/s |
 
-The split is B because the SID stage costs ~5 us/frame on the M33 but
-~26 us on the FLPR (it is table/branch heavy, and the VPR has no
-instruction cache).
+What the split buys is the *screen*: the M33 spends ~9 us/frame on audio
+instead of ~30 us, so UI redraws no longer starve the emulation.
 
-Note the **40% estimate this section used to carry was too low**: it
-counted only the 6510 interpreter (18 us of the 44.5 us whole-engine
-bench). Split B's blob half also runs the VIC, the CIAs and the memory
-plumbing, so it carries most of the "everything but the SID output
-stage" cost: ~37 us/frame on Game Over, measured on the device as
-`split: flpr cpu 82%`. It still fits - `lead min` stays around 60-200
-samples and `starved` stays 0 - but the headroom is modest on the
-heaviest tunes, unlike the M33's 16%.
+### Profiling the split CPU half
 
-What the split buys is the *screen*: the M33 spends ~7 us/frame on
-audio instead of ~30 us, so UI redraws no longer starve the
-emulation. If the FLPR half ever needs more headroom, the next step is
-cycle-counting the VIC/CIA calls (they dominate the 37 us), not moving
-work back to the M33.
+`FLPR_PROF=1 app/build.sh` builds the blob with `mcycle` counters around
+the interpreter, both CIAs and the VIC. They are exponential averages
+(alpha 1/16) published in `FLPR_SHARED->prof[]` once per frame, so the
+overhead is well under 1%; the M33 logs them whenever the debug snapshot
+is read:
+
+```sh
+FLPR_PROF=1 app/build.sh && tools/flash_ota.py --now
+tools/sidclock_ble.py engine split
+tools/sidclock_ble.py sidname Arkanoid.sid
+tools/sidclock_ble.py audio                 # any snapshot read triggers it
+tools/sidclock_ble.py log | grep 'split prof'
+# split prof: cpu 1659 cia 1042 vic 248 total 2943 cyc/frame
+```
+
+`total` is the sum of the three sections (the rest of the frame is the
+waveform publish, event handling and the pump loop). Release builds do
+not write `prof[]`, so the log line never appears there.
 
 **ADSR windows must stay <= 7 cycles.** cRSID's envelope pass detects at
 most one shot per call and its quiet-voice folding assumes
@@ -256,10 +297,11 @@ has them in separate images).
 ## What to watch
 
 - **FLPR load**: `audio`'s `split: flpr cpu N%` line (snapshot
-  `[144..145]`, permille). ~82% on Game Over, ~17% on a light tune; it
-  is measured inside the pump with `mcycle` (only the calls that
-  actually produce samples are charged), so it is the real duty cycle
-  rather than an estimate. Multiply by 45.35 us for the us/frame.
+  `[144..145]`, permille). ~49% on Game Over, ~63% on Arkanoid, ~10% on
+  a light tune; it is measured inside the pump with `mcycle` (only the
+  calls that actually produce samples are charged), so it is the real
+  duty cycle rather than an estimate. Multiply by 45.35 us for the
+  us/frame.
 - **Lead**: `lead N (min M)` (snapshot `[146..149]`). The blob pumps to
   320 samples ahead, so `lead` sits there with headroom. A `min` that
   keeps dropping towards 0 - especially below one fill buffer (176

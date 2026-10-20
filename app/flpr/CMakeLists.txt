@@ -33,6 +33,10 @@ endif()
 separate_arguments(FLPR_ENGINE_OPT UNIX_COMMAND "${FLPR_ENGINE_OPT}")
 message(STATUS "FLPR engine opt: ${FLPR_ENGINE_OPT}")
 
+if(NOT DEFINED FLPR_PROF OR FLPR_PROF STREQUAL "")
+	set(FLPR_PROF 0)
+endif()
+
 if(FLPR_WITH_ENGINE)
 	target_compile_definitions(flpr.elf PRIVATE FLPR_WITH_ENGINE=1)
 	target_sources(flpr.elf PRIVATE
@@ -42,7 +46,14 @@ if(FLPR_WITH_ENGINE)
 		PROPERTIES COMPILE_OPTIONS
 		"${FLPR_ENGINE_OPT};-std=gnu99;-fno-pie;-msmall-data-limit=0;-ffunction-sections;-fdata-sections"
 		COMPILE_DEFINITIONS
-		"CRSID_HOT_CODE=__attribute__((section(\".flprhot\"),noinline,optimize(\"Os\")));CRSID_SPLIT;FLPR_BLOB=1")
+		"CRSID_HOT_CODE=__attribute__((section(\".flprhot\"),noinline,optimize(\"O2\")));CRSID_HOT_CODE_SPEED=__attribute__((section(\".flprhot\"),noinline));CRSID_SPLIT;FLPR_BLOB=1")
+	if(FLPR_PROF)
+		# Split-section cycle counters into FLPR_SHARED->prof[]; the
+		# M33 logs them when the debug snapshot is read (see
+		# docs/flpr.md, "Profiling the split CPU half"). Costs a few
+		# percent, so it is opt-in.
+		target_compile_definitions(flpr.elf PRIVATE CRSID_SPLIT_PROF=1)
+	endif()
 endif()
 
 # No libc, no syscalls: pure number crunching on shared memory.

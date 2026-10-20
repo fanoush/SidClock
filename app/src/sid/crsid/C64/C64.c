@@ -4,6 +4,21 @@
 
 #include "../libcRSID.h"
 
+/* Optional section/optimisation attributes for the hottest functions.
+ * The FLPR blob links them into the VPR's own SRAM (code fetched from
+ * RRAM costs ~3 cycles/instruction on that core, from SRAM ~1 - see
+ * docs/flpr.md); empty for the M33 build and for RISC-V builds without
+ * the blob.
+ *
+ * CRSID_HOT_CODE forces size optimisation (the SRAM window is limited
+ * and the function is large); CRSID_HOT_CODE_SPEED keeps the file's
+ * -O2 because the 6510 interpreter is the hottest loop there is. */
+#ifndef CRSID_HOT_CODE
+#define CRSID_HOT_CODE
+#endif
+#ifndef CRSID_HOT_CODE_SPEED
+#define CRSID_HOT_CODE_SPEED CRSID_HOT_CODE
+#endif
 
 #include "MEM.c"
 #include "CPU.c"
@@ -192,14 +207,27 @@ void cRSID_initC64 () { //C64 Reset
 
 
 
-/* Optional section/optimisation attribute for the hottest function: the
- * FLPR blob links it into the VPR's own SRAM (code fetched from RRAM
- * costs ~3 cycles/instruction on that core, from SRAM ~1 - see
- * docs/flpr.md). Empty for the M33 build and for RISC-V builds without
- * the blob. */
-#ifndef CRSID_HOT_CODE
-#define CRSID_HOT_CODE
+#ifdef CRSID_SPLIT_PROF
+/* Blob-only split profiling: how many cycles each section takes per
+ * audio frame, exponential-averaged (1/16) in shared memory so the M33
+ * can log it whenever the debug snapshot is read. The read-modify-write
+ * happens once per frame, not per instruction, so it costs well under
+ * 1% and does not distort the attribution. */
+static inline uint32_t prof_cyc (void) {
+ uint32_t v;
+
+ __asm__ volatile ("csrr %0, mcycle" : "=r" (v));
+ return v;
+}
+
+static inline void prof_ema (volatile uint32_t *dst, uint32_t v) {
+ *dst = *dst - (*dst >> 4) + (v >> 4);
+}
+
+#define PROF_BEGIN() (prof_t = prof_cyc())
+#define PROF_END(slot) do { uint32_t _n = prof_cyc(); (slot) += _n - prof_t; prof_t = _n; } while (0)
 #endif
+
 CRSID_HOT_CODE cRSID_Output* cRSID_emulateC64 () {
  //static cRSID_C64instance* C64 = &cRSID_C64;
 
@@ -214,6 +242,10 @@ CRSID_HOT_CODE cRSID_Output* cRSID_emulateC64 () {
 #endif
  static unsigned char VUmeterUpdateCounter;
  static cRSID_Output* Output;
+#ifdef CRSID_SPLIT_PROF
+ uint32_t prof_cpu = 0, prof_cia = 0, prof_vic = 0;
+ uint32_t prof_t = prof_cyc();
+#endif
 
 
  //Cycle-based/-paced part of emulations:
@@ -232,7 +264,13 @@ CRSID_HOT_CODE cRSID_Output* cRSID_emulateC64 () {
      else cRSID_C64.IObankRD[((0xDC0D) & 0xFFF)] = 0x83; //always simulate to player-calls that CIA TIMERA/TIMERB-IRQ happened
    }}
    if ( TIGHTLY (cRSID_C64.Finished==0) ) {
+#ifdef CRSID_SPLIT_PROF
+    PROF_BEGIN();
+#endif
     if ( RARELY ((InstructionCycles = cRSID_emulateCPU()) >= 0xFE) ) { InstructionCycles=6; cRSID_C64.Finished=1; }
+#ifdef CRSID_SPLIT_PROF
+    PROF_END(prof_cpu);
+#endif
    }
    else InstructionCycles=7; //idle between player-calls
    cRSID_C64.FrameCycleCnt += InstructionCycles;
@@ -240,6 +278,9 @@ CRSID_HOT_CODE cRSID_Output* cRSID_emulateC64 () {
   }
 
   else { //RealSID emulations:
+#ifdef CRSID_SPLIT_PROF
+   PROF_BEGIN();
+#endif
    if ( RARELY (cRSID_handleCPUinterrupts()) ) { cRSID_C64.Finished=0; InstructionCycles=7; ++sid_frame_calls; } //IRQ/NMI dispatched (device debug counter)
    else if ( MOSTLY (cRSID_C64.Finished==0) ) {
     if ( RARELY ((InstructionCycles = cRSID_emulateCPU()) >= 0xFE) ) {
@@ -248,10 +289,21 @@ CRSID_HOT_CODE cRSID_Output* cRSID_emulateC64 () {
     }
    }
    else InstructionCycles=7; //idle between IRQ-calls
+#ifdef CRSID_SPLIT_PROF
+   PROF_END(prof_cpu);
+   PROF_BEGIN();
+#endif
    cRSID_C64.IRQ = cRSID_C64.NMI = 0; //prepare for collecting IRQ sources
    cRSID_C64.IRQ |= cRSID_emulateCIA( &cRSID_C64.CIA[1], InstructionCycles );
    cRSID_C64.NMI |= cRSID_emulateCIA( &cRSID_C64.CIA[2], InstructionCycles );
+#ifdef CRSID_SPLIT_PROF
+   PROF_END(prof_cia);
+   PROF_BEGIN();
+#endif
    cRSID_C64.IRQ |= cRSID_emulateVIC( InstructionCycles );
+#ifdef CRSID_SPLIT_PROF
+   PROF_END(prof_vic);
+#endif
   }
 
   cRSID_C64.SampleCycleCnt += (InstructionCycles << CRSID_CLOCK_FRACTIONAL_BITS);
@@ -291,6 +343,18 @@ CRSID_HOT_CODE cRSID_Output* cRSID_emulateC64 () {
 
   }
  } //end of 1MHz cycle-based emulations (CPU, VIC, CIA, ADSR)
+#ifdef CRSID_SPLIT_PROF
+ { /* per-frame section cycles; prof[3] is everything else in the
+    * frame (waveform publish, event handling, loop overhead) */
+  uint32_t total = prof_cpu + prof_cia + prof_vic;
+
+  prof_ema(&FLPR_SHARED->prof[0], prof_cpu);
+  prof_ema(&FLPR_SHARED->prof[1], prof_cia);
+  prof_ema(&FLPR_SHARED->prof[2], prof_vic);
+  prof_ema(&FLPR_SHARED->prof[3], total);
+  prof_cpu = prof_cia = prof_vic = 0;
+ }
+#endif
  cRSID_C64.SampleCycleCnt -= cRSID_C64.SampleClockRatio;
 
 

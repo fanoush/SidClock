@@ -874,8 +874,12 @@ void audio_sid_stop(void)
 {
 	sid_mode = false;
 	/* A stopped SID also stops the split rendering (UI stop, 0x0F,
-	 * engine switch); the blob idles on run=0 until it is halted. */
+	 * engine switch); the blob idles on run=0 until it is halted.
+	 * Clear `enable` too, so the debug snapshot stops reporting split
+	 * health (and reports the bench block again) once the engine is
+	 * switched away. */
 	split_mode = false;
+	FLPR_SPLIT->enable = 0U;
 	dbg[3] = 0U;
 	FLPR_SHARED->run = 0U;
 	/* Nothing left to render: power the VPR block down (it draws ~0.5 mA

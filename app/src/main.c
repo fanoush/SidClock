@@ -1651,6 +1651,16 @@ static ssize_t ble_dbg_read(struct bt_conn *conn,
 		sys_put_le32(FLPR_SHARED->bench_cycles, ble_dbg + 152);
 		sys_put_le32(FLPR_SHARED->bench_instr, ble_dbg + 156);
 	}
+	/* A blob built with FLPR_PROF=1 keeps per-section cycle averages in
+	 * prof[]; print them on a snapshot read so `log` can show where the
+	 * split CPU half spends its time. Silent for normal builds (zero). */
+	if (FLPR_SHARED->prof[3] != 0U) {
+		LOG_INF("split prof: cpu %u cia %u vic %u total %u cyc/frame",
+			(unsigned int)FLPR_SHARED->prof[0],
+			(unsigned int)FLPR_SHARED->prof[1],
+			(unsigned int)FLPR_SHARED->prof[2],
+			(unsigned int)FLPR_SHARED->prof[3]);
+	}
 
 	return bt_gatt_attr_read(conn, attr, buf, len, offset, ble_dbg,
 				 sizeof(ble_dbg));

@@ -87,7 +87,8 @@ flpr_build() { # $1 = OFF (no engine) | ON (full render engine)
         -S "$HERE/flpr" -B "$HERE/build-flpr" \
         -DCMAKE_TOOLCHAIN_FILE="$HERE/flpr/toolchain-rv32emc.cmake" \
         -DFLPR_WITH_ENGINE="$1" \
-        -DFLPR_ENGINE_OPT="$FLPR_ENGINE_OPT"
+        -DFLPR_ENGINE_OPT="$FLPR_ENGINE_OPT" \
+        -DFLPR_PROF="${FLPR_PROF:-0}"
     ninja -C "$HERE/build-flpr"
     riscv64-zephyr-elf-objcopy -O binary "$HERE/build-flpr/flpr.elf" \
         "$HERE/build-flpr/flpr.bin"

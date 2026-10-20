@@ -161,6 +161,10 @@ struct flpr_shared {
 	 * pump, in permille over a ~0.25 s window (blob writes). 1000 means
 	 * the blob is saturated; the M33's lead starts shrinking there. */
 	uint32_t cpu_load;
+	/* Split profiling: cycles per audio frame in each section, as an
+	 * exponential average (alpha 1/16). Only a blob built with
+	 * FLPR_PROF=1 writes these; otherwise they stay 0. */
+	uint32_t prof[4]; /* CPU interpreter, CIAs, VIC, publish/glue */
 	uint32_t scratch;
 };
 

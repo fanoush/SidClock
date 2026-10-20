@@ -269,7 +269,7 @@ void cRSID_generateSound (FASTVAR unsigned char *buf, FASTVAR unsigned short len
 }
 
 
-INLINE cRSID_Output cRSID_generateSample () { //call this from custom buffer-filler
+CRSID_HOT_CODE_SPEED INLINE cRSID_Output cRSID_generateSample () { //call this from custom buffer-filler
  enum { FADE_SCALING = 16, MIX_SCALING = (256*FADE_SCALING),
   SCRAMBLER_BITS = 8, DITHERNOISE_DIVSHIFTS = 6 /*5*/, DITHERNOISE_MID = ( ( 1 << (SCRAMBLER_BITS - DITHERNOISE_DIVSHIFTS) ) / 2 )
  };

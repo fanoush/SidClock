@@ -44,8 +44,11 @@ static inline uint32_t minstret(void)
 
 /* Returns the cycles spent producing samples, 0 when the lead was already
  * full: charging the empty calls would make the spin between buffers read
- * as ~100% load. No writable globals allowed in the blob (.bss check). */
-static uint32_t pump_split(void)
+ * as ~100% load. No writable globals allowed in the blob (.bss check).
+ *
+ * In SRAM with the interpreter: this is where cRSID_generateSample() is
+ * inlined, i.e. called once per audio frame. */
+static __attribute__((section(".flprhot"), noinline)) uint32_t pump_split(void)
 {
 	uint32_t c0 = mcycle();
 	uint32_t n = 0U;

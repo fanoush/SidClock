@@ -61,6 +61,17 @@
 
 **Fixes**
 
+- The split engine now keeps its whole hot path in the FLPR's SRAM: the
+  26 KB 6510 interpreter (and the per-sample pump) were still executing
+  from RRAM, where this cacheless core fetches at ~3 cycles per
+  instruction, so the blob half ran at 83% on Game Over and 98% on
+  Arkanoid with the lead collapsing to a single sample (audible as
+  slightly dragged/late passages). With the interpreter in SRAM the blob
+  half dropped to 49% / 63% (ACE II 17% -> 11%), `lead min` stays above
+  50 samples, and the M33's SID stage is ~9 us/frame. `audio` now prints
+  that health line (`split: flpr cpu N% lead ... (min ...) starved N`),
+  and `FLPR_PROF=1 app/build.sh` builds a blob whose per-section cycle
+  counts (interpreter/CIAs/VIC) the debug log reports.
 - Audio no longer stutters while the web remote lists `/home`: the `13`
   listing built every 60-byte page with a fresh LittleFS directory scan,
   and each scan (the port re-walks the metadata for every entry, on a
