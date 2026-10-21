@@ -1,83 +1,14 @@
 # Changelog
 
-## Unreleased
+## 1.0.9
 
 **New**
 
-- Player status over BLE for the upcoming web UI: two read characteristics
-  in the custom service next to the debug snapshot - a 16-byte **state**
-  value (playing/paused flags, subtune and song count, end mode, chip
-  model, elapsed and `.len` length) that **notifies** on every change and
-  once per second while a tune plays, plus an **info** value (title, file
-  name, author - 96 bytes once the tune id below landed) that only changes
-  when a tune loads. A host
-  subscribes instead of polling and stays in sync with on-device button
-  presses; it re-reads the strings when the state's generation byte moves.
-  Both reads work in every BLE access mode.
-- New player commands in the debug interface: `18` play/pause,
-  `19`/`1A` next/previous tune, `1B`/`1C` next/previous subtune,
-  `20` + subtune + name (play a file at a specific subtune),
-  `21` + subtune (jump to a subtune of the loaded tune) and `22` + mode
-  (end-of-tune mode - the SID screen END button: next subtune, next tune,
-  loop; `sidclock_ble.py endmode` drives it).
-- **Web remote**: `web/` is a static page (no build step) that connects
-  over Web Bluetooth - battery, the device and browser clocks side by
-  side (the device one turns amber while they disagree - no RTC, the time
-  is forgotten on every reset), the current tune/subtune with a progress
-  bar, play/pause/stop, tune and subtune transport, one-press clock sync
-  and a light/dark switch; all values are pushed by the device. Deployed
-  to GitHub Pages by the new `pages` workflow (`web/` contains only the
-  site), linked from the README. Testing from a phone on the same network
-  can go through a `cloudflared` quick tunnel (real certificate), or
-  `tools/serve_web.py` for self-signed TLS without a third party - Web
-  Bluetooth needs a secure context.
-- **Web remote: HVSC browser and uploads** (no firmware change). The page
-  searches hvsc.c64.org and writes tunes to the device's `/home` over
-  mcumgr SMP (`web/smp.js` is a small SMP client with a CBOR codec - file
-  upload/download/status, mcumgr buffer size from the device, frames
-  split into MTU-sized ATT writes, one timeout retry per request), so
-  uploading needs BLE R/W mode like the rest of the write path. A tune's
-  `.len` song lengths and `.stil` names/notes/comments are built in the
-  browser from HVSC's `Songlengths.md5` and `STIL.txt`, which are fetched
-  on first use and cached in IndexedDB (about 9 MB together) - the
-  parsing, truncation and size caps match `tools/sid_add.py`, and a
-  whole-file MD5 implementation (`web/md5.js`, WebCrypto has none) keys
-  the lookup. Uploaded names are shortened to 20 characters - the
-  commands take up to 23, but a `.stil` sidecar is one longer - with the
-  original HVSC path remembered. The page also
-  lists `/home` (debug command `13`), marks tunes that have sidecars and
-  plays/deletes them (delete drops the sidecars, `16`), and while a tune
-  plays it shows the HVSC info: song lengths, subtune names (tap to jump),
-  the current subtune's STIL note and the tune comment.
-- **Exact tune identity over BLE** (firmware + web remote). The info
-  characteristic grew from 88 to 96 bytes: bytes [88..95] are the first 4
-  bytes of the **whole-file MD5** of the tune the device actually loaded,
-  as 8 lowercase hex characters (`00000000` = unknown). The firmware
-  hashes the file during the load (new `app/src/md5.c`, ~96 bytes of stack
-  context, no allocation). HVSC's `Songlengths.md5` is keyed on exactly
-  this digest, so the web remote resolves the tune it shows exactly:
-  renamed uploads, case variants and the ~3,700 basenames HVSC reuses
-  across directories (`Commando.sid`, `Last_Ninja_2.sid`, ...) no longer
-  depend on whichever entry a name lookup found first. Without an id the
-  page falls back to the upload record and then the file name - and says
-  when several HVSC files share that name. Verified on hardware: all 23
-  tunes in `/home` resolve to the correct HVSC paths, including a renamed
-  one (`Neverending_Stor.sid` -> `Neverending_Story.sid`).
-- **Web remote: search field boxes and result paging**. The HVSC API
-  matches every query word against a tune's title, its author *and* its
-  released line - HVSC's series/publisher names - so "commando" also
-  returned tunes from "1987 Commando Frontier" that are not Commando.
-  The search row now has `name` / `author` / `released` boxes, the first
-  two ticked by default, and the fetched list is filtered to the ticked
-  fields (unticking a box re-filters what is already there, no new
-  request). The API takes no paging parameters and returns every match,
-  so the page renders 100 rows and a "show N more" button continues the
-  list; the status line counts what is shown ("5061 results in
-  name+author (8460 server matches) · showing 100") and says which box
-  is off when the ticked fields come up empty. The device list moved
-  above the search card and is a collapsed `<details>` now - its header
-  keeps the tune count and the refresh button - so a long result list
-  cannot bury it, and neither can a long device list bury the search.
+- New player command `22` + mode: the end-of-tune mode the SID screen's END
+  button cycles (next subtune, next tune, loop). It runs in the main loop
+  like the other player commands, so the on-device label and the pushed
+  state stay in sync; `sidclock_ble.py endmode nextsub|nexttune|loop`
+  drives it from the host.
 - **Web remote: the end-mode badge**. The cryptic "next sub" text in the
   progress row moved next to the chip/engine/snd badges and became the
   one pressable badge: tapping it cycles next sub -> next tune -> loop
@@ -89,17 +20,6 @@
   "on device ✓" instead of the upload button. The match is the HVSC id,
   not the file name, so shortened/renamed uploads and the ~3,700
   same-name HVSC files are not confused.
-- `tools/web-tests/`: browser test page for the web remote's libraries -
-  MD5 vectors (including padding block boundaries), CBOR encoding checked
-  byte-for-byte against `cbor2` canonical output, SMP upload/download/
-  retry/error paths against a fake device, and the `.len`/`.stil` parsers
-  against fixtures generated with `sid_add.py`; `?live` additionally
-  checks the real HVSC API and databases, `tools/web-tests/record.py`
-  runs the page headless and reports pass/fail. A second driver
-  (`tools/web-tests/page.html`) loads the real `web/index.html` in an
-  iframe and drives it - search boxes, paging button, status line, the
-  collapsible device card - so the `app.js` DOM code is exercised too,
-  something the module tests never execute.
 
 **Fixes**
 
@@ -157,7 +77,107 @@
   characters - the full size of its buffers - for `11`, `16` and `20`,
   the page and the CLI use the same limit, and a sidecar that still
   cannot be removed is named in the status line instead of aborting the
-  delete half way.
+  delete half way. Uploads still shorten `.sid` names to 20, so every
+  sidecar of an uploaded tune stays inside the limit.
+
+**Docs**
+
+- The web-remote recipes moved from the README to `docs/development.md` -
+  next to the one-time GitHub Pages setup (Settings -> Pages -> Source:
+  GitHub Actions) and the QR regeneration command - and serve only
+  `web/`, so the page sits at the server root with no `/web/` in the URL
+  (`tools/serve_web.py` already did). The README keeps the feature list,
+  with the QR right below the `## Web remote` heading.
+
+## 1.0.8
+
+**New**
+
+- Player status over BLE for the upcoming web UI: two read characteristics
+  in the custom service next to the debug snapshot - a 16-byte **state**
+  value (playing/paused flags, subtune and song count, end mode, chip
+  model, elapsed and `.len` length) that **notifies** on every change and
+  once per second while a tune plays, plus an **info** value (title, file
+  name, author - 96 bytes once the tune id below landed) that only changes
+  when a tune loads. A host
+  subscribes instead of polling and stays in sync with on-device button
+  presses; it re-reads the strings when the state's generation byte moves.
+  Both reads work in every BLE access mode.
+- New player commands in the debug interface: `18` play/pause,
+  `19`/`1A` next/previous tune, `1B`/`1C` next/previous subtune,
+  `20` + subtune + name (play a file at a specific subtune) and
+  `21` + subtune (jump to a subtune of the loaded tune).
+- **Web remote**: `web/` is a static page (no build step) that connects
+  over Web Bluetooth - battery, the device and browser clocks side by
+  side (the device one turns amber while they disagree - no RTC, the time
+  is forgotten on every reset), the current tune/subtune with a progress
+  bar, play/pause/stop, tune and subtune transport, one-press clock sync
+  and a light/dark switch; all values are pushed by the device. Deployed
+  to GitHub Pages by the new `pages` workflow (`web/` contains only the
+  site), linked from the README. Testing from a phone on the same network
+  can go through a `cloudflared` quick tunnel (real certificate), or
+  `tools/serve_web.py` for self-signed TLS without a third party - Web
+  Bluetooth needs a secure context.
+- **Web remote: HVSC browser and uploads** (no firmware change). The page
+  searches hvsc.c64.org and writes tunes to the device's `/home` over
+  mcumgr SMP (`web/smp.js` is a small SMP client with a CBOR codec - file
+  upload/download/status, mcumgr buffer size from the device, frames
+  split into MTU-sized ATT writes, one timeout retry per request), so
+  uploading needs BLE R/W mode like the rest of the write path. A tune's
+  `.len` song lengths and `.stil` names/notes/comments are built in the
+  browser from HVSC's `Songlengths.md5` and `STIL.txt`, which are fetched
+  on first use and cached in IndexedDB (about 9 MB together) - the
+  parsing, truncation and size caps match `tools/sid_add.py`, and a
+  whole-file MD5 implementation (`web/md5.js`, WebCrypto has none) keys
+  the lookup. Uploaded names are shortened to the firmware's 20-character
+  command limit with the original HVSC path remembered. The page also
+  lists `/home` (debug command `13`), marks tunes that have sidecars and
+  plays/deletes them (delete drops the sidecars, `16`), and while a tune
+  plays it shows the HVSC info: song lengths, subtune names (tap to jump),
+  the current subtune's STIL note and the tune comment.
+- **Exact tune identity over BLE** (firmware + web remote). The info
+  characteristic grew from 88 to 96 bytes: bytes [88..95] are the first 4
+  bytes of the **whole-file MD5** of the tune the device actually loaded,
+  as 8 lowercase hex characters (`00000000` = unknown). The firmware
+  hashes the file during the load (new `app/src/md5.c`, ~96 bytes of stack
+  context, no allocation). HVSC's `Songlengths.md5` is keyed on exactly
+  this digest, so the web remote resolves the tune it shows exactly:
+  renamed uploads, case variants and the ~3,700 basenames HVSC reuses
+  across directories (`Commando.sid`, `Last_Ninja_2.sid`, ...) no longer
+  depend on whichever entry a name lookup found first. Without an id the
+  page falls back to the upload record and then the file name - and says
+  when several HVSC files share that name. Verified on hardware: all 23
+  tunes in `/home` resolve to the correct HVSC paths, including a renamed
+  one (`Neverending_Stor.sid` -> `Neverending_Story.sid`).
+- **Web remote: search field boxes and result paging**. The HVSC API
+  matches every query word against a tune's title, its author *and* its
+  released line - HVSC's series/publisher names - so "commando" also
+  returned tunes from "1987 Commando Frontier" that are not Commando.
+  The search row now has `name` / `author` / `released` boxes, the first
+  two ticked by default, and the fetched list is filtered to the ticked
+  fields (unticking a box re-filters what is already there, no new
+  request). The API takes no paging parameters and returns every match,
+  so the page renders 100 rows and a "show N more" button continues the
+  list; the status line counts what is shown ("5061 results in
+  name+author (8460 server matches) · showing 100") and says which box
+  is off when the ticked fields come up empty. The device list moved
+  above the search card and is a collapsed `<details>` now - its header
+  keeps the tune count and the refresh button - so a long result list
+  cannot bury it, and neither can a long device list bury the search.
+- `tools/web-tests/`: browser test page for the web remote's libraries -
+  MD5 vectors (including padding block boundaries), CBOR encoding checked
+  byte-for-byte against `cbor2` canonical output, SMP upload/download/
+  retry/error paths against a fake device, and the `.len`/`.stil` parsers
+  against fixtures generated with `sid_add.py`; `?live` additionally
+  checks the real HVSC API and databases, `tools/web-tests/record.py`
+  runs the page headless and reports pass/fail. A second driver
+  (`tools/web-tests/page.html`) loads the real `web/index.html` in an
+  iframe and drives it - search boxes, paging button, status line, the
+  collapsible device card - so the `app.js` DOM code is exercised too,
+  something the module tests never execute.
+
+**Fixes**
+
 - Player commands from BLE now run in the main loop instead of the
   Bluetooth receive workqueue. That workqueue's 2 KB stack was already at
   96 % during a tune load and "next tune" adds a directory scan on top:
