@@ -172,6 +172,10 @@ hundred MB/s of reads) from the same memory the M33 fetches its code
 from, the reverse of the contention above. It lives in SRAM too now, so
 after `_start` (612 B, runs once) the blob generates no code fetches from
 RRAM at all; only its data accesses to the shared structs remain.
+Measured on the device (ACE II, split): the M33 render time did not move
+(median 2712 -> 2674 us, within the +/-200 us buffer-to-buffer noise), so
+the RRAM contention from that loop was theoretical at this duty cycle -
+the change is kept because it is free and removes the traffic entirely.
  The
 section is copied to FLPR SRAM by `startup.S` before `main`, the build
 audit caps it to the window, and `nm` should show every engine function
