@@ -39,12 +39,21 @@ link region, so the app keeps all of its RAM):
 
 | Region | Address | Size | Use |
 |---|---|---|---|
-| SRAM | `0x20034000-0x2003BFFF` | 32 KB | PCM ring: blob renders, M33 drains (16384 int16 frames, ~0.74 s, absorbs fetch-contention bursts) |
-| SRAM | `0x2003E000-0x2003FBFF` | 7 KB | blob-private RAM (`.got`/`.data`/`.bss`), 1 KB stack on top |
+| SRAM | `0x2002F000-0x2003BFFF` | 52 KB | hot engine code (`.text_hot`, copied there by `startup.S`) |
+| SRAM | `0x2003C000-0x2003DFFF` | 8 KB | event ring: SID writes from the blob, drained by the M33 SID side |
+| SRAM | `0x2003E000-0x2003EFFF` | 4 KB | split mode: SID instances, register copy, cycle ring |
+| SRAM | `0x2003F000-0x2003FBFF` | 3 KB | blob-private RAM (`.got`/`.data`/`.bss`), stack on top |
 | SRAM | `0x2003FC00-0x2003FFFF` | 1 KB | shared control struct (`flpr/flpr_shared.h`) |
 
 `app/flpr/flpr_shared.h` and `app/flpr.overlay` must agree on the RAM
 map; `build.sh` checks it.
+
+`.text` (code + rodata) is executed in place from the M33 image; only
+`.text_hot` is copied to SRAM, word by word, from
+`LOADADDR(.text)+SIZEOF(.text)`. The link script pads `.text` to 16 bytes
+for that reason: a byte-sized constant leaves the load address unaligned
+and the `lw` traps before the blob sets its magic (the split engine then
+looks dead: `flpr cpu 0.0%`).
 
 ## Start / stop
 
