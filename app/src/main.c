@@ -451,8 +451,7 @@ static void sid_sub_step(int dir); /* defined with the UI below */
 static void sid_play_sub(uint8_t sub); /* defined with the UI below */
 static uint32_t sid_length_cur(void); /* defined with the UI below */
 static int home_list(uint16_t start, uint8_t *dst, int size); /* below */
-static void home_list_cache_stale(void); /* below */
-static void home_list_cache_remove(const char *name); /* below */
+static void home_list_changed(void); /* below */
 static int16_t ls_start = -1; /* pending /home listing request (page start) */
 
 /* Stack telemetry (debug command 0x1D [+ u8 page]): the interrupt stack
@@ -642,7 +641,7 @@ static void fs_storage_init(bool format)
 	}
 	fs_mount_err = 0;
 	fs_ready = true;
-	home_list_cache_stale(); /* rebuilt lazily after a format */
+	home_list_changed(); /* the walk restarts after a format */
 	LOG_INF("LittleFS mounted at /home");
 }
 static uint32_t last_touch_ms;
@@ -1730,7 +1729,7 @@ static ssize_t ble_dbg_write(struct bt_conn *conn,
 		if (fs_unlink(path) != 0) {
 			return BT_GATT_ERR(BT_ATT_ERR_VALUE_NOT_ALLOWED);
 		}
-		home_list_cache_remove(name);
+		home_list_changed();
 		if (strcmp(name, sid_cur_name) == 0) {
 			/* the loaded tune is gone: stop it and forget it */
 			sid_player_stop();
@@ -3495,251 +3494,148 @@ static void draw_ui(void)
 
 /* --- SID transport actions ----------------------------------------- */
 
-/* --- /home listing cache ------------------------------------------- */
+/* --- /home listing ------------------------------------------------- */
 
 /*
- * A LittleFS directory scan is expensive: the Zephyr port re-reads the
- * metadata pair from the start for every entry it returns, and the tiny
- * 64-byte cache turned that into a burst of small SPI transactions per
- * file (~0.5 s for the ~90 files in /home). The 0x13 listing serves
- * 60-byte pages, so a per-page scan kept the audio refill thread off the
- * CPU for most of a transfer and playback stuttered for seconds.
+ * The 0x13 command serves the /home listing in 60-byte pages. A LittleFS
+ * directory scan on this port re-reads the metadata from the start for
+ * every entry it returns, so reopening the directory for each page (the
+ * old behaviour) kept the audio refill thread off the CPU for ~0.5 s per
+ * page and playback stuttered.
  *
- * The listing is therefore built once into RAM (at boot, and again after
- * a format) and pages are served from it. fs_mgmt uploads append their
- * file name through the MCUmgr file-access hook and 0x16 deletes drop
- * it, so neither needs a scan; a library refresh right after an upload
- * or delete stays scan-free too.
+ * The listing therefore keeps the directory iterator and its position
+ * open between pages: the host asks for the index the previous page
+ * returned, so a page walks only its own entries. The first page of a
+ * session - or any page that does not continue where the iterator
+ * stopped - pays one scan to reach that entry. Uploads, deletes and a
+ * format reset the iterator (home_list_changed), so positions are never
+ * stale. Measured on the device: ~65 ms per page (BLE round-trip bound)
+ * and a worst audio-loop gap of ~5 ms during a full listing.
  *
- * Entries are stored as "name\n"; if a directory ever outgrows the
- * buffer the flag makes that listing fall back to the live scan.
+ * There used to be a 2 KB RAM index of all names, built at boot and kept
+ * current by the fs hooks. It only worked while the library fit (about
+ * 50 tunes with sidecars); past that it overflowed, was disabled and
+ * every page rescanned the directory. The incremental walk is as fast,
+ * scales to any library size and frees the 2 KB.
  */
-#define HOME_LIST_CACHE_SIZE 2048
 static K_MUTEX_DEFINE(home_list_lock);
-static char home_list_cache[HOME_LIST_CACHE_SIZE];
-static uint16_t home_list_cache_used; /* publish after the bytes are in */
-static bool home_list_cache_valid;
-static bool home_list_cache_overflow;
 
-static void home_list_cache_stale(void)
+static void home_live_reset(void); /* below: the listing iterator */
+
+/* /home changed (upload, delete, format): restart the walk next time. */
+static void home_list_changed(void)
 {
 	k_mutex_lock(&home_list_lock, K_FOREVER);
-	home_list_cache_valid = false;
-	home_list_cache_overflow = false;
-	k_mutex_unlock(&home_list_lock);
-}
-
-/* Caller holds home_list_lock. Returns the start of the cache line for
- * name, or NULL. */
-static char *home_list_cache_line_locked(const char *name, size_t l)
-{
-	char *p = home_list_cache;
-	char *end = home_list_cache + home_list_cache_used;
-
-	while (p < end) {
-		char *nl = memchr(p, '\n', (size_t)(end - p));
-
-		if (nl == NULL) {
-			break;
-		}
-		if ((size_t)(nl - p) == l && memcmp(p, name, l) == 0) {
-			return p;
-		}
-		p = nl + 1;
-	}
-	return NULL;
-}
-
-/* Append one name. Runs on the SMP workqueue while a GATT read may be
- * serving a page on the BT workqueue, hence the lock. Copy first, then
- * publish the length, so a partially copied name is never visible. */
-static void home_list_cache_add(const char *name)
-{
-	size_t l = strlen(name);
-
-	if (l == 0U || l > 23U) {
-		return;
-	}
-	k_mutex_lock(&home_list_lock, K_FOREVER);
-	if (home_list_cache_valid && !home_list_cache_overflow &&
-	    home_list_cache_line_locked(name, l) == NULL) {
-		if ((size_t)home_list_cache_used + l + 1U >
-		    sizeof(home_list_cache)) {
-			home_list_cache_overflow = true;
-		} else {
-			memcpy(home_list_cache + home_list_cache_used, name, l);
-			home_list_cache[home_list_cache_used + l] = '\n';
-			home_list_cache_used =
-				(uint16_t)(home_list_cache_used + l + 1U);
-		}
-	}
-	k_mutex_unlock(&home_list_lock);
-}
-
-/* Drop one name (0x16 delete); keeps the cache usable without a rescan. */
-static void home_list_cache_remove(const char *name)
-{
-	size_t l = strlen(name);
-
-	if (l == 0U) {
-		return;
-	}
-	k_mutex_lock(&home_list_lock, K_FOREVER);
-	if (home_list_cache_valid && !home_list_cache_overflow) {
-		char *line = home_list_cache_line_locked(name, l);
-
-		if (line != NULL) {
-			char *end = home_list_cache + home_list_cache_used;
-			char *nl = memchr(line, '\n', (size_t)(end - line));
-
-			if (nl != NULL) {
-				memmove(line, nl + 1,
-					(size_t)(end - (nl + 1)));
-				home_list_cache_used = (uint16_t)
-					(home_list_cache_used - (l + 1U));
-			}
-		}
-	}
-	k_mutex_unlock(&home_list_lock);
-}
-
-/* Caller holds home_list_lock. */
-static void home_list_cache_build_locked(void)
-{
-	struct fs_dir_t dirp;
-	static struct fs_dirent ent;
-	uint16_t used = 0;
-
-	home_list_cache_valid = false;
-	home_list_cache_overflow = false;
-	home_list_cache_used = 0;
-	if (!fs_ready) {
-		return;
-	}
-	fs_dir_t_init(&dirp);
-	if (fs_opendir(&dirp, "/home") != 0) {
-		return;
-	}
-	while (fs_readdir(&dirp, &ent) == 0 && ent.name[0] != '\0') {
-		size_t l;
-
-		if (ent.type != FS_DIR_ENTRY_FILE) {
-			continue;
-		}
-		l = strlen(ent.name);
-		if (used + (int)l + 1 > (int)sizeof(home_list_cache)) {
-			home_list_cache_overflow = true;
-			break;
-		}
-		memcpy(home_list_cache + used, ent.name, l);
-		home_list_cache[used + l] = '\n';
-		used = (uint16_t)(used + l + 1U);
-	}
-	fs_closedir(&dirp);
-	if (!home_list_cache_overflow) {
-		home_list_cache_used = used;
-		home_list_cache_valid = true;
-	}
-}
-
-static void home_list_cache_build(void)
-{
-	k_mutex_lock(&home_list_lock, K_FOREVER);
-	home_list_cache_build_locked();
+	home_live_reset();
 	k_mutex_unlock(&home_list_lock);
 }
 
 /* One page of the /home listing as "name\n" entries (never splitting a
  * name; the caller keeps one spare byte for the next index). Returns the
- * next entry index to continue from, or -1 when done. */
+ * next entry index to continue from, or -1 when done. The iterator and
+ * its position persist between calls (see the block above); only the
+ * first page of a session, or a page that does not continue where the
+ * previous one stopped, rescans from the start of the directory. */
+#define HOME_LIVE_NAME_MAX 24
+static struct fs_dir_t home_live_dir;
+static bool home_live_open;
+static uint16_t home_live_next; /* index of the next file entry */
+static char home_live_pending[HOME_LIVE_NAME_MAX];
+static bool home_live_pending_used;
+
+static void home_live_reset(void)
+{
+	if (home_live_open) {
+		fs_closedir(&home_live_dir);
+		home_live_open = false;
+	}
+	home_live_pending_used = false;
+	home_live_next = 0;
+}
+
 static int home_list_live(uint16_t start, uint8_t *dst, int size)
 {
-	struct fs_dir_t dirp;
 	static struct fs_dirent ent;
-	int idx = 0;
+	bool skipping;
 	int used = 0;
 
-	fs_dir_t_init(&dirp);
-	if (fs_opendir(&dirp, "/home") != 0) {
-		dst[0] = '\0';
-		return -1;
+	if (!home_live_open || start != home_live_next) {
+		/* first page, a new listing session, or the host jumped */
+		home_live_reset();
+		fs_dir_t_init(&home_live_dir);
+		if (fs_opendir(&home_live_dir, "/home") != 0) {
+			dst[0] = '\0';
+			return -1;
+		}
+		home_live_open = true;
 	}
-	while (fs_readdir(&dirp, &ent) == 0 && ent.name[0] != '\0') {
+	skipping = (home_live_next < start);
+
+	for (;;) {
+		const char *name;
 		size_t l;
 
-		if (ent.type != FS_DIR_ENTRY_FILE) {
-			continue;
+		if (home_live_pending_used) {
+			/* entry that did not fit on the previous page */
+			name = home_live_pending;
+			home_live_pending_used = false;
+		} else {
+			/* Let the cooperative audio service thread run: one
+			 * directory step at a time bounds how long the walk
+			 * can keep it off the CPU (measured gaps of 10-45 ms
+			 * per page without this, growing with the directory
+			 * position because the port re-walks the metadata for
+			 * every entry). */
+			k_msleep(1);
+			if (fs_readdir(&home_live_dir, &ent) != 0 ||
+			    ent.name[0] == '\0') {
+				break;
+			}
+			if (ent.type != FS_DIR_ENTRY_FILE) {
+				continue;
+			}
+			if (skipping) {
+				if (home_live_next < start) {
+					home_live_next++;
+					continue;
+				}
+				skipping = false;
+			}
+			name = ent.name;
 		}
-		if (idx++ < (int)start) {
-			continue;
-		}
-		l = strlen(ent.name);
+		l = strlen(name);
 		if (used + (int)l + 1 > size - 1) {
-			/* doesn't fit: this entry goes to the next page */
-			fs_closedir(&dirp);
+			/* keep it for the next page; the index does not move */
+			memcpy(home_live_pending, name, l + 1U);
+			home_live_pending_used = true;
 			dst[used] = '\0';
-			return idx - 1;
+			return (int)home_live_next;
 		}
-		memcpy(dst + used, ent.name, l);
+		memcpy(dst + used, name, l);
 		dst[used + l] = '\n';
 		used += (int)l + 1;
+		home_live_next++;
 	}
-	fs_closedir(&dirp);
+	home_live_reset(); /* end of directory: release the handle */
 	dst[used] = '\0';
 	return -1;
 }
 
 static int home_list(uint16_t start, uint8_t *dst, int size)
 {
-	const char *p, *end;
-	int used = 0;
-	int idx = 0;
+	int next;
 
 	k_mutex_lock(&home_list_lock, K_FOREVER);
-	if (!home_list_cache_valid) {
-		if (!home_list_cache_overflow) {
-			home_list_cache_build_locked();
-		}
-		if (!home_list_cache_valid) {
-			int next = home_list_live(start, dst, size);
-
-			k_mutex_unlock(&home_list_lock);
-			return next;
-		}
-	}
-	p = home_list_cache;
-	end = home_list_cache + home_list_cache_used;
-	while (p < end) {
-		const char *nl = memchr(p, '\n', (size_t)(end - p));
-		size_t l;
-
-		if (nl == NULL) {
-			break;
-		}
-		l = (size_t)(nl - p);
-		if (idx++ < (int)start) {
-			p = nl + 1;
-			continue;
-		}
-		if (used + (int)l + 1 > size - 1) {
-			dst[used] = '\0';
-			k_mutex_unlock(&home_list_lock);
-			return idx - 1;
-		}
-		memcpy(dst + used, p, l);
-		dst[used + l] = '\n';
-		used += (int)l + 1;
-		p = nl + 1;
-	}
+	next = home_list_live(start, dst, size);
 	k_mutex_unlock(&home_list_lock);
-	dst[used] = '\0';
-	return -1;
+	return next;
 }
 
 #if defined(CONFIG_MCUMGR_GRP_FS_FILE_ACCESS_HOOK)
-/* fs_mgmt uploads (web page, smpmgr, sid_add.py) append their file name
- * to the listing cache: no directory scan on the next listing, so audio
- * keeps playing while the library refreshes after an upload. */
+/* fs_mgmt uploads (web page, smpmgr, sid_add.py) restart the listing
+ * walk, so the next listing sees the new file. The walk itself only
+ * reads the entries it serves, so the audio thread is never kept off the
+ * CPU for long. */
 static enum mgmt_cb_return home_fs_access_cb(uint32_t event,
 					     enum mgmt_cb_return prev_status,
 					     int32_t *rc, uint16_t *group,
@@ -3763,7 +3659,7 @@ static enum mgmt_cb_return home_fs_access_cb(uint32_t event,
 			name += 6;
 		}
 		if (name[0] != '\0' && strchr(name, '/') == NULL) {
-			home_list_cache_add(name);
+			home_list_changed();
 		}
 	}
 	return MGMT_CB_OK;
@@ -6007,10 +5903,8 @@ int main(void)
 
 	fs_storage_init(false); /* mount /home (no format); see the BLE docs */
 	/* dir.txt was a generated index for hosts without a listing command;
-	 * 0x13 now serves from the RAM cache. Drop the stale copy and build
-	 * the cache once, before playback can start. */
+	 * 0x13 walks the directory instead. Drop any stale copy. */
 	(void)fs_unlink("/home/dir.txt");
-	home_list_cache_build();
 	bri_cfg_load();   /* restore the ambient brightness profiles */
 	for (int i = 0; i < 5; i++) {
 		alarms[i].hour = 7;

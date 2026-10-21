@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+**Fixes**
+
+- The `/home` listing walks the directory instead of keeping a 2 KB RAM
+  index of every name. The index only worked while the library fit
+  (~50 tunes with sidecars); past that it overflowed, was disabled, and
+  every 60-byte page reopened the directory and rescanned it (~0.5 s of
+  audio-thread starvation per page). The listing now keeps the LittleFS
+  iterator and its position open between pages and yields to the audio
+  service between entries, so it scales to any library and frees 2.3 KB
+  of RAM. Measured on the device with 140 files: 65-100 ms per page
+  (BLE-bound), worst audio-loop gap 14 ms (was 45 ms without the yield),
+  no listing slowdown. A 1024-byte LittleFS cache was tried as well and
+  gave nothing over 256 bytes.
+
 ## 1.0.9
 
 **New**
