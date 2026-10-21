@@ -823,6 +823,20 @@ async def cmd_quality(addr, value=None):
     print(f"SID quality: {value}")
 
 
+async def cmd_splitrate(addr, value=None):
+    """Split SID nominal rate: default | HZ (0 = default ~42.5k -> 45.8k true)."""
+    try:
+        hz = int(value or 0)
+    except ValueError:
+        raise SystemExit("splitrate [HZ]  (0 = default 42500, amp plays ~45800)")
+    if not 0 <= hz <= 96000:
+        raise SystemExit("splitrate [HZ]  (0 = default 42500, amp plays ~45800)")
+    async with connect(addr) as c:
+        await c.write_gatt_char(DBG_CHAR, bytes([0x36, hz & 0xFF, hz >> 8]),
+                                response=True)
+    print(f"split SID rate: {hz if hz else 'default (42500)'}")
+
+
 async def cmd_engine(addr, value=None):
     """Switch the SID engine: new | old | split."""
     if value not in ("new", "old", "split"):
@@ -1119,7 +1133,7 @@ def main():
             "tone", "mute", "rate", "tonefreq",
         "tonestart", "tonestop", "fsformat", "sid", "sidname", "chip",
         "sidstop", "ls", "glitch", "blemode", "filedelete", "endmode",
-        "engine", "quality", "stacks", "threads", "log", "accel",
+        "engine", "quality", "splitrate", "stacks", "threads", "log", "accel",
         "playpause", "next", "prev", "subnext", "subprev", "subplay",
         "state", "watch", "flpr", "flpralu",
         ],
@@ -1176,6 +1190,7 @@ def main():
         "filedelete": cmd_filedelete,
         "engine": cmd_engine,
         "quality": cmd_quality,
+        "splitrate": cmd_splitrate,
         "stacks": cmd_stacks,
         "threads": cmd_stacks,  # alias for the old name
         "log": cmd_log,
@@ -1197,7 +1212,7 @@ def main():
         asyncio.run(fn(args.addr, args.value))
     elif args.command == "sidname":
         asyncio.run(fn(args.addr, args.value, args.sub))
-    elif args.command in ("chip", "filedelete", "engine", "quality", "stacks",
+    elif args.command in ("chip", "filedelete", "engine", "quality", "splitrate", "stacks",
                           "threads", "endmode"):
         asyncio.run(fn(args.addr, args.value))
     elif args.command == "set-time":

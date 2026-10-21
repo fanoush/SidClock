@@ -42,7 +42,9 @@ volatile uint16_t host_cycles[FLPR_SID_RING];
 volatile struct flpr_event host_events[FLPR_EVENTS_MAX];
 volatile uint8_t host_regcopy[FLPR_SID_REGCOPY_SIZE];
 
+#ifndef RATE
 #define RATE 22050
+#endif
 
 static void wav_write(const char *path, const int16_t *s, size_t n)
 {

@@ -63,10 +63,14 @@
 #define FLPR_SPLIT_SIZE 0x00001000UL /* 4 KB */
 
 #define FLPR_SID_CYCLES (FLPR_SPLIT_BASE + 0x0000UL) /* u16 per sample */
-#define FLPR_SID_RING 640U /* two audio buffers of cycle counts */
+/* Cycle ring: lead + one audio buffer of look-ahead, sized for the
+ * 44.1 kHz split rate (640 + 320 = 960, rounded to 1280) so the
+ * 22.05 kHz mode has room to spare. 1280 * 2 B = 2.5 KB, which is why
+ * the register copy below starts at +0xC00. */
+#define FLPR_SID_RING 1280U
 /* M33 SID register copy: 32 bytes per chip, so 2SID/3SID tunes see their
  * extra chips' writes (the blob cannot touch the M33's IO bank). */
-#define FLPR_SID_REGCOPY (FLPR_SPLIT_BASE + 0x0800UL)
+#define FLPR_SID_REGCOPY (FLPR_SPLIT_BASE + 0x0C00UL)
 #define FLPR_SID_REGCOPY_SIZE 128U /* 4 chips x 32 registers (CRSID_SIDCOUNT_MAX) */
 
 /* SID register-write events, FLPR -> M33. The blob (CPU) runs ahead of
@@ -107,6 +111,10 @@ struct flpr_split {
 	 * fill buffers that found no samples at all. */
 	uint32_t lead_min; /* lowest lead seen since the last start */
 	uint32_t starved;  /* buffers rendered with no data ready */
+	/* Samples the blob keeps ahead of the M33 (written by the M33 when
+	 * playback starts): ~14.5 ms of look-ahead at whatever rate the SID
+	 * stage runs, so 320 at 22.05 kHz and 640 at 44.1 kHz. */
+	uint32_t lead;
 };
 
 /* Split roles: the blob runs the CPU, the M33 (or the host harness) runs

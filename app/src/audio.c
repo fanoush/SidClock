@@ -72,8 +72,24 @@ LOG_MODULE_REGISTER(audio, LOG_LEVEL_INF);
  */
 #define HW_RATE_NUM 23000U
 #define HW_RATE_DEN 22050U
+/* The amp's clock error is not a constant ratio. Measured on the unit
+ * (tune-clock vs wall-clock over 60 s, cross-checked with the DMA refill
+ * counter): 22.05 kHz request -> 23.0 kHz (+4.3%), but 42.5 kHz request
+ * -> ~45.75 kHz (+7.6%). The split engine therefore uses a separately
+ * measured factor so the SID stage renders at the rate the hardware
+ * actually plays (otherwise the tune runs ~3% fast/sharp). */
+#define HW_RATE_HI_NUM 10765U
+#define HW_RATE_HI_DEN 10000U
+
 
 #define AUDIO_RATE_HZ 22050U
+/* Split engine: run the SID stage at 44.1 kHz so cRSID's filter tables
+ * (generated for 44.1 kHz) match. The hardware runs ~4.3% high, so ask
+ * for 42280 to render at ~44100 (see HW_RATE_NUM/DEN). */
+#define AUDIO_SPLIT_RATE_HZ 42500U
+/* Runtime override for the split nominal rate (BLE 0x36): 0 = default.
+ * Not persisted; lets a host A/B the SID rate on the device. */
+static uint32_t split_rate_override;
 #define AUDIO_FRAMES 320U /* ~14.5 ms per buffer at 22.05 kHz (sized for RAM: with both SID engines resident, 512 does not fit) */
 #define AUDIO_BUF_BYTES (AUDIO_FRAMES * 4U)
 
@@ -136,6 +152,10 @@ static uint32_t mck_override; /* calibration: raw MCKFREQ (0 = compute) */
 /* True hardware frame rate for a requested rate (see HW_RATE_NUM above). */
 static uint32_t hw_rate(void)
 {
+	if (cfg_rate > 30000U) {
+		return (cfg_rate * HW_RATE_HI_NUM + HW_RATE_HI_DEN / 2U) /
+		       HW_RATE_HI_DEN;
+	}
 	return (cfg_rate * HW_RATE_NUM + HW_RATE_DEN / 2U) / HW_RATE_DEN;
 }
 
@@ -810,9 +830,17 @@ void audio_tone_release(void)
 void audio_sid_start(void)
 {
 	/* SID always runs at its own rate so the render rate and the output
-	 * configuration stay consistent with each other */
-	if (cfg_rate != AUDIO_RATE_HZ) {
-		cfg_rate = AUDIO_RATE_HZ;
+	 * configuration stay consistent with each other. The split engine's
+	 * M33 half only renders the SID stage, which has the budget for
+	 * 44.1 kHz (and cRSID's filter tables are built for that rate); the
+	 * whole-engine modes cannot afford it and stay at 22.05 kHz. */
+	uint32_t want = (sid_player_engine_mode() == SID_ENGINE_SPLIT) ?
+			(split_rate_override ? split_rate_override :
+					       AUDIO_SPLIT_RATE_HZ) :
+			AUDIO_RATE_HZ;
+
+	if (cfg_rate != want) {
+		cfg_rate = want;
 		(void)hfxo_start();
 		hw_config_variant(cfg_lrck4, cfg_fmt32, cfg_en_high);
 		stream_start();
@@ -839,6 +867,9 @@ void audio_sid_start(void)
 		FLPR_SPLIT->econs = 0U;
 		FLPR_SPLIT->lead_min = 0xFFFFFFFFU; /* "not measured yet" */
 		FLPR_SPLIT->starved = 0U;
+		/* ~14.5 ms of look-ahead: 333 samples at 22.05 kHz, 639 at
+		 * 44.1 kHz (the blob pumps to this). */
+		FLPR_SPLIT->lead = (hw_rate() + 69U) / 69U;
 		FLPR_SHARED->cpu_load = 0U;
 		FLPR_SHARED->mode = 4U;
 		flpr_underruns = 0U;
@@ -869,6 +900,22 @@ void audio_set_mck_raw(uint32_t v)
 	stream_start();
 }
 #endif /* SIDCLOCK_DEBUG */
+
+/* Split-engine nominal rate override (0 = default). Restarts the SID
+ * stream if the split engine is active, keeping the tune position: the
+ * M33 renders at the true rate the amp plays (see hw_rate()). */
+void audio_set_split_rate(uint32_t hz)
+{
+	if (hz != 0U && (hz < 1000U || hz > 96000U)) {
+		return;
+	}
+	split_rate_override = hz;
+	if (split_mode) {
+		audio_sid_start(); /* reconfigures I2S + render rate */
+	}
+	LOG_INF("split rate: %u Hz%s", hz ? hz : AUDIO_SPLIT_RATE_HZ,
+		hz ? "" : " (default)");
+}
 
 void audio_sid_stop(void)
 {

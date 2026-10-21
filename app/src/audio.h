@@ -40,6 +40,8 @@ void audio_tone_next(void);
 
 /* Direct set: sample rate (1000..96000) / tone frequency (100..30000). */
 void audio_set_rate(uint32_t hz);
+/* Split-engine SID nominal rate override (0 = default 42.5k -> ~45.8k true). */
+void audio_set_split_rate(uint32_t hz);
 void audio_set_tone(uint32_t hz);
 
 /* Steady tone: seconds = 0 plays until audio_tone_release(). */

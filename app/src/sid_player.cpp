@@ -55,7 +55,10 @@ static bool loaded;
 static bool image_fresh; /* C64 memory is the just-loaded image */
 static volatile bool playing;
 static volatile bool paused;
-static uint32_t sid_elapsed_samples; /* emulated samples since song start */
+static uint32_t sid_elapsed_samples;
+/* Rate the engine currently renders at (the split engine runs the SID
+ * stage at 44.1 kHz to match cRSID's 44.1 kHz filter tables). */
+static uint32_t sid_rate = SID_RATE; /* rate the engine renders at (see above) */
 static volatile int8_t last_rc;
 static char sid_path[40]; /* kept for rate-change reloads */
 static unsigned char sid_hdr[SID_HDR_LEN];
@@ -247,7 +250,7 @@ static int sid_load_file(const char *path, bool hash)
 #ifdef SID_ENGINE_DUAL
 	libcsid_select_engine(sid_engine_mode == SID_ENGINE_LEGACY);
 #endif
-	libcsid_init(SID_RATE, model_arg());
+	libcsid_init((int)sid_rate, model_arg());
 	libcsid_stream_fill = sid_stream_read;
 	libcsid_load(sid_hdr, sid_file_len);
 	libcsid_stream_fill = 0;
@@ -350,6 +353,11 @@ extern "C" void sid_player_set_render_rate(uint32_t hz)
 	was_sub = subtune;
 	was_paused = paused;
 	was_elapsed = sid_elapsed_samples;
+	if (sid_rate != hz && sid_rate != 0U) {
+		/* keep the elapsed *time* when the render rate changes */
+		was_elapsed = (uint32_t)(((uint64_t)was_elapsed * hz) / sid_rate);
+	}
+	sid_rate = hz; /* sid_load_file() initialises at this rate */
 
 	if (loaded) {
 		bool quiesced = engine_quiesce();
@@ -385,7 +393,7 @@ extern "C" void sid_player_set_model(int mode)
 	model_mode = mode;
 
 	if (!loaded) {
-		libcsid_init(SID_RATE, model_arg());
+		libcsid_init((int)sid_rate, model_arg());
 		engine_resume(quiesced);
 		k_mutex_unlock(&sid_lock);
 		return;
@@ -500,7 +508,7 @@ extern "C" bool sid_player_is_paused(void)
 
 extern "C" uint32_t sid_player_elapsed_s(void)
 {
-	return sid_elapsed_samples / SID_RATE;
+	return sid_elapsed_samples / (sid_rate ? sid_rate : SID_RATE);
 }
 
 /* FLPR pipe accounting: the blob renders, but the UI clock,

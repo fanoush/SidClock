@@ -294,6 +294,36 @@ waveform generation stay cycle-exact. OSC3 reads would need the blob to
 publish the oscillator value each sample (cRSID tolerates ~22 cycles of
 delay there).
 
+## SID rate (split engine)
+
+The split engine's M33 half only renders the SID stage, which has the
+budget for a high rate; cRSID/cSID run the whole engine and cannot
+afford it, so they stay at the 22 kHz mode. cRSID's filter cutoff and
+resonance tables are generated for **44.1 kHz**, and at 23 kHz every
+cutoff lands ~0.9 octave low (measured against a real 6581R4 recording
+of ACE II: the 2nd harmonic came out 10 dB down instead of flat).
+
+- Split renders at a nominal **42.5 kHz**; the amplifier's clock runs
+  high, so the true output is **~45.9 kHz** (measured with the DMA
+  refill counter against the device clock: 45,888 Hz, and the SID render
+  rate is calibrated to it, so the tempo/pitch error is ~0.3%). The
+  filter tables are then only ~4% off instead of 2x.
+- The amp's clock error is *not* a constant ratio: 22.05 kHz request ->
+  23.0 kHz (+4.3%), 42.5 kHz -> 45.9 kHz (+7.6%), so `hw_rate()` uses a
+  separately measured high-band factor.
+- Split buffer look-ahead doubles in samples (320 -> ~640, cycle ring
+  1280 entries; the register copy moved to +0xC00) so both modes keep
+  the same ~14.5 ms of buffering.
+- `splitrate [HZ]` over BLE (`0x36` + u16 LE, 0 = default) switches the
+  split nominal live, at the same tune position (one ~20 ms buffer gap).
+  `splitrate 22050` gives the old 22 kHz mode for A/B.
+
+Costs at 44.1k (measured, Arkanoid): M33 SID stage 2.5-3 ms per 320
+samples = ~35-40% of the core (vs ~20% at 22 kHz); the FLPR half is
+unchanged (it emulates C64 cycles, not samples). cRSID/cSID stay at
+22 kHz because at 44.1k the CPU part alone plus the doubled SID part
+would exceed realtime.
+
 ## Power
 
 A started VPR costs about **0.5 mA**, and that cost does not go away by

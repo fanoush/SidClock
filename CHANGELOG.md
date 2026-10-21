@@ -59,6 +59,16 @@
   not the file name, so shortened/renamed uploads and the ~3,700
   same-name HVSC files are not confused.
 
+**New**
+
+- The split engine runs the SID stage at a high rate (nominal 42.5 kHz,
+  ~45.9 kHz true after the amplifier's clock error), because cRSID's
+  filter tables are built for 44.1 kHz - at the old 22 kHz mode every
+  cutoff was ~0.9 octave low. The M33's SID half costs ~35-40% of the
+  core instead of ~20%, the FLPR half is unchanged. cRSID/cSID cannot
+  afford it and stay at 22 kHz. `splitrate [HZ]` over BLE (`0x36`)
+  switches the split rate live, at the same tune position, for A/B.
+
 **Fixes**
 
 - Subtune switching in cRSID and the split engine: Afterburner's second

@@ -1726,6 +1726,7 @@ static ssize_t ble_dbg_write(struct bt_conn *conn,
 	      (len == 2U && p[0] == 0x30U) ||
 	      (len == 3U && p[0] == 0x33U) ||
 	      (len == 2U && p[0] == 0x35U) ||
+	      (len == 3U && p[0] == 0x36U) ||
 	      (len >= 2U && len <= SID_CMD_NAME_MAX + 1U && p[0] == 0x11U) ||
 	      (len >= 2U && len <= SID_CMD_NAME_MAX + 1U && p[0] == 0x16U) ||
 	      (len == 2U && p[0] >= 0x18U && p[0] <= 0x1CU) ||
@@ -1853,6 +1854,16 @@ static ssize_t ble_dbg_write(struct bt_conn *conn,
 		}
 		break;
 #endif
+	case 0x36:
+		/* Split-engine SID nominal rate (u16 LE, 0 = default 42.5k
+		 * which the amp plays at ~45.8k). Not persisted; restarts
+		 * the SID stream at the same tune position. For A/B of
+		 * 22.05k vs the high rate on the device. */
+		if (len != 3U) {
+			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+		}
+		audio_set_split_rate((uint32_t)p[1] | ((uint32_t)p[2] << 8));
+		break;
 	case 0x35:
 		/* SID waveform quality: 0 = light (default), 1 = oversampled
 		 * (HQ). Not persisted; HQ costs ~4.6x the SID stage (41 us per

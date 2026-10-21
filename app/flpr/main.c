@@ -40,20 +40,25 @@ static inline uint32_t minstret(void)
 /* Split mode: run the C64/CPU ahead of the M33's SID rendering. Each
  * sample's instruction cycles go into the shared ring and every SID
  * register write becomes a timestamped event (see C64.c). */
-#define SPLIT_LEAD 320U /* samples of lookahead the M33 keeps buffered */
-
 /* Returns the cycles spent producing samples, 0 when the lead was already
  * full: charging the empty calls would make the spin between buffers read
  * as ~100% load. No writable globals allowed in the blob (.bss check).
  *
  * In SRAM with the interpreter: this is where cRSID_generateSample() is
- * inlined, i.e. called once per audio frame. */
+ * inlined, i.e. called once per audio frame. The look-ahead target comes
+ * from the M33 (FLPR_SPLIT->lead): 320 samples at 22.05 kHz, 640 at
+ * 44.1 kHz, i.e. the same ~14.5 ms of buffering in both modes. */
 static __attribute__((section(".flprhot"), noinline)) uint32_t pump_split(void)
 {
 	uint32_t c0 = mcycle();
 	uint32_t n = 0U;
+	uint32_t lead = FLPR_SPLIT->lead;
 
-	while ((uint32_t)(FLPR_SPLIT->prod - FLPR_SPLIT->cons) < SPLIT_LEAD) {
+	if (lead == 0U || lead > (FLPR_SID_RING - 320U)) {
+		lead = 320U; /* before the M33 sets the target */
+	}
+
+	while ((uint32_t)(FLPR_SPLIT->prod - FLPR_SPLIT->cons) < lead) {
 		cRSID_generateSample(); /* CPU only in split mode: no SID, no audio */
 		n++;
 	}
