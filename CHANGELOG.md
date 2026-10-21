@@ -61,6 +61,16 @@
 
 **Fixes**
 
+- Subtune switching in cRSID and the split engine: Afterburner's second
+  and later subtunes played on cSID but went silent/stuck on cRSID
+  (and therefore split). cRSID only resets the CPU on a subtune change
+  and keeps RAM as the previous subtune left it, while RSID tunes like
+  Afterburner execute from and overwrite their own loaded image - so the
+  next subtune started from a corrupted image. The player now re-streams
+  the payload from flash before a subtune switch (the MD5 pass is
+  skipped and a just-loaded file is used as-is, so a fresh load is not
+  read twice), which also matches cSID's behaviour. Verified on the
+  device for subtunes 1-8 on cRSID, split and cSID.
 - Split-engine fidelity: Leviathan played thin and gapped in split mode
   while cRSID was fine. The cause was a gate-off/gate-on
   pair (hard restart) inside one sample collapsed into a single envelope

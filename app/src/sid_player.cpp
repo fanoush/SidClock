@@ -52,6 +52,7 @@ LOG_MODULE_REGISTER(sid_player, LOG_LEVEL_INF);
 #define SID_HDR_LEN 128
 
 static bool loaded;
+static bool image_fresh; /* C64 memory is the just-loaded image */
 static volatile bool playing;
 static volatile bool paused;
 static uint32_t sid_elapsed_samples; /* emulated samples since song start */
@@ -190,7 +191,7 @@ static int sid_stream_read(unsigned char *dst, int max)
 }
 
 /* Actual load body - callers must hold sid_lock. */
-static int sid_load_file(const char *path)
+static int sid_load_file(const char *path, bool hash)
 {
 	struct fs_dirent st;
 	off_t sz;
@@ -254,56 +255,63 @@ static int sid_load_file(const char *path)
 	/* Hash the whole file for the BLE host. The context is stack-local
 	 * (~96 B), only the 4-byte prefix is kept; the pass is sequential
 	 * and bounded by SID_MAX_FILE. A failure just leaves the prefix at
-	 * zero, i.e. "unknown", and the host falls back to name matching. */
-	sid_id_ok = false;
-	memset(sid_id, 0, sizeof(sid_id));
-	if (fs_seek(&sid_pf, 0, FS_SEEK_SET) == 0) {
-		struct md5_ctx ctx;
-		uint8_t chunk[64];
-		uint8_t digest[16];
-		off_t left = sz;
+	 * zero, i.e. "unknown", and the host falls back to name matching.
+	 * Skipped when the file is only re-streamed for a subtune switch. */
+	if (hash) {
+		sid_id_ok = false;
+		memset(sid_id, 0, sizeof(sid_id));
+		if (fs_seek(&sid_pf, 0, FS_SEEK_SET) == 0) {
+			struct md5_ctx ctx;
+			uint8_t chunk[64];
+			uint8_t digest[16];
+			off_t left = sz;
 
-		md5_init(&ctx);
-		while (left > 0) {
-			size_t want = (left > (off_t)sizeof(chunk)) ?
-					      sizeof(chunk) : (size_t)left;
+			md5_init(&ctx);
+			while (left > 0) {
+				size_t want = (left > (off_t)sizeof(chunk)) ?
+						      sizeof(chunk) :
+						      (size_t)left;
 
-			rd = fs_read(&sid_pf, chunk, want);
-			if (rd <= 0) {
-				break;
+				rd = fs_read(&sid_pf, chunk, want);
+				if (rd <= 0) {
+					break;
+				}
+				md5_update(&ctx, chunk, (size_t)rd);
+				left -= rd;
 			}
-			md5_update(&ctx, chunk, (size_t)rd);
-			left -= rd;
-		}
-		if (left == 0) {
-			md5_final(&ctx, digest);
-			memcpy(sid_id, digest, sizeof(sid_id));
-			sid_id_ok = true;
+			if (left == 0) {
+				md5_final(&ctx, digest);
+				memcpy(sid_id, digest, sizeof(sid_id));
+				sid_id_ok = true;
+			} else {
+				LOG_WRN("SID id hash failed: %s", path);
+			}
 		} else {
-			LOG_WRN("SID id hash failed: %s", path);
+			LOG_WRN("SID id seek failed: %s", path);
 		}
-	} else {
-		LOG_WRN("SID id seek failed: %s", path);
 	}
 	fs_close(&sid_pf);
 
 	snprintf(sid_path, sizeof(sid_path), "%s", path);
+	image_fresh = true; /* C64 memory still holds the just-loaded image */
 	loaded = true;
 	playing = false;
 	paused = false;
 	sid_elapsed_samples = 0;
 	last_rc = 0;
 #ifdef SID_ENGINE_DUAL
-	{
+	if (hash) {
 		const char *base = strrchr(path, '/');
 
 		dbg_record_tune(base != NULL ? base + 1 : path,
 				sid_engine_mode);
 	}
 #endif
-	LOG_INF("SID: %s (%d B) \"%s\" by \"%s\", %u song(s)", path, (int)sz,
-		libcsid_gettitle(), libcsid_getauthor(),
-		libcsid_get_total_tunes_number());
+	if (hash) {
+		LOG_INF("SID: %s (%d B) \"%s\" by \"%s\", %u song(s)", path,
+			(int)sz, libcsid_gettitle(), libcsid_getauthor(),
+			libcsid_get_total_tunes_number());
+	}
 	return 0;
 }
 
@@ -316,7 +324,7 @@ extern "C" int sid_player_load(const char *path)
 	/* Loading writes C64 memory: stop the blob first. Rendering stays
 	 * off until sid_player_play()/audio_sid_start(). */
 	quiesced = engine_quiesce();
-	rc = sid_load_file(path);
+	rc = sid_load_file(path, true);
 	ARG_UNUSED(quiesced);
 	k_mutex_unlock(&sid_lock);
 	return rc;
@@ -346,7 +354,7 @@ extern "C" void sid_player_set_render_rate(uint32_t hz)
 	if (loaded) {
 		bool quiesced = engine_quiesce();
 
-		sid_load_file(sid_path);
+		sid_load_file(sid_path, false);
 		playing = was_playing;
 		paused = was_paused;
 		sid_elapsed_samples = was_elapsed;
@@ -388,7 +396,7 @@ extern "C" void sid_player_set_model(int mode)
 	was_paused = paused;
 	was_elapsed = sid_elapsed_samples;
 
-	sid_load_file(sid_path);
+	sid_load_file(sid_path, false);
 	playing = was_playing;
 	paused = was_paused;
 	sid_elapsed_samples = was_elapsed;
@@ -416,6 +424,17 @@ extern "C" void sid_player_play(int song)
 	k_mutex_lock(&sid_lock, K_FOREVER);
 	quiesced = engine_quiesce();
 	if (loaded) {
+		/* cRSID_initSIDtune() resets the CPU but keeps RAM as the
+		 * previous subtune left it. RSID tunes (Afterburner) execute
+		 * from and overwrite their own loaded image, so a subtune
+		 * switch without a fresh image leaves them silent or stuck.
+		 * Re-stream the payload from flash first (the MD5 pass is
+		 * skipped - the file did not change). A caller that just
+		 * loaded the file (`sid_step`) skips this: image_fresh. */
+		if (!image_fresh) {
+			(void)sid_load_file(sid_path, false);
+		}
+		image_fresh = false;
 		libcsid_play(song);
 		playing = true;
 		paused = false;
@@ -440,6 +459,7 @@ extern "C" void sid_player_play_default(void)
 		song = 0;
 	}
 	libcsid_play(song);
+	image_fresh = false;
 	playing = true;
 	paused = false;
 	sid_elapsed_samples = 0;
