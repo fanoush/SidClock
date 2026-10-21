@@ -87,6 +87,11 @@ LOG_MODULE_REGISTER(audio, LOG_LEVEL_INF);
  * (generated for 44.1 kHz) match. The hardware runs ~4.3% high, so ask
  * for 42280 to render at ~44100 (see HW_RATE_NUM/DEN). */
 #define AUDIO_SPLIT_RATE_HZ 42500U
+/* 2SID tunes: 36 kHz nominal -> ~38.8 kHz true, which keeps the SID stage
+ * at ~64% of the M33 instead of 69% at the 1SID rate (measured) while
+ * still being close to the 44.1 kHz filter tables. 3SID+ stays at 22 kHz
+ * (~48%): the high rates would leave no room for the UI. */
+#define AUDIO_SPLIT_RATE_2SID_HZ 34000U
 /* Runtime override for the split nominal rate (BLE 0x36): 0 = default.
  * Not persisted; lets a host A/B the SID rate on the device. */
 static uint32_t split_rate_override;
@@ -834,10 +839,25 @@ void audio_sid_start(void)
 	 * M33 half only renders the SID stage, which has the budget for
 	 * 44.1 kHz (and cRSID's filter tables are built for that rate); the
 	 * whole-engine modes cannot afford it and stay at 22.05 kHz. */
-	uint32_t want = (sid_player_engine_mode() == SID_ENGINE_SPLIT) ?
-			(split_rate_override ? split_rate_override :
-					       AUDIO_SPLIT_RATE_HZ) :
-			AUDIO_RATE_HZ;
+	uint32_t want = AUDIO_RATE_HZ;
+
+	if (sid_player_engine_mode() == SID_ENGINE_SPLIT) {
+		/* Rate follows the SID count (measured M33 SID-stage load):
+		 * 1 SID 34% at 45.9 kHz, 2 SID 64% at 38.8 kHz, 3 SID 91% at
+		 * 45.9 kHz (underruns) -> 22 kHz. An explicit override still
+		 * applies to any tune, for experiments. */
+		int chips = sid_player_sid_count();
+
+		if (split_rate_override) {
+			want = split_rate_override;
+		} else if (chips <= 1) {
+			want = AUDIO_SPLIT_RATE_HZ;
+		} else if (chips == 2) {
+			want = AUDIO_SPLIT_RATE_2SID_HZ;
+		} else {
+			want = AUDIO_RATE_HZ;
+		}
+	}
 
 	if (cfg_rate != want) {
 		cfg_rate = want;

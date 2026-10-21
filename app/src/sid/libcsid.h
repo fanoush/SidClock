@@ -27,6 +27,7 @@ extern const char *libcsid_getinfo();
 extern const char *libcsid_gettitle();
 extern uint8_t libcsid_get_total_tunes_number();
 extern uint8_t libcsid_get_default_tune_number();
+extern int libcsid_sid_count(void); /* SID chips of the loaded tune (1..4) */
 
 extern void libcsid_render(unsigned short *output, int numsamples);
 

@@ -540,6 +540,11 @@ extern "C" void sid_player_render(int16_t *dst, int frames)
 	k_mutex_unlock(&sid_lock);
 }
 
+extern "C" int sid_player_sid_count(void)
+{
+	return loaded ? libcsid_sid_count() : 1;
+}
+
 extern "C" int sid_player_songs(void)
 {
 	return loaded ? libcsid_get_total_tunes_number() : 0;

@@ -67,7 +67,10 @@
   cutoff was ~0.9 octave low. The M33's SID half costs ~35-40% of the
   core instead of ~20%, the FLPR half is unchanged. cRSID/cSID cannot
   afford it and stay at 22 kHz. `splitrate [HZ]` over BLE (`0x36`)
-  switches the split rate live, at the same tune position, for A/B.
+  switches the split rate live, at the same tune position, for A/B. The
+  default follows the SID count (1 SID 42.5 kHz, 2 SID 34 kHz, 3 SID
+  22 kHz) because the M33 SID-stage cost scales with it (34% / 55% /
+  50%; 3 SID at the 1SID rate was 91% and underran).
 
 **Fixes**
 

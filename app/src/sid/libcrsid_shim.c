@@ -27,6 +27,9 @@
 
 #include "libcsid.h"
 #include "crsid/libcRSID.h"
+#include "crsid/C64/C64.h"
+
+extern cRSID_C64instance cRSID_C64;
 
 #ifdef SID_ENGINE_DUAL
 /* Renamed legacy core API (see COMPILE_DEFINITIONS on libcsidlight.cpp). */
@@ -217,6 +220,18 @@ void libcsid_play(int tune_index)
 		refresh_models();
 		cRSID_playSIDtune(); /* initSIDtune leaves Paused set */
 	}
+}
+
+/* Number of SID chips the loaded tune uses (1..4): the split engine only
+ * affords the high SID rate for one chip. */
+int libcsid_sid_count(void)
+{
+#ifdef SID_ENGINE_DUAL
+	if (use_legacy) {
+		return 1;
+	}
+#endif
+	return cRSID_C64.SIDchipCount;
 }
 
 const char *libcsid_getauthor(void)

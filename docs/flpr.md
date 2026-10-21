@@ -317,6 +317,24 @@ of ACE II: the 2nd harmonic came out 10 dB down instead of flat).
 - `splitrate [HZ]` over BLE (`0x36` + u16 LE, 0 = default) switches the
   split nominal live, at the same tune position (one ~20 ms buffer gap).
   `splitrate 22050` gives the old 22 kHz mode for A/B.
+- The default follows the SID count, because the SID stage cost scales
+  with it (measured M33 share): 1 SID 42.5 kHz (34%), 2 SID 34 kHz
+  (~55%), 3 SID 22 kHz (~50%). 3 SID at the 1SID rate was 91% and
+  underran.
+
+**Rate vs sound quality.** Higher is not uniformly better here. cRSID's
+filter tables are built for 44.1 kHz and the cutoff coefficient is
+rate-dependent (`2*sin(pi*fc/fs)`), so with a fixed table the cutoff
+scales with the render rate: below 44.1 kHz every filter is too dark
+(at 23 kHz the ACE II opening's 2nd harmonic is 10 dB low against the
+real 6581R4), near 44.1 kHz it is exact, and above it the filters get
+progressively too open. Pre-scaling the cutoff register at low rates was
+tried and does not recover it (h2 only -10.9 -> -9.5 dB) because the
+6581 register->cutoff curve is nonlinear; per-rate tables would be
+needed. Aliasing, on the other hand, does improve with rate (Nyquist
+11.5 kHz at 23 kHz vs 23 kHz at 46 kHz). Net: 44.1 kHz is the sweet
+spot, and the split rate ladder keeps 2SID at 34 kHz (~18% dark
+filters) as a CPU compromise, 3SID at 22 kHz.
 
 Costs at 44.1k (measured, Arkanoid): M33 SID stage 2.5-3 ms per 320
 samples = ~35-40% of the core (vs ~20% at 22 kHz); the FLPR half is
