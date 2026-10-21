@@ -28,9 +28,16 @@ static INLINE void storeReg (void) {
 }*/
 
 static INLINE unsigned char rd (FASTVAR unsigned short address) {
- //OPT: pages other than $D000-$DFFF always read plain RAM (slim banking);
- //skip the full bank-pointer path for them (the common case).
- if ( MOSTLY ((address & 0xF000) != 0xD000) ) return cRSID_C64.RAMbank[address];
+ //OPT: pages other than $D000-$DFFF and the ROM areas ($A000-$BFFF,
+ //$E000-$FFFF) always read plain RAM (slim banking); $A000 and above go
+ //through the bank-pointer path, which returns the ROM image when $01 has
+ //HIRAM/LORAM set (RSID tunes that relocate code under the KERNAL depend on
+ //it: Ghostbusters keeps sample data at $FF3C.. and still needs the KERNAL
+ //IRQ entry at $FF48 while the ROM is banked in).
+ if ( MOSTLY ((address & 0xF000) != 0xD000) ) {
+  if ( RARELY (address >= 0xA000) ) return cRSID_readMemory(address);
+  return cRSID_C64.RAMbank[address];
+ }
  {
   FASTVAR unsigned char value;
   value = *cRSID_getMemReadPtr(address);

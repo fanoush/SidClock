@@ -4,6 +4,16 @@
 
 **Fixes**
 
+- RSID tunes that relocate their player into the RAM *under* the KERNAL
+  played the intro sample and then went silent (Ghostbusters by Russell
+  Lieblich): cRSID's memory model always read the RAM copy under the
+  ROM, so when the tune banked the KERNAL back in, the IRQ vector at
+  `$FFFE` pointed at `$FF48`, which held the tune's sample data instead
+  of the KERNAL IRQ entry, and the CPU ran into the sample bytes on the
+  first raster IRQ. Reads of `$E000..$FFFF` (and `$A000..$BFFF`) now
+  honour the HIRAM/LORAM bits of `$01`; writes still always land in the
+  RAM underneath, and the ROM stub content lives in a small read-only
+  image instead of that RAM copy.
 - A tune loaded after another one started with the previous tune's SID
   output-stage state: `cRSID_initSIDchip()` reset the voices but not
   `Output`, `Level`, `Digi` or the filter history, so the first samples

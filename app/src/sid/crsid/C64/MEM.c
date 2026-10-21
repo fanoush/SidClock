@@ -14,17 +14,62 @@ void cRSID_generateMemoryBankPointers () {
 }
 
 
+//The KERNAL/BASIC ROM areas are read-only: on the real C64 a write to
+//$E000..$FFFF or $A000..$BFFF always lands in the RAM *under* the ROM, and
+//the CPU only sees it when $01 banks the ROM out. The slim single-memory
+//model used to read that RAM copy unconditionally, which broke RSID tunes
+//that relocate code into the RAM under the KERNAL and then bank the ROM
+//back in: Ghostbusters keeps its sample data at $FF3C.. and the IRQ vector
+//at $FFFE/$FFFF points to the KERNAL's $FF48 entry, which was then fetched
+//from the sample-data bytes and crashed the CPU on the first raster IRQ.
+//Only the stub content cRSID provides is needed here (the same bytes
+//cRSID_setROMcontent puts into the RAM copy), so no 8 KB ROM image is kept:
+//plain bytes point at a shared constant.
+static const unsigned char cRSID_ROMbyte_RTS = 0x60;
+static const unsigned char cRSID_ROMbyte_NOP = 0xEA;
+static const unsigned char cRSID_ROMirqReturnCode[9] = {0xAD,0x0D,0xDC,0x68,0xA8,0x68,0xAA,0x68,0x40};
+static const unsigned char cRSID_ROMnmiStartCode[5] = {0x78,0x6C,0x18,0x03,0x40};
+static const unsigned char cRSID_ROMirqBrkStartCode[19] = {0x48,0x8A,0x48,0x98,0x48,0xBA,0xBD,0x04,0x01,0x29,0x10,0xEA,0xEA,0xEA,0xEA,0xEA,0x6C,0x14,0x03};
+static const unsigned char cRSID_ROMvectors[6] = {0x43,0xFE,0x00,0x00,0x48,0xFF}; //$FFFA..$FFFF: NMI, RESET, IRQ
+
+static INLINE unsigned char* cRSID_getROMReadPtr (FASTVAR unsigned short address) {
+ unsigned char* p = (unsigned char*) &cRSID_ROMbyte_RTS;
+ if ( RARELY (address >= 0xFFFA) ) p = (unsigned char*) &cRSID_ROMvectors[address-0xFFFA];
+ else if ( RARELY (address >= 0xFF48 && address < 0xFF48 + (int)sizeof(cRSID_ROMirqBrkStartCode)) )
+  p = (unsigned char*) &cRSID_ROMirqBrkStartCode[address-0xFF48];
+ else if ( RARELY (address >= 0xFE43 && address < 0xFE43 + (int)sizeof(cRSID_ROMnmiStartCode)) )
+  p = (unsigned char*) &cRSID_ROMnmiStartCode[address-0xFE43];
+ else if ( RARELY (address >= 0xEA7E && address < 0xEA7E + (int)sizeof(cRSID_ROMirqReturnCode)) )
+  p = (unsigned char*) &cRSID_ROMirqReturnCode[address-0xEA7E];
+ else if ( RARELY (address >= 0xEA31 && address < 0xEA7E) ) p = (unsigned char*) &cRSID_ROMbyte_NOP;
+ return p;
+}
+
+#if defined(__GNUC__)
+#define CRSID_NOINLINE __attribute__((noinline))
+#else
+#define CRSID_NOINLINE
+#endif
+
 static INLINE unsigned char* cRSID_getMemReadPtr (FASTVAR unsigned short address) {
  //cRSID_C64instance* const C64 = &cRSID_C64; //for faster (?) operation we use a global object as memory
- //Banking identical to the old MemoryBankPointersRD table: D-page with IO
- //enabled goes to the (4KB, & 0xFFF-indexed) IO banks, everything else to
- //RAMbank. (Old ROMbanks selection now reads the RAM copy holding the ROM
- //stubs, like the single-memory model of cSID-light.)
  if ( MOSTLY (cRSID_C64.RAMbank[1] & 3) && MOSTLY (0xD000 <= address) && MOSTLY (address < 0xE000) ) {
   if ( MOSTLY (address < 0xD400 || 0xD419 <= address) ) return &( cRSID_C64.IObankRD[address & 0xFFF] );
   else return &cRSID_C64.IObankWR[address & 0xFFF]; //emulate bitfading aka SID-read of last written reg (e.g. Lift Off ROR $D400,x)
  }
+ if ( RARELY (address >= 0xE000) ) { //KERNAL ROM when HIRAM is set
+  if ( cRSID_C64.RAMbank[1] & 2 ) return cRSID_getROMReadPtr(address);
+ }
+ else if ( RARELY (0xA000 <= address && address < 0xC000) ) { //BASIC ROM when LORAM and HIRAM are set
+  if ( (cRSID_C64.RAMbank[1] & 3) == 3 ) return (unsigned char*) &cRSID_ROMbyte_RTS;
+ }
  return &cRSID_C64.RAMbank[address];
+}
+
+//Out-of-line so the ROM-banking check does not get inlined into every CPU
+//instruction fetch (the FLPR blob's SRAM window is tight).
+static CRSID_NOINLINE unsigned char cRSID_readMemory (FASTVAR unsigned short address) {
+ return *cRSID_getMemReadPtr(address);
 }
  /*if (address<0xA000) return &cRSID_C64.RAMbank[address];
  else if ( 0xD000<=address && address<0xE000 && (cRSID_C64.RAMbank[1]&3) ) {

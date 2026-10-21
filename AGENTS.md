@@ -145,6 +145,14 @@ Do not break these without discussing it in the PR/commit:
   `&uart20 { status = "disabled"; }`.
 - The panel needs a full re-init (`gc9307_panel_state(dev, 1)`) after
   sleep-in, including re-applying brightness.
+- The cRSID memory model honours ROM banking on *reads*: `$E000+` reads
+  the KERNAL stub and `$A000-$BFFF` the BASIC stub when `$01` has
+  HIRAM/LORAM set, while writes always land in the RAM underneath.
+  RSID tunes that relocate code under the KERNAL and bank the ROM back
+  in (Ghostbusters) depend on it. In the FLPR blob the `.text` section
+  must stay 16-byte aligned (linker.ld) because `startup.S` copies
+  `.text_hot` word-by-word from `LOADADDR(.text)+SIZEOF(.text)`; a
+  1-byte constant there makes that address unaligned and the copy traps.
 - `image state-read` version only changes when `VERSION` in `app/build.sh`
   is bumped.
 - OTA uploads never arm anything: Zephyr's `image upload` writes slot 1
