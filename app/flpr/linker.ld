@@ -41,6 +41,11 @@ SECTIONS {
 		*(.data.rel.ro .data.rel.ro.*)
 		*(.eh_frame .eh_frame.*)
 		*(.init_array .init_array.*)
+		/* startup.S copies the hot section word-by-word from
+		 * LOADADDR(.text)+SIZEOF(.text); if .text ends odd (1-byte
+		 * constants do) that load address is unaligned and the lw
+		 * traps on this core. */
+		. = ALIGN(16);
 	} > ROM
 
 	/* Hot functions copied to SRAM by startup.S before main. The load
