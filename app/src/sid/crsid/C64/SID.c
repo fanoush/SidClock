@@ -52,8 +52,30 @@ void cRSID_initSIDchip (cRSID_SIDinstance* SID) {
   SID->PrevWavGenOut[Channel] = 0; SID->PrevWavData[Channel] = 0;
   SID->PrevSounDemonDigiWF[Channel] = 0x00;
  }
+#ifdef CRSID_SPLIT_SID_SIDE
+ /* Split engine: the chip's SID registers live in the shared copy that
+  * BasePtr points at, which the IO-bank clear below cannot reach. Without
+  * this a tune loaded after another one starts with the previous tune's
+  * register file (audible as a wrong first pattern - Mikie again). */
+ if ( cRSID_splitMode ) {
+  volatile unsigned char* regs = (volatile unsigned char*)FLPR_SID_REGCOPY +
+                                 (unsigned)(SID - cRSID_C64.SID - 1) * 32U;
+  int i;
+
+  for (i = 0; i < 32; i++) regs[i] = 0;
+ }
+#endif
  SID->SyncSourceMSBrise = 0; SID->RingSourceMSB = 0;
+ /* Output stage too: without this a new tune starts from the previous
+  * tune's last level / digi offset / filter history. Mikie then played
+  * its opening with a DC offset and a different echo pattern, and only an
+  * engine switch (which recreated the chips) cleared it. */
  SID->PrevLowPass = SID->PrevBandPass = SID->PrevVolume = 0;
+ SID->NonFiltedSample = 0; SID->FilterInputSample = 0;
+ SID->PrevNonFiltedSample = 0; SID->PrevFilterInputSample = 0;
+ SID->Digi = 0; SID->Output = 0; SID->Level = 0;
+ SID->Volume = 0; SID->Resonance = 0; SID->Cutoff = 0;
+ SID->HighPassBit = 0; SID->BandPassBit = 0; SID->LowPassBit = 0;
 }
 
 

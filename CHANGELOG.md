@@ -4,6 +4,18 @@
 
 **Fixes**
 
+- A tune loaded after another one started with the previous tune's SID
+  output-stage state: `cRSID_initSIDchip()` reset the voices but not
+  `Output`, `Level`, `Digi` or the filter history, so the first samples
+  carried a DC offset. Mikie showed it as a wrong opening (the echo
+  pattern collapsing, a voice sounding delayed or missing) until an
+  engine switch recreated the chips - stopping and replaying did not
+  help because it takes the same path. The output stage is now cleared
+  with the rest of the chip, and in split mode the shared SID register
+  copy is cleared on chip init too (it used to be cleared only on an
+  engine switch, so the first pattern still depended on the previous
+  tune). The host harness renders Mikie bit-identically whether it is
+  loaded first or after another tune, in cRSID and in split.
 - The `/home` listing walks the directory instead of keeping a 2 KB RAM
   index of every name. The index only worked while the library fit
   (~50 tunes with sidecars); past that it overflowed, was disabled, and
