@@ -165,7 +165,14 @@ and was being fetched at ~3 cycles/instruction. Moving it into SRAM cut
 its own cost by ~2.8x and the whole blob half by ~40% (Arkanoid 98% ->
 63%, Game Over 83% -> 49%, ACE II 17% -> 11%, Last Ninja 2 ~10%).
 
-Rule: **anything executed per audio frame belongs in `.flprhot`.** The
+Rule: **anything executed per audio frame belongs in `.flprhot`** - and so
+does the idle loop. Between buffers `main()` spins on the shared control
+word; from RRAM that spin fetched ~8 instructions every ~24 cycles (a few
+hundred MB/s of reads) from the same memory the M33 fetches its code
+from, the reverse of the contention above. It lives in SRAM too now, so
+after `_start` (612 B, runs once) the blob generates no code fetches from
+RRAM at all; only its data accesses to the shared structs remain.
+ The
 section is copied to FLPR SRAM by `startup.S` before `main`, the build
 audit caps it to the window, and `nm` should show every engine function
 at 0x2002F000+:

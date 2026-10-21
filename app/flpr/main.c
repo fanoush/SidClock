@@ -96,7 +96,11 @@ static void pump_alu(void)
 	FLPR_SHARED->bench_done = 1U;
 }
 
-int main(void)
+/* In SRAM as well: between buffers the loop spins on the shared control
+ * word, and fetching that loop from RRAM would keep the VPR on the same
+ * memory the M33 fetches its code from. The blob then generates no RRAM
+ * traffic at all (startup runs once and is the only XIP left). */
+__attribute__((section(".flprhot"), noinline)) int main(void)
 {
 	counters_enable();
 	FLPR_SHARED->heartbeat = 0u;
