@@ -322,19 +322,35 @@ of ACE II: the 2nd harmonic came out 10 dB down instead of flat).
   (~55%), 3 SID 22 kHz (~50%). 3 SID at the 1SID rate was 91% and
   underran.
 
-**Rate vs sound quality.** Higher is not uniformly better here. cRSID's
-filter tables are built for 44.1 kHz and the cutoff coefficient is
-rate-dependent (`2*sin(pi*fc/fs)`), so with a fixed table the cutoff
-scales with the render rate: below 44.1 kHz every filter is too dark
-(at 23 kHz the ACE II opening's 2nd harmonic is 10 dB low against the
-real 6581R4), near 44.1 kHz it is exact, and above it the filters get
-progressively too open. Pre-scaling the cutoff register at low rates was
-tried and does not recover it (h2 only -10.9 -> -9.5 dB) because the
-6581 register->cutoff curve is nonlinear; per-rate tables would be
-needed. Aliasing, on the other hand, does improve with rate (Nyquist
-11.5 kHz at 23 kHz vs 23 kHz at 46 kHz). Net: 44.1 kHz is the sweet
-spot, and the split rate ladder keeps 2SID at 34 kHz (~18% dark
-filters) as a CPU compromise, 3SID at 22 kHz.
+**Rate vs sound quality.** cRSID's cutoff tables are rate-dependent
+(the coefficient is `2*sin(pi*fc/fs)`), so a single 44.1 kHz table puts
+every cutoff at `rate/44100` of its frequency: at 23 kHz the filters
+were ~0.52x (ACE II's opening 2nd harmonic 10 dB low against a real
+6581R4). The tables are now generated for the three rates actually
+used - 23,000, 36,672 and 45,751 Hz - and selected by
+`cRSID_C64.SampleRate`, which fixes the filter response at *every* rate,
+including the plain cRSID/cSID 23 kHz mode. Measured on ACE II's opening
+(harmonics re. h1 vs the real chip):
+
+| rate | h2 | h3 |
+|---|---|---|
+| real 6581R4 | -0.8 | -6.3 |
+| 23.0 kHz (old table) | **-10.9** | **-18.0** |
+| 23.0 kHz (rate table) | -0.7 | -7.8 |
+| 36.7 kHz (rate table) | -0.6 | -7.7 |
+| 45.8 kHz (rate table) | -0.6 | -7.8 |
+
+The rate tables are clamped to the 44.1 kHz table's maximum coefficient:
+the SVF's `Tmp*Cutoff` product overflows (and the filter goes unstable,
+audible as static) if the coefficient grows past the range upstream
+validated - which is exactly what an unclamped rescale does below
+44.1 kHz.
+
+So higher is now better in both senses (correct filters plus more
+Nyquist / less aliasing); the limit is CPU, hence the per-SID-count
+ladder. The tables cost ~20 KB of RRAM in the M33 image, which is
+cheap; the oversampled (HQ) tables are still 44.1 kHz-based and are
+only used by the HQ A/B mode.
 
 Costs at 44.1k (measured, Arkanoid): M33 SID stage 2.5-3 ms per 320
 samples = ~35-40% of the core (vs ~20% at 22 kHz); the FLPR half is

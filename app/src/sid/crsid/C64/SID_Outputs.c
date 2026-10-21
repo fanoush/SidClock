@@ -18,6 +18,17 @@ static INLINE int cRSID_emulateSIDoutputStage (FASTVAR cRSID_SIDinstance *const 
  FASTVAR unsigned char FilterSwitchReso, VolumeBand;
  FASTVAR int Tmp, NonFilted, FilterInput, Cutoff, Resonance, FilterOutput, Output;
 
+ //Cutoff tables are per render rate (2*sin(pi*fc/fs)): pick the one generated
+ //for the rate actually in use, otherwise every cutoff lands at rate/44100 of
+ //its frequency (too dark below 44.1k, too open above).
+ const unsigned short* CutoffTable = (SID->ChipModel == 8580) ?
+  ((cRSID_C64.SampleRate <= 25000U) ? cRSID_CutoffMul8580_23000Hz :
+   (cRSID_C64.SampleRate <= 40000U) ? cRSID_CutoffMul8580_36672Hz :
+				      cRSID_CutoffMul8580_45751Hz) :
+  ((cRSID_C64.SampleRate <= 25000U) ? cRSID_CutoffMul6581_23000Hz :
+   (cRSID_C64.SampleRate <= 40000U) ? cRSID_CutoffMul6581_36672Hz :
+				      cRSID_CutoffMul6581_45751Hz);
+
  //cause immediate stopping in audio-buffer thread, so SID-baseaddress changes during tune-switching won't give segfaults
  //if ( RARELY (cRSID.Paused || SID->BasePtr == NULL) ) return 0; //avoid some segfaults when NULL-ing SID4
 
@@ -31,13 +42,13 @@ static INLINE int cRSID_emulateSIDoutputStage (FASTVAR cRSID_SIDinstance *const 
  FilterOutput=0;
  //if ( CALMLY (!nofilter) ) {
   if ( MOSTLY (SID->ChipModel == 8580) ) {
-   Cutoff = cRSID_CutoffMul8580_44100Hz[Cutoff];
+   Cutoff = CutoffTable[Cutoff];
    Resonance = cRSID_Resonances8580[Resonance];
   }
   else { //6581
    Cutoff += (FilterInput*105)>>16; //MOSFET-VCR control-voltage calculation (resistance-modulation aka 6581 filter distortion) emulation
     if ( RARELY (Cutoff > SID_CUTOFF_MAX) ) Cutoff=SID_CUTOFF_MAX; else if ( RARELY(Cutoff<0) ) Cutoff=0;  //can really go below 0 when FilterInput is negative
-   Cutoff = cRSID_CutoffMul6581_44100Hz[Cutoff];
+   Cutoff = CutoffTable[Cutoff];
    Resonance = cRSID_Resonances6581[Resonance];
   }
   //shifting negative integers in C is implementation-dependent, so using normal division by power of 2, that might luckily be optimized as arithmetic-shift by the compiler

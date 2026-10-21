@@ -14,6 +14,14 @@
   honour the HIRAM/LORAM bits of `$01`; writes still always land in the
   RAM underneath, and the ROM stub content lives in a small read-only
   image instead of that RAM copy.
+- SID filter cutoffs are now correct at every render rate: cRSID's
+  cutoff tables embed `2*sin(pi*fc/fs)` and were only generated for
+  44.1 kHz, so at the 23 kHz engine rate every cutoff was about half
+  its intended frequency (ACE II's opening 2nd harmonic measured 10 dB
+  low against a real 6581R4). Rate-matched tables (23,000 / 36,672 /
+  45,751 Hz, the rates the device actually uses) are selected from
+  `SampleRate`, fixing the cRSID/cSID 23 kHz mode and each split rate.
+  ~20 KB of extra tables.
 - A tune loaded after another one started with the previous tune's SID
   output-stage state: `cRSID_initSIDchip()` reset the voices but not
   `Output`, `Level`, `Digi` or the filter history, so the first samples
