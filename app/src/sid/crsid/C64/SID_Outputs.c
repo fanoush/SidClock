@@ -51,13 +51,16 @@ static INLINE int cRSID_emulateSIDoutputStage (FASTVAR cRSID_SIDinstance *const 
    Cutoff = CutoffTable[Cutoff];
    Resonance = cRSID_Resonances6581[Resonance];
   }
+  //64-bit products: the rate-warped tables reach a coefficient of ~fs/4
+  //(5793 at 23 kHz) and the filter state can be O(1e6), so the 32-bit
+  //product overflows (wraps) where the old 44.1k-only range (<=3652) did not.
   //shifting negative integers in C is implementation-dependent, so using normal division by power of 2, that might luckily be optimized as arithmetic-shift by the compiler
-  Tmp = FilterInput + ( (SID->PrevBandPass * Resonance) / CRSID_FILTERTABLE_MAGNITUDE ) + SID->PrevLowPass; // >> CRSID_FILTERTABLE_SHIFTS ) + SID->PrevLowPass;
+  Tmp = FilterInput + ( (int)(((int64_t) SID->PrevBandPass * Resonance) / CRSID_FILTERTABLE_MAGNITUDE) ) + SID->PrevLowPass; // >> CRSID_FILTERTABLE_SHIFTS ) + SID->PrevLowPass;
   if (VolumeBand & HIGHPASS_BITVAL) FilterOutput -= Tmp;
-  Tmp = SID->PrevBandPass - ( (Tmp * Cutoff) / CRSID_FILTERTABLE_MAGNITUDE ); // >> CRSID_FILTERTABLE_SHIFTS ); //12 );
+  Tmp = SID->PrevBandPass - ( (int)(((int64_t) Tmp * Cutoff) / CRSID_FILTERTABLE_MAGNITUDE) ); // >> CRSID_FILTERTABLE_SHIFTS ); //12 );
   SID->PrevBandPass = Tmp;
   if (VolumeBand & BANDPASS_BITVAL) FilterOutput -= Tmp;
-  Tmp = SID->PrevLowPass + ( (Tmp * Cutoff) / CRSID_FILTERTABLE_MAGNITUDE ); // >> CRSID_FILTERTABLE_SHIFTS ); // 12 );
+  Tmp = SID->PrevLowPass + ( (int)(((int64_t) Tmp * Cutoff) / CRSID_FILTERTABLE_MAGNITUDE) ); // >> CRSID_FILTERTABLE_SHIFTS ); // 12 );
   SID->PrevLowPass = Tmp;
   if (VolumeBand & LOWPASS_BITVAL) FilterOutput += Tmp;
  //}

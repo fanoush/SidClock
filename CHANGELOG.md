@@ -21,7 +21,11 @@
   low against a real 6581R4). Rate-matched tables (23,000 / 36,672 /
   45,751 Hz, the rates the device actually uses) are selected from
   `SampleRate`, fixing the cRSID/cSID 23 kHz mode and each split rate.
-  ~20 KB of extra tables.
+  They are rebuilt in the frequency domain (capped at `fs/4`) and the
+  SVF products are 64-bit, so the full cutoff range survives down to
+  23 kHz instead of clamping at the 44.1 kHz coefficient ceiling
+  (IK+ at 23 kHz: 747 -> 804 Hz spectral centroid, the 44.1 kHz model
+  is 828 Hz). ~22 KB of extra tables.
 - A tune loaded after another one started with the previous tune's SID
   output-stage state: `cRSID_initSIDchip()` reset the voices but not
   `Output`, `Level`, `Digi` or the filter history, so the first samples

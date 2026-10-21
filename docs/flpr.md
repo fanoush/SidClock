@@ -340,11 +340,30 @@ including the plain cRSID/cSID 23 kHz mode. Measured on ACE II's opening
 | 36.7 kHz (rate table) | -0.6 | -7.7 |
 | 45.8 kHz (rate table) | -0.6 | -7.8 |
 
-The rate tables are clamped to the 44.1 kHz table's maximum coefficient:
-the SVF's `Tmp*Cutoff` product overflows (and the filter goes unstable,
-audible as static) if the coefficient grows past the range upstream
-validated - which is exactly what an unclamped rescale does below
-44.1 kHz.
+The coefficients have to stay inside what the SVF can compute: upstream's
+`Tmp*Cutoff` product is 32-bit and the filter state is O(1e6), so the
+original tables never exceeded coefficient 3652 (6581) / 3385 (8580) -
+about 6.5 / 6.0 kHz at 44.1 kHz. A plain rescale to a lower rate pushes
+coefficients up, and an unclamped rescale made the product overflow and
+the filter ring: audible static in cRSID (the 1SID split rate is *above*
+44.1 kHz, where the coefficients shrink, which is why split stayed
+clean). Two changes make the tables usable at any rate:
+
+- the three filter products (`PrevBandPass*Resonance` and both
+  `Tmp*Cutoff`) are computed in 64-bit;
+- the tables are rebuilt in the frequency domain: the 44.1 kHz table's
+  implied `fc` is warped to the render rate, capped at `fs/4` (a
+  Chamberlin SVF is not honest closer to Nyquist), then
+  `K = 2*sin(pi*fc/fs)`. That models upstream's whole cutoff range at
+  every rate; only registers whose `fc` exceeds `fs/4` saturate, i.e.
+  the top 26% of the 6581 / 9% of the 8580 table at 23 kHz (5.75 kHz
+  ceiling). At 36.7 and 45.8 kHz essentially nothing saturates.
+
+Effect: most tunes never reach the old ceiling (a 12-tune sweep at 23
+and 36.7 kHz was bit-identical), but deep filter sweeps do - IK+ at
+23 kHz moves from a 747 Hz spectral centroid to 804 Hz, against the
+44.1 kHz model's 828 Hz. Max cutoff + max resonance on both chips stays
+bounded at every rate (15 s noise test).
 
 So higher is now better in both senses (correct filters plus more
 Nyquist / less aliasing); the limit is CPU, hence the per-SID-count
