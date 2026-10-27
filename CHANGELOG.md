@@ -4,6 +4,12 @@
 
 **Fixes**
 
+- The split engine's 1SID default rate is 34 kHz instead of 42.5 kHz.
+  At 42.5 kHz the noise/pulse percussion that runs through the
+  max-resonance filter lands ~6 dB hotter in the 60-300 Hz band and
+  masks the melody (Last Ninja 3 sub 10 around 0:39-0:43 sounded
+  dampened; 22 kHz and 34 kHz are fine); `splitrate 42500` still
+  selects the higher rate for A/B.
 - RSID tunes that relocate their player into the RAM *under* the KERNAL
   played the intro sample and then went silent (Ghostbusters by Russell
   Lieblich): cRSID's memory model always read the RAM copy under the
@@ -80,9 +86,9 @@
   core instead of ~20%, the FLPR half is unchanged. cRSID/cSID cannot
   afford it and stay at 22 kHz. `splitrate [HZ]` over BLE (`0x36`)
   switches the split rate live, at the same tune position, for A/B. The
-  default follows the SID count (1 SID 42.5 kHz, 2 SID 34 kHz, 3 SID
-  22 kHz) because the M33 SID-stage cost scales with it (34% / 55% /
-  50%; 3 SID at the 1SID rate was 91% and underran).
+  default follows the SID count (1 SID and 2 SID 34 kHz, 3 SID 22 kHz)
+  because the M33 SID-stage cost scales with it (55% / 50%; 3 SID at
+  42.5 kHz was 91% and underran).
 
 **Fixes**
 

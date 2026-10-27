@@ -312,11 +312,15 @@ resonance tables are generated for **44.1 kHz**, and at 23 kHz every
 cutoff lands ~0.9 octave low (measured against a real 6581R4 recording
 of ACE II: the 2nd harmonic came out 10 dB down instead of flat).
 
-- Split renders at a nominal **42.5 kHz**; the amplifier's clock runs
-  high, so the true output is **~45.9 kHz** (measured with the DMA
-  refill counter against the device clock: 45,888 Hz, and the SID render
-  rate is calibrated to it, so the tempo/pitch error is ~0.3%). The
-  filter tables are then only ~4% off instead of 2x.
+- Split renders at a nominal **34 kHz** (~36.7 kHz true; the amplifier's
+  clock runs high, and the SID render rate is calibrated to it, so the
+  tempo/pitch error is ~0.3%). The filter tables are then only ~4% off
+  instead of 2x. A 42.5 kHz rate (~45.9 kHz true) was tried for the
+  extra Nyquist: on tunes that drive the noise/pulse percussion through
+  the max-resonance filter it puts ~6 dB more energy in the 60-300 Hz
+  band and the melody sounds dampened (Last Ninja 3 sub 10 at
+  0:39-0:43), while 34 kHz keeps the 22 kHz balance; `splitrate 42500`
+  still selects it.
 - The amp's clock error is *not* a constant ratio: 22.05 kHz request ->
   23.0 kHz (+4.3%), 42.5 kHz -> 45.9 kHz (+7.6%), so `hw_rate()` uses a
   separately measured high-band factor.
@@ -327,9 +331,8 @@ of ACE II: the 2nd harmonic came out 10 dB down instead of flat).
   split nominal live, at the same tune position (one ~20 ms buffer gap).
   `splitrate 22050` gives the old 22 kHz mode for A/B.
 - The default follows the SID count, because the SID stage cost scales
-  with it (measured M33 share): 1 SID 42.5 kHz (34%), 2 SID 34 kHz
-  (~55%), 3 SID 22 kHz (~50%). 3 SID at the 1SID rate was 91% and
-  underran.
+  with it (measured M33 share): 1 SID and 2 SID 34 kHz (~55%), 3 SID
+  22 kHz (~50%). 3 SID at 42.5 kHz was 91% and underran.
 
 **Rate vs sound quality.** cRSID's cutoff tables are rate-dependent
 (the coefficient is `2*sin(pi*fc/fs)`), so a single 44.1 kHz table puts

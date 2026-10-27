@@ -83,14 +83,16 @@ LOG_MODULE_REGISTER(audio, LOG_LEVEL_INF);
 
 
 #define AUDIO_RATE_HZ 22050U
-/* Split engine: run the SID stage at 44.1 kHz so cRSID's filter tables
- * (generated for 44.1 kHz) match. The hardware runs ~4.3% high, so ask
- * for 42280 to render at ~44100 (see HW_RATE_NUM/DEN). */
-#define AUDIO_SPLIT_RATE_HZ 42500U
-/* 2SID tunes: 36 kHz nominal -> ~38.8 kHz true, which keeps the SID stage
- * at ~64% of the M33 instead of 69% at the 1SID rate (measured) while
- * still being close to the 44.1 kHz filter tables. 3SID+ stays at 22 kHz
- * (~48%): the high rates would leave no room for the UI. */
+/* Split engine, 1SID: 34 kHz nominal (~36.7 kHz true). 42.5 kHz was tried
+ * for the extra Nyquist, but on tunes that drive the noise/pulse percussion
+ * through the max-resonance filter the higher rate puts ~6 dB more energy
+ * in the 60-300 Hz band, which masks the melody (Last Ninja 3 sub 10 around
+ * 0:39-0:43); 34 kHz keeps the balance the cRSID 22 kHz rate has and is
+ * ~64% of the M33. 'splitrate 42500' still selects the higher rate. */
+#define AUDIO_SPLIT_RATE_HZ 34000U
+/* 2SID tunes: same 34 kHz nominal - the SID stage then fits in ~64% of the
+ * M33 at the 1SID rate too, and 3SID+ stays at 22 kHz (~48%): the high
+ * rates would leave no room for the UI. */
 #define AUDIO_SPLIT_RATE_2SID_HZ 34000U
 /* Runtime override for the split nominal rate (BLE 0x36): 0 = default.
  * Not persisted; lets a host A/B the SID rate on the device. */
