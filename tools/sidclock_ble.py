@@ -824,17 +824,18 @@ async def cmd_quality(addr, value=None):
 
 
 async def cmd_splitrate(addr, value=None):
-    """Split SID nominal rate: default | HZ (0 = default ~42.5k -> 45.8k true)."""
+    """Split SID nominal rate: default | HZ (0 = the SID-count default)."""
+    usage = "splitrate [HZ]  (0 = default by SID count: 34000; persisted)"
     try:
         hz = int(value or 0)
     except ValueError:
-        raise SystemExit("splitrate [HZ]  (0 = default 42500, amp plays ~45800)")
+        raise SystemExit(usage)
     if not 0 <= hz <= 96000:
-        raise SystemExit("splitrate [HZ]  (0 = default 42500, amp plays ~45800)")
+        raise SystemExit(usage)
     async with connect(addr) as c:
         await c.write_gatt_char(DBG_CHAR, bytes([0x36, hz & 0xFF, hz >> 8]),
                                 response=True)
-    print(f"split SID rate: {hz if hz else 'default (42500)'}")
+    print(f"split SID rate: {hz if hz else 'default by SID count'} (saved)")
 
 
 async def cmd_engine(addr, value=None):

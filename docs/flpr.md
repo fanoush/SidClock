@@ -331,9 +331,10 @@ of ACE II: the 2nd harmonic came out 10 dB down instead of flat).
 - Split buffer look-ahead doubles in samples (320 -> ~640, cycle ring
   1280 entries; the register copy moved to +0xC00) so both modes keep
   the same ~14.5 ms of buffering.
-- `splitrate [HZ]` over BLE (`0x36` + u16 LE, 0 = default) switches the
-  split nominal live, at the same tune position (one ~20 ms buffer gap).
-  `splitrate 22050` gives the old 22 kHz mode for A/B.
+- `splitrate [HZ]` over BLE (`0x36` + u16 LE, 0 = the SID-count default)
+  switches the split nominal live, at the same tune position (one ~20 ms
+  buffer gap), and is persisted in `/home/srate.cfg` so the choice
+  survives a reboot. `splitrate 22050` gives the old 22 kHz mode for A/B.
 - The default follows the SID count, because the SID stage cost scales
   with it (measured M33 share): 1 SID and 2 SID 34 kHz (~55%), 3 SID
   22 kHz (~50%). 3 SID at 42.5 kHz was 91% and underran.

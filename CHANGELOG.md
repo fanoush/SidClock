@@ -4,6 +4,9 @@
 
 **Fixes**
 
+- The split-rate override (`splitrate`, BLE 0x36) is persisted in
+  `/home/srate.cfg`, so a chosen rate survives a reboot instead of
+  reverting to the SID-count default; `splitrate 0` clears it.
 - The SID emulator now runs at the audio hardware's *actual* frame rate
   at every rate. `hw_rate()` used one clock-error factor for everything
   above 30 kHz, so 34 kHz played ~1.8% flat and every `splitrate` step

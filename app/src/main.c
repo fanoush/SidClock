@@ -1032,6 +1032,7 @@ static void epoch_to_date(uint32_t epoch, int *year, int *month, int *day)
 }
 
 static void time_cfg_save(void); /* defined below */
+static void srate_cfg_save(uint32_t hz); /* defined below */
 
 static void time_set_from_host(uint16_t year, uint8_t mon, uint8_t day,
 			       uint8_t hh, uint8_t mm, uint8_t ss)
@@ -1854,16 +1855,23 @@ static ssize_t ble_dbg_write(struct bt_conn *conn,
 		}
 		break;
 #endif
-	case 0x36:
-		/* Split-engine SID nominal rate (u16 LE, 0 = default 42.5k
-		 * which the amp plays at ~45.8k). Not persisted; restarts
-		 * the SID stream at the same tune position. For A/B of
-		 * 22.05k vs the high rate on the device. */
+	case 0x36: {
+		/* Split-engine SID nominal rate (u16 LE, 0 = the SID-count
+		 * default). Restarts the SID stream at the same tune
+		 * position and is persisted in /home/srate.cfg, so the
+		 * choice survives a reboot. For A/B of the rates. */
+		uint32_t hz = (uint32_t)p[1] | ((uint32_t)p[2] << 8);
+
 		if (len != 3U) {
 			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
 		}
-		audio_set_split_rate((uint32_t)p[1] | ((uint32_t)p[2] << 8));
+		if (hz != 0U && (hz < 1000U || hz > 96000U)) {
+			return BT_GATT_ERR(BT_ATT_ERR_VALUE_NOT_ALLOWED);
+		}
+		audio_set_split_rate(hz);
+		srate_cfg_save(hz);
 		break;
+	}
 	case 0x35:
 		/* SID waveform quality: 0 = light (default), 1 = oversampled
 		 * (HQ). Not persisted; HQ costs ~4.6x the SID stage (41 us per
@@ -4310,6 +4318,58 @@ static void brightness_auto_apply(void)
 	}
 }
 
+/*
+ * Split SID render rate override, persisted in /home/srate.cfg ("0" = the
+ * SID-count default). Without it the split engine returns to its built-in
+ * default on every boot, which made `splitrate` an A/B-only tool.
+ */
+static void srate_cfg_save(uint32_t hz)
+{
+	char buf[12];
+	struct fs_file_t f;
+	int n;
+
+	if (!fs_ready) {
+		return;
+	}
+	n = snprintf(buf, sizeof(buf), "%u\n", (unsigned)hz);
+	fs_file_t_init(&f);
+	if (fs_open(&f, "/home/srate.cfg",
+		    FS_O_WRITE | FS_O_CREATE | FS_O_TRUNC) == 0) {
+		(void)fs_write(&f, buf, (size_t)n);
+		fs_close(&f);
+	}
+}
+
+static void srate_cfg_load(void)
+{
+	struct fs_file_t f;
+	char buf[12];
+	ssize_t rd;
+	unsigned v;
+
+	if (!fs_ready) {
+		return;
+	}
+	fs_file_t_init(&f);
+	if (fs_open(&f, "/home/srate.cfg", FS_O_READ) < 0) {
+		return;
+	}
+	rd = fs_read(&f, buf, sizeof(buf) - 1U);
+	fs_close(&f);
+	if (rd <= 0) {
+		return;
+	}
+	buf[rd] = '\0';
+	if (sscanf(buf, "%u", &v) != 1) {
+		return;
+	}
+	if (v == 0U || (v >= 1000U && v <= 96000U)) {
+		audio_set_split_rate(v);
+		LOG_INF("split rate override: %u Hz", v);
+	}
+}
+
 /* Ambient profile persistence: "lux0 lux1 lux2 bri0 bri1 bri2". */
 static void bri_cfg_save(void)
 {
@@ -6091,6 +6151,7 @@ int main(void)
 	 * 0x13 walks the directory instead. Drop any stale copy. */
 	(void)fs_unlink("/home/dir.txt");
 	bri_cfg_load();   /* restore the ambient brightness profiles */
+	srate_cfg_load(); /* restore the split-rate override */
 	for (int i = 0; i < 5; i++) {
 		alarms[i].hour = 7;
 		alarms[i].len_sec = 300;
