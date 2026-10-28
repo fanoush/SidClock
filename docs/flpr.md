@@ -321,9 +321,13 @@ of ACE II: the 2nd harmonic came out 10 dB down instead of flat).
   band and the melody sounds dampened (Last Ninja 3 sub 10 at
   0:39-0:43), while 34 kHz keeps the 22 kHz balance; `splitrate 42500`
   still selects it.
-- The amp's clock error is *not* a constant ratio: 22.05 kHz request ->
-  23.0 kHz (+4.3%), 42.5 kHz -> 45.9 kHz (+7.6%), so `hw_rate()` uses a
-  separately measured high-band factor.
+- The amp's clock error is *not* a constant ratio. Measured on the unit
+  with the DMA refill counter timed by the GRTC (0.05% repeatability):
+  22.05 kHz request -> 22,882 Hz, 34 kHz -> 35,969 Hz, 42.5 kHz ->
+  45,797 Hz. `hw_rate()` interpolates between those points and the SID
+  emulator runs at the actual rate, so the pitch/tempo does not change
+  with `splitrate` (one factor for everything above 30 kHz made 34 kHz
+  play 1.8% flat, and 22.05 kHz 0.5% flat).
 - Split buffer look-ahead doubles in samples (320 -> ~640, cycle ring
   1280 entries; the register copy moved to +0xC00) so both modes keep
   the same ~14.5 ms of buffering.

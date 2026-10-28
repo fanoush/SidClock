@@ -60,28 +60,6 @@ LOG_MODULE_REGISTER(audio, LOG_LEVEL_INF);
 #define I2S_SRC_HZ 32000000ULL
 #define RATIO_N 64U
 
-/*
- * True frame clock for a requested rate, measured host-timed through the
- * EasyDMA buffer-boundary counter: the hardware runs close to the request
- * but ~4.3% high on this unit (22.05 kHz request -> 22.99 kHz observed).
- * All synthesis and the SID emulator compute in terms of this true rate.
- *
- * NOTE: an earlier "2/3 of the request" reading was an artifact - the SID
- * renderer was too slow to refill in time, so the boundary counter saw only
- * one switch per refill instead of one per buffer.
- */
-#define HW_RATE_NUM 23000U
-#define HW_RATE_DEN 22050U
-/* The amp's clock error is not a constant ratio. Measured on the unit
- * (tune-clock vs wall-clock over 60 s, cross-checked with the DMA refill
- * counter): 22.05 kHz request -> 23.0 kHz (+4.3%), but 42.5 kHz request
- * -> ~45.75 kHz (+7.6%). The split engine therefore uses a separately
- * measured factor so the SID stage renders at the rate the hardware
- * actually plays (otherwise the tune runs ~3% fast/sharp). */
-#define HW_RATE_HI_NUM 10765U
-#define HW_RATE_HI_DEN 10000U
-
-
 #define AUDIO_RATE_HZ 22050U
 /* Split engine, 1SID: 34 kHz nominal (~36.7 kHz true). 42.5 kHz was tried
  * for the extra Nyquist, but on tunes that drive the noise/pulse percussion
@@ -97,6 +75,10 @@ LOG_MODULE_REGISTER(audio, LOG_LEVEL_INF);
 /* Runtime override for the split nominal rate (BLE 0x36): 0 = default.
  * Not persisted; lets a host A/B the SID rate on the device. */
 static uint32_t split_rate_override;
+/* Runtime override for the split nominal rate (BLE 0x36): 0 = default.
+ * Not persisted; lets a host A/B the SID rate on the device. */
+static uint32_t split_rate_override;
+
 #define AUDIO_FRAMES 320U /* ~14.5 ms per buffer at 22.05 kHz (sized for RAM: with both SID engines resident, 512 does not fit) */
 #define AUDIO_BUF_BYTES (AUDIO_FRAMES * 4U)
 
@@ -156,14 +138,52 @@ static bool cur_fmt32 = true;
 static uint32_t cfg_rate = AUDIO_RATE_HZ;
 static uint32_t mck_override; /* calibration: raw MCKFREQ (0 = compute) */
 
-/* True hardware frame rate for a requested rate (see HW_RATE_NUM above). */
+/*
+ * True frame clock for a requested rate. The I2S divider is computed for
+ * an assumed 32 MHz source, but the board's audio clock runs high and the
+ * error is *not* a constant ratio - measured on the unit with the DMA
+ * refill counter timed by the GRTC (0.05% repeatability):
+ *
+ *   22,050 Hz request -> 22,882 Hz
+ *   34,000 Hz request -> 35,969 Hz
+ *   42,500 Hz request -> 45,797 Hz
+ *
+ * The SID emulator has to run at the *actual* rate: with one factor for
+ * everything above 30 kHz, 34 kHz played ~1.8% flat and the pitch/tempo
+ * changed with every `splitrate` step (22.05 kHz was 0.5% flat too).
+ * Interpolate between the measured points.
+ */
 static uint32_t hw_rate(void)
 {
-	if (cfg_rate > 30000U) {
-		return (cfg_rate * HW_RATE_HI_NUM + HW_RATE_HI_DEN / 2U) /
-		       HW_RATE_HI_DEN;
+	static const struct { uint16_t req; uint32_t act; } pts[] = {
+		{ 22050U, 22882U }, /* cRSID/cSID and the 3SID split */
+		{ 34000U, 35969U }, /* 1SID/2SID split */
+		{ 42500U, 45797U }, /* `splitrate 42500` */
+	};
+	const unsigned n = (unsigned)(sizeof(pts) / sizeof(pts[0]));
+	uint32_t r = cfg_rate;
+	unsigned i;
+
+	if (r <= pts[0].req) {
+		return pts[0].act;
 	}
-	return (cfg_rate * HW_RATE_NUM + HW_RATE_DEN / 2U) / HW_RATE_DEN;
+	for (i = 1; i < n; i++) {
+		if (r <= pts[i].req) {
+			uint32_t d = pts[i].req - pts[i - 1].req;
+
+			return pts[i - 1].act +
+			       (uint32_t)(((uint64_t)(r - pts[i - 1].req) *
+					   (pts[i].act - pts[i - 1].act)) / d);
+		}
+	}
+	/* Above the last measured point: extrapolate with its slope. */
+	{
+		uint32_t d = pts[n - 1].req - pts[n - 2].req;
+
+		return pts[n - 1].act +
+		       (uint32_t)(((uint64_t)(r - pts[n - 1].req) *
+				   (pts[n - 1].act - pts[n - 2].act)) / d);
+	}
 }
 
 /*

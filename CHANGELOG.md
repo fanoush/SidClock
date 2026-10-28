@@ -4,6 +4,14 @@
 
 **Fixes**
 
+- The SID emulator now runs at the audio hardware's *actual* frame rate
+  at every rate. `hw_rate()` used one clock-error factor for everything
+  above 30 kHz, so 34 kHz played ~1.8% flat and every `splitrate` step
+  changed the pitch/tempo; the plain cRSID/cSID 22 kHz mode was 0.5%
+  flat as well. Measured with the GRTC-timed DMA refill counter:
+  22.05 kHz -> 22,882 Hz, 34 kHz -> 35,969 Hz, 42.5 kHz -> 45,797 Hz;
+  `hw_rate()` interpolates between those points, and the cRSID player
+  now runs at 50.16 Hz (the PAL rate) instead of 49.89.
 - The split engine's 1SID default rate is 34 kHz instead of 42.5 kHz.
   At 42.5 kHz the noise/pulse percussion that runs through the
   max-resonance filter lands ~6 dB hotter in the 60-300 Hz band and
