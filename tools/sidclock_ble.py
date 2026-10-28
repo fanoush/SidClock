@@ -1024,7 +1024,7 @@ async def cmd_ls(addr):
     async with connect(addr) as c:
         start = 0
         names = []
-        for _ in range(40):
+        for _ in range(400):  # ~4 files/page; 40 pages truncated big libraries
             await c.write_gatt_char(
                 DBG_CHAR,
                 bytes([0x13, start & 0xFF, (start >> 8) & 0xFF]),
