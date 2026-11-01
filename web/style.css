@@ -257,6 +257,27 @@ button.badge.action::after {
 .value { font-variant-numeric: tabular-nums; flex: 1; }
 .value.warn { color: var(--warn); }
 
+/* volume slider: the same 0-255 range as the device's VOL slider */
+.volrow { margin-top: 14px; }
+.range {
+  flex: 1;
+  min-width: 0;
+  height: 24px;
+  margin: 0;
+  accent-color: var(--accent);
+  background: transparent;
+  cursor: pointer;
+}
+.range:disabled { opacity: .45; cursor: default; }
+.volpct {
+  font-variant-numeric: tabular-nums;
+  color: var(--dim);
+  font-size: 13px;
+  width: 40px;
+  text-align: right;
+  flex: none;
+}
+
 /* ---------- notices ---------- */
 
 .notice { border-color: var(--warn); font-size: 14px; }

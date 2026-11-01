@@ -2,8 +2,47 @@
 
 ## Unreleased
 
+**New**
+
+- **Web remote volume slider**: the now-playing card has a 0-255 volume
+  control (BLE `37` + u8) that mirrors the device's VOL slider. The
+  player state carries the volume at `[7]`, so the slider also follows
+  changes made on the device, and the value is persisted in
+  `/home/vol.cfg` (written once the change settles, not per drag step).
+  `sidclock_ble.py volume [0-255]` does the same from a terminal. A drag
+  coalesces to the latest value on both ends (one write in flight in the
+  page, and the firmware parks the newest value instead of rejecting a
+  write that arrives while the previous one is still queued - that
+  rejection used to surface as `volume failed: GATT operation failed ...
+  unknown` on every dragged step).
+- The clock can be set and read with millisecond precision: the Current
+  Time characteristic's 1/256 s byte is now filled on reads and honoured
+  on writes. `set-time` and the web page measure the BLE round trip and
+  send the time at which the write *arrives*, instead of the time the
+  payload was built, so the device no longer ends up one link delay
+  behind the host.
+
 **Fixes**
 
+- Setting the clock from a host now repaints the panel immediately. The
+  clock only redrew when the minute *of the day* changed, so a set that
+  kept the same HH:MM (e.g. a date-only correction, or a few seconds of
+  drift) left the old time on screen until the next minute tick - up to
+  60 s. The tick now tracks the full epoch minute and a set forces one
+  redraw.
+- The web remote's device clock no longer runs up to a second behind the
+  browser: it used only the whole-second field and stamped it with the
+  *end* of the BLE read, so the seconds flipped at a random phase and
+  could be one off. It now uses the fraction byte and half the measured
+  round trip, and repaints just after the device's own second boundary
+  (the browser clock does the same, so both flip together).
+- `log` is usable again outside the split engine: the split profiler
+  values live in retained RAM, so a stale average from an earlier split
+  run made every debug-snapshot read print a `split prof:` line - and
+  `log` reads the snapshot in 60-byte pages, so the buffer filled with
+  them and pushed everything else out. The line is now only printed while
+  the split engine is actually running, and `flpr_clear()` zeroes the
+  retained profiler block at boot and on halt.
 - The split-rate override (`splitrate`, BLE 0x36) is persisted in
   `/home/srate.cfg`, so a chosen rate survives a reboot instead of
   reverting to the SID-count default; `splitrate 0` clears it.

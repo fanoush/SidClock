@@ -10,7 +10,8 @@
 
 import { md5 } from '../../web/md5.js';
 import {
-  SidClock, parseInfo, DBG_CHAR, STATE_CHAR, INFO_CHAR, SIDCLOCK_SERVICE,
+  SidClock, parseInfo, parseState, parseTime, timePayload,
+  DBG_CHAR, STATE_CHAR, INFO_CHAR, SIDCLOCK_SERVICE,
 } from '../../web/ble.js';
 import {
   cborUint, cborBytes, cborText, cborMap, cborDecode, SmpClient, SmpError,
@@ -750,6 +751,33 @@ await test('ble: parseInfo (88-byte and 96-byte info reads)', () => {
   eq(parseInfo(infoBytes({ name: 'X.sid', id: '\0\0\0\0\0\0\0\0' })).id, null,
      'NUL-filled id');
   eq(parseInfo(new Uint8Array(40)), null, 'short value rejected');
+});
+
+await test('ble: time payload carries the sub-second fraction', () => {
+  const d = new Date(2026, 10, 2, 13, 45, 30, 500);
+  const p = timePayload(d);
+  eq(p.length, 10, '10 bytes');
+  eq(p[8], 128, '500 ms -> 128/256');
+  const t = parseTime(p);
+  eq(t.hours, 13, 'hours');
+  eq(t.minutes, 45, 'minutes');
+  eq(t.seconds, 30, 'seconds');
+  eq(t.dow, 1, 'Monday = 1');
+  eq(Math.round((t.fraction * 1000) / 256), 500, 'fraction back to ms');
+  eq(timePayload(new Date(2026, 10, 2, 13, 45, 30, 0))[8], 0, '0 ms');
+  /* 999 ms must not round to 256 and wrap to 0 (a whole second off) */
+  eq(timePayload(new Date(2026, 10, 2, 13, 45, 30, 999))[8], 255, '999 ms');
+  eq(parseTime(new Uint8Array(9)), null, 'short value rejected');
+});
+
+await test('ble: parseState reports the volume', () => {
+  const b = new Uint8Array(16);
+  b[0] = 0x01;
+  b[7] = 200;
+  const st = parseState(b);
+  eq(st.playing, true, 'flags still decoded');
+  eq(st.volume, 200, 'volume at [7]');
+  eq(parseState(new Uint8Array(8)), null, 'short value rejected');
 });
 
 await test('ble: SidClock coalesces concurrent connect() calls', () =>

@@ -80,6 +80,8 @@ logical landscape frame. The idle face can use portrait rotations.
 | `alarms.cfg` | one line per alarm | `mode hour min len_sec days sub name title` |
 | `time.cfg` | 3 numbers | wall clock epoch + GRTC counter + k_uptime at save (no RTC on the board) |
 | `sid.cfg` | text | last loaded tune name (restored on boot, no auto-play) |
+| `srate.cfg` | 1 number | split-engine SID render rate override in Hz (`0` = the SID-count default) |
+| `vol.cfg` | 1 number | software volume 0-255 (the VOL slider), flushed after it settles |
 
 LittleFS is mounted **without auto-format**: a corrupted or foreign
 filesystem is never wiped; the `fsformat` debug command formats explicitly.

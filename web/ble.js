@@ -74,6 +74,7 @@ export function parseState(view) {
     modelMode: b[4],
     chip: b[5],
     generation: b[6],
+    volume: b[7], // software volume 0-255 (the VOL slider)
     elapsed: u32(b, 8),
     length: u32(b, 12),
   };
@@ -101,7 +102,10 @@ export function parseInfo(view) {
   return info;
 }
 
-/** Decode the 10-byte Current Time value into a sorted object. */
+/** Decode the 10-byte Current Time value. `fraction` is the sub-second part
+ *  in 1/256 s (the device fills it; many hosts leave it at zero), and
+ *  readTime() adds `at`/`rtt` so the caller can place the device's seconds
+ *  on the local timeline. */
 export function parseTime(view) {
   const b = bytesOf(view);
   if (b.length < 10) return null;
@@ -112,13 +116,20 @@ export function parseTime(view) {
     hours: b[4],
     minutes: b[5],
     seconds: b[6],
+    dow: b[7],
+    fraction: b[8],
   };
 }
 
 /** The 10-byte Current Time value for a JS Date (local fields, like the
- *  device keeps them - there is no RTC and no timezone on the wire). */
+ *  device keeps them - there is no RTC and no timezone on the wire). The
+ *  fraction byte carries the milliseconds so a set keeps sub-second
+ *  precision instead of snapping to the whole second. */
 export function timePayload(d = new Date()) {
   const dow = ((d.getDay() + 6) % 7) + 1; // Monday = 1
+  /* 256 steps per second; clamp - rounding 999 ms gives 256, which would
+   * wrap to 0 and put the clock a second behind */
+  const frac = Math.min(255, Math.round((d.getMilliseconds() * 256) / 1000));
   return new Uint8Array([
     d.getFullYear() & 0xff,
     (d.getFullYear() >> 8) & 0xff,
@@ -128,7 +139,7 @@ export function timePayload(d = new Date()) {
     d.getMinutes(),
     d.getSeconds(),
     dow,
-    0,
+    frac,
     0,
   ]);
 }
@@ -301,14 +312,64 @@ export class SidClock {
     return parseInfo(await this._read(this.info));
   }
 
+  /** The device clock plus the timing of the read: `at` is the local
+   *  performance.now() when the value arrived and `rtt` the round trip, so
+   *  the caller knows the value was sampled about rtt/2 before `at` and can
+   *  line the device's seconds up with its own clock. */
   async readTime() {
-    return this.cts ? parseTime(await this._read(this.cts)) : null;
+    if (!this.cts) return null;
+    const t0 = performance.now();
+    const t = parseTime(await this._read(this.cts));
+    const at = performance.now();
+    if (!t) return null;
+    t.at = at;
+    t.rtt = at - t0;
+    return t;
   }
 
+  /** Set the device clock from `d` (default: now), with the BLE delay
+   *  compensated: the payload carries the time at which the write should
+   *  arrive, not the time it was built, so the two clocks end up agreeing
+   *  instead of the device being one link delay behind.
+   *
+   *  Returns the read-back value (with `at`/`rtt`); if the link hiccups
+   *  between the write and the read, it returns what was sent instead, so
+   *  the page still shows the new time. */
   async setTime(d = new Date()) {
     if (!this.cts) throw new Error('no Current Time service');
-    await this.cts.writeValue(timePayload(d));
-    return this.readTime();
+    const start = performance.now();
+    /* one quick round trip to estimate the one-way delay: the connection
+     * interval changes the latency, so a value from the last read is
+     * stale */
+    let rtt = 0;
+    try {
+      const t0 = performance.now();
+      await this._read(this.cts);
+      rtt = performance.now() - t0;
+    } catch (e) {
+      /* no estimate: send the sample time as-is */
+    }
+    const target = d.getTime() + (performance.now() - start) + rtt / 2;
+    await this.cts.writeValue(timePayload(new Date(target)));
+    try {
+      return await this.readTime();
+    } catch (e) {
+      const t = parseTime(timePayload(new Date(target)));
+      t.at = performance.now();
+      t.rtt = 0;
+      return t;
+    }
+  }
+
+  /** Current software volume (0-255) from the debug snapshot. */
+  async readVolume() {
+    const b = await this.readSnapshot();
+    return b.length > 7 ? b[7] : null;
+  }
+
+  /** Set the software volume (0-255), the same as the VOL slider. */
+  setVolume(v) {
+    return this._cmd([0x37, v & 0xff]);
   }
 
   async _cmd(bytes) {

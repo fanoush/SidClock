@@ -27,6 +27,7 @@ User commands:
   endmode M end-of-tune mode: nextsub | nexttune | loop (the SID screen
             END button; takes effect at the next song end)
   engine E  SID engine (dual builds): new (cRSID) | old (cSID-light)
+  volume [N] software volume 0-255 (the VOL slider; no value = read it)
   ls        list the files in /home on the device
   log       print the device's SEGGER RTT log buffer (the LOG_* lines a
             debug probe would show). The lines are consumed by default;
@@ -106,8 +107,10 @@ def lux_u24(raw):
     return int.from_bytes(bytes(raw), "little") * 0.01
 
 
-def time_payload(t):
-    """Standard Current Time (0x2A2B) value: 10 bytes, year little-endian."""
+def time_payload(t, ms=0):
+    """Standard Current Time (0x2A2B) value: 10 bytes, year little-endian.
+    The fraction byte (1/256 s) carries the milliseconds so the device does
+    not snap its clock to the whole second."""
     return struct.pack(
         "<HBBBBBBBB",
         t.tm_year,
@@ -117,16 +120,17 @@ def time_payload(t):
         t.tm_min,
         t.tm_sec,
         (t.tm_wday % 7) + 1,
-        0,
+        min(255, round(ms * 256 / 1000)),
         0,
     )
 
 
 def time_str(raw):
-    year, mon, day, hh, mm, ss, dow, _frac, _reason = struct.unpack(
+    year, mon, day, hh, mm, ss, dow, frac, _reason = struct.unpack(
         "<HBBBBBBBB", bytes(raw)
     )
-    return f"{year:04d}-{mon:02d}-{day:02d} {hh:02d}:{mm:02d}:{ss:02d} (dow {dow})"
+    return (f"{year:04d}-{mon:02d}-{day:02d} {hh:02d}:{mm:02d}:{ss:02d}"
+            f".{(frac * 1000 + 128) // 256:03d} (dow {dow})")
 
 
 @contextlib.contextmanager
@@ -248,12 +252,19 @@ async def cmd_status(addr):
 
 async def cmd_set_time(addr, tz=None):
     """tz: explicit UTC offset in hours (e.g. "+2"); default: host local."""
-    if tz is not None:
-        t = time.gmtime(time.time() + float(tz) * 3600)
-    else:
-        t = time.localtime()
     async with connect(addr) as c:
-        payload = time_payload(t)
+        # One quick round trip to estimate the link delay: the payload has
+        # to carry the time at which the write *arrives*, not the time it
+        # was built, or the device ends up one link delay behind.
+        t0 = time.monotonic()
+        await c.read_gatt_char(CTS_CHAR)
+        rtt = time.monotonic() - t0
+        now = time.time() + rtt / 2
+        if tz is not None:
+            t = time.gmtime(now + float(tz) * 3600)
+        else:
+            t = time.localtime(now)
+        payload = time_payload(t, int((now % 1) * 1000))
         await c.write_gatt_char(CTS_CHAR, payload, response=True)
         back = await c.read_gatt_char(CTS_CHAR)
         print(f"wrote:  {time_str(payload)}")
@@ -436,6 +447,7 @@ def _player_state(raw):
         "model": raw[4],
         "chip": raw[5],
         "gen": raw[6],
+        "volume": raw[7],
         "elapsed": _u32(raw, 8),
         "length": _u32(raw, 12),
     }
@@ -753,7 +765,8 @@ async def cmd_subplay(addr, n=None):
 def _state_line(st):
     return (f"{_state_words(st):16s} sub {st['subtune'] + 1}/{st['songs']}  "
             f"pos {_state_pos(st):12s} chip {st['chip']} ({_model_label(st)})  "
-            f"end {_end_label(st)}  snd {'on' if st['sound'] else 'off'}")
+            f"end {_end_label(st)}  snd {'on' if st['sound'] else 'off'}  "
+            f"vol {st.get('volume', 0)}")
 
 
 async def cmd_state(addr):
@@ -821,6 +834,25 @@ async def cmd_quality(addr, value=None):
     async with connect(addr) as c:
         await c.write_gatt_char(DBG_CHAR, bytes([0x35, code]), response=True)
     print(f"SID quality: {value}")
+
+
+async def cmd_volume(addr, value=None):
+    """Software volume 0-255 (the VOL slider); no value reads the snapshot."""
+    usage = "volume [0-255]  (no value = read)"
+    async with connect(addr) as c:
+        if value is None:
+            raw = await c.read_gatt_char(DBG_CHAR)
+            v = raw[7]
+            print(f"volume: {v} ({round(v * 100 / 255)}%)")
+            return
+        try:
+            v = int(value)
+        except ValueError:
+            raise SystemExit(usage)
+        if not 0 <= v <= 255:
+            raise SystemExit(usage)
+        await c.write_gatt_char(DBG_CHAR, bytes([0x37, v]), response=True)
+        print(f"volume: {v} ({round(v * 100 / 255)}%) (saved)")
 
 
 async def cmd_splitrate(addr, value=None):
@@ -1134,7 +1166,8 @@ def main():
             "tone", "mute", "rate", "tonefreq",
         "tonestart", "tonestop", "fsformat", "sid", "sidname", "chip",
         "sidstop", "ls", "glitch", "blemode", "filedelete", "endmode",
-        "engine", "quality", "splitrate", "stacks", "threads", "log", "accel",
+        "engine", "quality", "volume", "splitrate", "stacks", "threads",
+        "log", "accel",
         "playpause", "next", "prev", "subnext", "subprev", "subplay",
         "state", "watch", "flpr", "flpralu",
         ],
@@ -1191,6 +1224,7 @@ def main():
         "filedelete": cmd_filedelete,
         "engine": cmd_engine,
         "quality": cmd_quality,
+        "volume": cmd_volume,
         "splitrate": cmd_splitrate,
         "stacks": cmd_stacks,
         "threads": cmd_stacks,  # alias for the old name
@@ -1213,8 +1247,8 @@ def main():
         asyncio.run(fn(args.addr, args.value))
     elif args.command == "sidname":
         asyncio.run(fn(args.addr, args.value, args.sub))
-    elif args.command in ("chip", "filedelete", "engine", "quality", "splitrate", "stacks",
-                          "threads", "endmode"):
+    elif args.command in ("chip", "filedelete", "engine", "quality", "volume",
+                          "splitrate", "stacks", "threads", "endmode"):
         asyncio.run(fn(args.addr, args.value))
     elif args.command == "set-time":
         asyncio.run(fn(args.addr, args.value))

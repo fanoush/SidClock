@@ -76,6 +76,13 @@ try {
       <button id="ends" class="badge action" disabled
               title="what happens when the tune ends - press to change">ends: ?</button>
     </div>
+
+    <div class="row volrow">
+      <span class="rowlabel">volume</span>
+      <input id="volume" class="range" type="range" min="0" max="255"
+             step="1" value="26" aria-label="device volume" disabled>
+      <span id="volpct" class="volpct">10%</span>
+    </div>
   </section>
 
   <section class="card">
@@ -150,9 +157,12 @@ try {
     It has no real-time clock of its own, so after a reset its clock is
     <em>unset</em> and otherwise drifts: the two clocks above show it, and
     the device one turns amber while they disagree - press <em>set
-    time</em> to copy the browser clock over. The HVSC section searches
-    hvsc.c64.org and writes tunes straight to the device over SMP (song
-    lengths and tune info come from the HVSC databases, cached by the
+    time</em> to copy the browser clock over (the write carries
+    milliseconds and compensates the Bluetooth delay, so both displays
+    flip their seconds together). The volume slider drives the device's
+    software volume, the same one its VOL slider shows. The HVSC section
+    searches hvsc.c64.org and writes tunes straight to the device over SMP
+    (song lengths and tune info come from the HVSC databases, cached by the
     browser) - that needs R/W mode too.
   </p>
 </main>

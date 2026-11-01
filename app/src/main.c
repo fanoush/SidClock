@@ -434,6 +434,7 @@ static bool alarm_ringing;
 static uint32_t alarm_until;      /* k_uptime deadline of the ringing alarm */
 static uint32_t alarm_fired_min = 0xFFFFFFFFU; /* wall minute already fired */
 static uint8_t volume = 26; /* ~10% default: Commando at full blast is loud */
+static bool vol_cfg_dirty;  /* volume changed, /home/vol.cfg stale */
 static bool sound_on = true;
 static bool fs_ready;
 static int fs_mount_err; /* last LittleFS mount failure, 0 when mounted */
@@ -935,6 +936,12 @@ static int64_t uptime_last;             /* grtc_ms() of that reading */
 static bool time_guard_on;              /* epoch_last/uptime_last valid */
 static uint32_t time_glitches;          /* timebase discontinuities seen */
 
+/* A host set the clock (CTS write): the panel still shows the old time
+ * until the next minute tick, which can be up to 60 s away - and a set
+ * that only changes the date (same minute of the day) would never repaint
+ * it. The main loop consumes this and forces one redraw. */
+static volatile bool clock_redraw_req;
+
 /* Longest the app ever goes without sampling the clock (the dark-panel
  * fallback polls touch every 5 s); more counter time than this between
  * two readings is a timebase jump, not elapsed time. */
@@ -998,6 +1005,28 @@ static uint32_t epoch_now(void)
 	return e;
 }
 
+/* Wall clock plus its sub-second part (1/256 s) for the Current Time
+ * characteristic. The host uses the fraction to line its own display up
+ * with the device's second boundary; without it a host has to guess where
+ * in the second the read landed and can be a second off. */
+static uint32_t epoch_now_frac(uint8_t *frac256)
+{
+	k_spinlock_key_t key = k_spin_lock(&time_lock);
+	int64_t now = grtc_ms();
+	uint32_t e = epoch_now_locked();
+	int64_t d = now - uptime_set;
+
+	k_spin_unlock(&time_lock, key);
+
+	if (d < 0) {
+		d = 0;
+	}
+	if (frac256 != NULL) {
+		*frac256 = (uint8_t)(((d % 1000) * 256) / 1000);
+	}
+	return e;
+}
+
 /* Days since 1970-01-01 from a civil date (Howard Hinnant's algorithm). */
 static int64_t days_from_civil(int y, unsigned m, unsigned d)
 {
@@ -1035,22 +1064,27 @@ static void time_cfg_save(void); /* defined below */
 static void srate_cfg_save(uint32_t hz); /* defined below */
 
 static void time_set_from_host(uint16_t year, uint8_t mon, uint8_t day,
-			       uint8_t hh, uint8_t mm, uint8_t ss)
+			       uint8_t hh, uint8_t mm, uint8_t ss,
+			       uint32_t ms)
 {
 	uint32_t secs = (uint32_t)(days_from_civil(year, mon, day) * 86400 +
 				   hh * 3600 + mm * 60 + ss);
 	k_spinlock_key_t key = k_spin_lock(&time_lock);
 
 	epoch_set = secs;
-	uptime_set = grtc_ms();
+	/* Back-date the anchor by the sub-second part, so the clock keeps the
+	 * host's fraction instead of snapping to the whole second (that snap
+	 * is what made the two clocks differ by up to a second). */
+	uptime_set = grtc_ms() - (int64_t)ms;
 	epoch_last = secs;
 	uptime_last = uptime_set;
 	time_guard_on = true;
 	k_spin_unlock(&time_lock, key);
 
+	clock_redraw_req = true; /* repaint now, not at the next minute tick */
 	time_cfg_save(); /* survive reboots (no RTC on the board) */
-	LOG_INF("time set: %04u-%02u-%02u %02u:%02u:%02u", year, mon, day, hh,
-		mm, ss);
+	LOG_INF("time set: %04u-%02u-%02u %02u:%02u:%02u.%03u", year, mon, day,
+		hh, mm, ss, (unsigned)ms);
 }
 
 /*
@@ -1250,13 +1284,15 @@ static const char *sid_engine_label(void)
 static void ble_apply_mode(void);
 static void ble_ui_sync(void);
 static void sound_set(bool on);
+static void set_volume(uint8_t value);
 
 
 static uint8_t cts_value[10];
 
 static void cts_fill(void)
 {
-	uint32_t now = epoch_now();
+	uint8_t frac;
+	uint32_t now = epoch_now_frac(&frac);
 	uint32_t days = now / 86400U;
 	uint32_t rem = now % 86400U;
 	int y, m, d;
@@ -1271,8 +1307,8 @@ static void cts_fill(void)
 	cts_value[6] = (uint8_t)(rem % 60U);
 	/* 1 = Monday .. 7 = Sunday; Unix day 0 was a Thursday */
 	cts_value[7] = (uint8_t)(((days + 3U) % 7U) + 1U);
-	cts_value[8] = 0U; /* fractions of a second (256ths) */
-	cts_value[9] = 0U; /* adjust reason: manual time update */
+	cts_value[8] = frac; /* fractions of a second (256ths) */
+	cts_value[9] = 0U;   /* adjust reason: manual time update */
 }
 
 static ssize_t ble_cts_read(struct bt_conn *conn,
@@ -1292,6 +1328,7 @@ static ssize_t ble_cts_write(struct bt_conn *conn,
 	const uint8_t *p = buf;
 	uint16_t year;
 	uint8_t mon, day, hh, mm, ss;
+	uint32_t ms;
 
 	if (ble_mode != BLE_MODE_RW) {
 		return BT_GATT_ERR(BT_ATT_ERR_WRITE_NOT_PERMITTED);
@@ -1306,13 +1343,16 @@ static ssize_t ble_cts_write(struct bt_conn *conn,
 	hh = p[4];
 	mm = p[5];
 	ss = p[6];
+	/* p[7] is the day of week (derived from the date here, ignored) and
+	 * p[9] the adjust reason; p[8] is the sub-second part in 1/256 s. */
+	ms = ((uint32_t)p[8] * 1000U + 128U) / 256U;
 
 	if (year < 1970U || mon < 1U || mon > 12U || day < 1U || day > 31U ||
 	    hh > 23U || mm > 59U || ss > 59U) {
 		return BT_GATT_ERR(BT_ATT_ERR_VALUE_NOT_ALLOWED);
 	}
 
-	time_set_from_host(year, mon, day, hh, mm, ss);
+	time_set_from_host(year, mon, day, hh, mm, ss, ms);
 
 	return len;
 }
@@ -1654,8 +1694,12 @@ static ssize_t ble_dbg_read(struct bt_conn *conn,
 	}
 	/* A blob built with FLPR_PROF=1 keeps per-section cycle averages in
 	 * prof[]; print them on a snapshot read so `log` can show where the
-	 * split CPU half spends its time. Silent for normal builds (zero). */
-	if (FLPR_SHARED->prof[3] != 0U) {
+	 * split CPU half spends its time. Silent for normal builds (zero) and
+	 * whenever the split engine is not running: the shared block is
+	 * retained RAM, so a stale average from an earlier split run would
+	 * otherwise make every snapshot read (and every `log` page) print a
+	 * line while the M33 is running cRSID. */
+	if (FLPR_SPLIT->enable != 0U && FLPR_SHARED->prof[3] != 0U) {
 		LOG_INF("split prof: cpu %u cia %u vic %u total %u cyc/frame",
 			(unsigned int)FLPR_SHARED->prof[0],
 			(unsigned int)FLPR_SHARED->prof[1],
@@ -1691,6 +1735,14 @@ static char sid_req_name[24];       /* 0x11 and 0x20 file name */
  * `.stil` is one character longer than the `.sid` it belongs to, so the
  * old 20-character cap left e.g. Turrican_intro_s.stil (21) behind. */
 #define SID_CMD_NAME_MAX 23U
+
+/* Volume writes are last-write-wins instead of going through the single
+ * sid_req slot. A slider drag sends a value every ~100 ms; rejecting a
+ * write while the previous one is still pending (sid_req_post does) makes
+ * Chrome report "GATT operation failed ... unknown" for those steps, so
+ * the drag looks broken even though the link is fine. */
+static volatile bool vol_req_pending;
+static uint8_t vol_req_value;
 
 static int sid_req_post(uint8_t op, uint8_t arg, const char *name)
 {
@@ -1728,6 +1780,7 @@ static ssize_t ble_dbg_write(struct bt_conn *conn,
 	      (len == 3U && p[0] == 0x33U) ||
 	      (len == 2U && p[0] == 0x35U) ||
 	      (len == 3U && p[0] == 0x36U) ||
+	      (len == 2U && p[0] == 0x37U) ||
 	      (len >= 2U && len <= SID_CMD_NAME_MAX + 1U && p[0] == 0x11U) ||
 	      (len >= 2U && len <= SID_CMD_NAME_MAX + 1U && p[0] == 0x16U) ||
 	      (len == 2U && p[0] >= 0x18U && p[0] <= 0x1CU) ||
@@ -1872,6 +1925,17 @@ static ssize_t ble_dbg_write(struct bt_conn *conn,
 		srate_cfg_save(hz);
 		break;
 	}
+	case 0x37:
+		/* Software volume (0-255), the same as the VOL slider; the
+		 * player state carries it back at [7]. Parked for the main
+		 * loop (it repaints the slider) as a last-write-wins value:
+		 * a drag sends many of these and must never be rejected. */
+		if (len != 2U) {
+			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+		}
+		vol_req_value = p[1];
+		vol_req_pending = true;
+		break;
 	case 0x35:
 		/* SID waveform quality: 0 = light (default), 1 = oversampled
 		 * (HQ). Not persisted; HQ costs ~4.6x the SID stage (41 us per
@@ -2203,7 +2267,7 @@ static void player_state_fill(void)
 	/* the engine reports the chip as 6581/8580; the wire carries 1/2 */
 	player_state[5] = (sid_player_chip() == 8580) ? 2U : 1U;
 	player_state[6] = player_info_gen;
-	player_state[7] = 0U;
+	player_state[7] = volume; /* software volume (0-255), the VOL slider */
 	sys_put_le32(sid_player_elapsed_s(), player_state + 8);
 	sys_put_le32(sid_length_cur(), player_state + 12);
 }
@@ -4010,6 +4074,15 @@ static void sid_req_take(void)
 	char name[24];
 	char path[40];
 
+	/* last-write-wins volume from a slider drag; runs before the
+	 * early return so it works with no player command queued */
+	if (vol_req_pending) {
+		uint8_t v = vol_req_value;
+
+		vol_req_pending = false;
+		set_volume(v);
+	}
+
 	if (op == 0U) {
 		return;
 	}
@@ -4209,7 +4282,10 @@ static uint32_t clock_last_min = 0xFFFFFFFFU;
 
 static bool clock_tick(void)
 {
-	uint32_t mins = (epoch_now() / 60U) % (24U * 60U);
+	/* the full epoch minute, not the minute of the day: a date change
+	 * (e.g. a host setting the clock to the same time on another day)
+	 * must repaint the date line too */
+	uint32_t mins = epoch_now() / 60U;
 
 	if (mins == clock_last_min) {
 		return false;
@@ -4268,10 +4344,16 @@ static void set_volume(uint8_t value)
 {
 	volume = value;
 	audio_set_volume(value);
-	if (ui_scr == SCR_MAIN) {
-		draw_slider_volume();
-	} else if (ui_scr == SCR_SID) {
-		sid_draw_volume();
+	vol_cfg_dirty = true; /* persisted once the change settles */
+	/* the panel may be dark (SLEEP) or showing the idle face: the slider
+	 * is only on the main and SID screens, and a redraw there would paint
+	 * over the clock */
+	if (display_on && !idle_mode) {
+		if (ui_scr == SCR_MAIN) {
+			draw_slider_volume();
+		} else if (ui_scr == SCR_SID) {
+			sid_draw_volume();
+		}
 	}
 	LOG_INF("volume %u", value);
 }
@@ -4455,6 +4537,55 @@ static void bri_cfg_load(void)
 		bri_lvl[2], bri_manual, idle_timeout_s);
 }
 
+/* Software volume persistence: /home/vol.cfg holds the 0-255 slider value.
+ * It is flushed after the slider settles (a drag would otherwise write the
+ * file on every pixel) and by SAVE STATE. */
+static void vol_cfg_save(void)
+{
+	char buf[8];
+	struct fs_file_t f;
+	int n;
+
+	if (!fs_ready) {
+		return;
+	}
+	n = snprintf(buf, sizeof(buf), "%u\n", volume);
+	fs_file_t_init(&f);
+	if (fs_open(&f, "/home/vol.cfg",
+		    FS_O_WRITE | FS_O_CREATE | FS_O_TRUNC) == 0) {
+		(void)fs_write(&f, buf, (size_t)n);
+		fs_close(&f);
+	}
+}
+
+static void vol_cfg_load(void)
+{
+	struct fs_file_t f;
+	char buf[8];
+	ssize_t rd;
+	unsigned v;
+
+	if (!fs_ready) {
+		return;
+	}
+	fs_file_t_init(&f);
+	if (fs_open(&f, "/home/vol.cfg", FS_O_READ) < 0) {
+		return;
+	}
+	rd = fs_read(&f, buf, sizeof(buf) - 1U);
+	fs_close(&f);
+	if (rd <= 0) {
+		return;
+	}
+	buf[rd] = '\0';
+	if (sscanf(buf, "%u", &v) != 1 || v > 255U) {
+		return;
+	}
+	volume = (uint8_t)v;
+	audio_set_volume(volume);
+	LOG_INF("volume restored: %u", v);
+}
+
 /* SAVE STATE: flush the clock, brightness profiles, alarms and the last
  * tune to /home in one go. */
 static void save_all_state(void)
@@ -4469,10 +4600,12 @@ static void save_all_state(void)
 	time_cfg_save();
 	bri_cfg_dirty = false;
 	alm_cfg_dirty = false;
+	vol_cfg_dirty = false;
 	bri_cfg_save();
 	alm_cfg_save();
+	vol_cfg_save();
 	sid_remember_save();
-	LOG_INF("state saved (time brightness alarms sid)");
+	LOG_INF("state saved (time brightness alarms volume sid)");
 }
 
 /* LiPo discharge curve (mV -> percent), clamped. */
@@ -5804,7 +5937,7 @@ static void enter_idle(void)
 	 * exactly at the next minute boundary - forcing 0xFFFFFFFF made the
 	 * clock jump again within a second of entering idle.
 	 */
-	clock_last_min = (epoch_now() / 60U) % (24U * 60U);
+	clock_last_min = epoch_now() / 60U;
 	k_sem_reset(&touch_sem);
 	draw_idle_face();
 	LOG_INF("idle mode on (rot %d, quad %u)", idle_rot, idle_quad);
@@ -6152,6 +6285,7 @@ int main(void)
 	(void)fs_unlink("/home/dir.txt");
 	bri_cfg_load();   /* restore the ambient brightness profiles */
 	srate_cfg_load(); /* restore the split-rate override */
+	vol_cfg_load();   /* restore the software volume */
 	for (int i = 0; i < 5; i++) {
 		alarms[i].hour = 7;
 		alarms[i].len_sec = 300;
@@ -6227,8 +6361,7 @@ int main(void)
 					display_on = true;
 					battery_poll(); /* lux + AUTO bri */
 					clock_last_min =
-						(epoch_now() / 60U) %
-						(24U * 60U);
+						epoch_now() / 60U;
 					draw_idle_face();
 					LOG_INF("sleep: alarm -> idle face");
 				} else {
@@ -6294,6 +6427,12 @@ int main(void)
 					draw_idle_face();
 				}
 			}
+			if (clock_redraw_req) {
+				/* a host set the clock: repaint now instead of
+				 * waiting for the next minute tick */
+				clock_redraw_req = false;
+				clock_last_min = 0xFFFFFFFFU;
+			}
 			if (clock_tick()) {
 				audio_dbg_byte(18, (uint8_t)idle_rot);
 				audio_dbg_byte(19, idle_quad);
@@ -6310,6 +6449,10 @@ int main(void)
 		touch_poll();
 
 		/* keep the header clock/date current */
+		if (clock_redraw_req) {
+			clock_redraw_req = false;
+			clock_last_min = 0xFFFFFFFFU;
+		}
 		if (clock_tick()) {
 			redraw_clock();
 		}
@@ -6349,8 +6492,8 @@ int main(void)
 			}
 		}
 
-		/* persist edited ambient profiles / alarms (throttled) */
-		if ((bri_cfg_dirty || alm_cfg_dirty) &&
+		/* persist edited ambient profiles / alarms / volume (throttled) */
+		if ((bri_cfg_dirty || alm_cfg_dirty || vol_cfg_dirty) &&
 		    (k_uptime_get_32() - t_bricfg > 3000U)) {
 			t_bricfg = k_uptime_get_32();
 			if (bri_cfg_dirty) {
@@ -6360,6 +6503,10 @@ int main(void)
 			if (alm_cfg_dirty) {
 				alm_cfg_dirty = false;
 				alm_cfg_save();
+			}
+			if (vol_cfg_dirty) {
+				vol_cfg_dirty = false;
+				vol_cfg_save();
 			}
 		}
 

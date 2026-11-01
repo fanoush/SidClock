@@ -7,7 +7,7 @@ All interactions use standard services plus one custom debug service.
 |---|---|---|---|
 | SMP `8d53dc1d-1db7-4cd3-868b-8a527460aa84` | `da2e7828-fbce-4e01-ae9e-261174997c48` | write-w/o-rsp, notify | MCUmgr/SMP with **img_mgmt**, **os_mgmt**, **fs_mgmt**. Used for OTA and file transfers. |
 | Battery `0x180F` | Battery Level `0x2A19` | read, notify | percent |
-| Current Time `0x1805` | Current Time `0x2A2B` | read, write | 10-byte little-endian; there is no RTC, the time is kept from uptime |
+| Current Time `0x1805` | Current Time `0x2A2B` | read, write | 10-byte little-endian; there is no RTC, the time is kept from uptime. The sub-second byte (`[8]`, 1/256 s) is both reported and honoured, so a host can set and compare the clock to millisecond precision |
 | Environmental Sensing `0x181A` | Illuminance `0x2AFB` | read | uint24 little-endian, **0.01 lx** units |
 | SidClock (custom) `73696463-6c6f-4b01-9c1d-77ce3f41a5c0` | `73696463-6c6f-4b02-9c1d-77ce3f41a5c0` | read, write | 132-byte debug snapshot; commands below. Writes are rejected in the R/O and OFF access modes (see below). |
 | " | `73696463-6c6f-4b03-9c1d-77ce3f41a5c0` | read, notify | **player state**, 16 bytes - notifies on change and 1 Hz while playing |
@@ -54,6 +54,7 @@ signals: they are only compiled into **debug builds**
 | `22` + u8 `mode` | end-of-tune mode - the SID screen END button: `0` = next subtune, `1` = next tune, `2` = loop the subtune. Takes effect at the next song end, no reload. |
 | `35` + u8 `mode` | SID waveform quality: `0` = light (default), `1` = HQ (oversampled waveforms/filter). Not persisted, applies from the next sample; HQ costs ~4.6x the SID stage (~43 us/frame on the M33 in split mode), so it is a listening A/B tool. |
 | `36` + u16 LE `hz` | split-engine SID render rate (`0` = the SID-count default: 1/2 SID 34000, 3 SID 22050; the hardware plays those at ~36.0/~22.9 kHz). Restarts the SID stream at the same tune position and is **persisted** in `/home/srate.cfg`, so the choice survives a reboot; `0` clears it. `audio` reports the active rate. |
+| `37` + u8 `volume` | software volume 0-255 - the VOL slider. The player state reports it back at `[7]` and it is persisted in `/home/vol.cfg` once the change settles (a slider drag writes once, not per step). |
 | `30` + u8 `run` | FLPR (VPR RISC-V) blob control: `0` = halt the core (reset into the stopped state), `1` = start the embedded blob. The blob never runs at boot. See [flpr.md](flpr.md). |
 | `33` + u16 LE `iterations` | FLPR ALU probe: a register-only loop on the blob, core counters in snapshot `[152..159]` (cycles, instructions). Separates a slow core from fetch/memory stalls. |
 | `1D` [+ u8 `page`] | stack telemetry for the overflow hunt, 4 rows per page: the **interrupt stack** first, then the threads in creation order. `(size, free)` u16 pairs at `[36..51]`, the matching 11-byte names at `[52..95]`; `[34]` marker, `[35]` page with bit 7 set to say the names follow and bit 6 set on the last page (bit 7 clear = the older 5-per-page layout without names; bit 6 clear everywhere = firmware from before the interrupt row). Only the requested page is latched, so one page costs 4 stack scans. Under 256 B free anywhere is the smoking gun. |
@@ -161,7 +162,8 @@ have to parse the developer snapshot and does not have to poll:
   engine, bit 5 split engine (FLPR CPU + M33 SID; bit 4 is retired);
   `[1]` subtune (0-based), `[2]` song count, `[3]` end mode,
   `[4]` chip model mode (0 = auto, 1 = 6581, 2 = 8580), `[5]` chip in use
-  (1 = 6581, 2 = 8580), `[6]` **info generation**, `[7]` reserved;
+  (1 = 6581, 2 = 8580), `[6]` **info generation**, `[7]` **volume** (0-255,
+  the VOL slider, so a host can follow on-device changes);
   `[8..11]` elapsed seconds (u32 LE), `[12..15]` the current subsong
   length from the `.len` sidecar (u32 LE, 0 = unknown).
 - **info** `73696463-6c6f-4b04-9c1d-77ce3f41a5c0`, 96 bytes: title (32),
@@ -231,6 +233,7 @@ tools/sidclock_ble.py state          # tune, subtune, position, modes
 tools/sidclock_ble.py watch          # follow the state notifications
 tools/sidclock_ble.py playpause      # also: next, prev, subnext, subprev
 tools/sidclock_ble.py subplay 3      # subtune 3 of the loaded tune
+tools/sidclock_ble.py volume 128     # software volume 0-255 (no value = read)
 tools/sidclock_ble.py ls             # list /home (paged listing command)
 ```
 

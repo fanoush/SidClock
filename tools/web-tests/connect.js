@@ -175,6 +175,22 @@ function installBleMock() {
     },
   };
 
+  /* Current Time (0x1805/0x2A2B): a fixed 2026-11-02 12:00:00 that a write
+   * replaces, so the page's clock alignment and set-time path can be
+   * driven offline. */
+  const ctsBytes = new Uint8Array([0xea, 0x07, 11, 2, 12, 0, 0, 1, 0, 0]);
+  const cts = {
+    value: view(ctsBytes),
+    async readValue() {
+      return view(ctsBytes);
+    },
+    async writeValue(value) {
+      ctsBytes.set(value);
+      clock.ctsWrites = clock.ctsWrites || [];
+      clock.ctsWrites.push([...value]);
+    },
+  };
+
   const chars = new Map([
     ['73696463-6c6f-4b02-9c1d-77ce3f41a5c0', dbg],
     ['73696463-6c6f-4b03-9c1d-77ce3f41a5c0', state],
@@ -183,9 +199,18 @@ function installBleMock() {
   const sid = {
     async getCharacteristic(uuid) { return chars.get(uuid); },
   };
+  const ctsSvc = {
+    async getCharacteristic(uuid) {
+      if (uuid === 0x2a2b ||
+          uuid === '00002a2b-0000-1000-8000-00805f9b34fb') return cts;
+      throw new DOMException('not found', 'NotFoundError');
+    },
+  };
   const server = {
     async getPrimaryService(uuid) {
       if (uuid === '73696463-6c6f-4b01-9c1d-77ce3f41a5c0') return sid;
+      if (uuid === 0x1805 ||
+          uuid === '00001805-0000-1000-8000-00805f9b34fb') return ctsSvc;
       throw new DOMException('not found', 'NotFoundError');
     },
   };
@@ -334,6 +359,48 @@ await test('connect: the end-mode badge cycles over Bluetooth', async () => {
                  'cycles to loop');
   ble.emitState([1, 0, 2, 2, 0, 2, 1, 0, 5, 0, 0, 0, 100, 0, 0, 0]);
   await waitFor(() => p.$('ends').textContent === 'ends: loop sub', 'loops');
+});
+
+await test('connect: the volume slider writes 0x37 and follows the state', async () => {
+  const p = await loadPage();
+  const ble = p.ble;
+
+  ok(p.$('volume').disabled, 'slider disabled while disconnected');
+  p.$('connect').click();
+  await waitFor(() => p.$('connect').textContent === 'Disconnect', 'connected');
+  await waitFor(() => p.$('volume').value === '0', 'volume from the device');
+  eq(p.$('volpct').textContent, '0%', 'label matches');
+
+  p.$('volume').value = '128';
+  p.$('volume').dispatchEvent(new Event('input'));
+  await waitFor(() => ble.writes.some((w) => w[0] === 0x37 && w[1] === 128),
+                 'command 0x37 carries the slider value');
+  eq(p.$('volpct').textContent, '50%', 'percentage label');
+
+  ble.emitState([1, 0, 2, 0, 0, 2, 1, 200, 5, 0, 0, 0, 100, 0, 0, 0]);
+  await waitFor(() => p.$('volume').value === '200', 'device push moves it');
+  eq(p.$('volpct').textContent, '78%', 'label follows the push');
+});
+
+await test('connect: the clock uses the sub-second field and set time', async () => {
+  const p = await loadPage();
+  const ble = p.ble;
+
+  p.$('connect').click();
+  await waitFor(() => p.$('connect').textContent === 'Disconnect', 'connected');
+  await waitFor(() => /^12:00:0/.test(p.$('devtime').textContent),
+                 'device clock from the CTS read');
+  ok(p.$('devtime').classList.contains('warn'),
+     'the fixed test clock disagrees with the browser');
+
+  p.$('settime').click();
+  await waitFor(() => (ble.ctsWrites || []).length > 0, 'time written');
+  const w = ble.ctsWrites[ble.ctsWrites.length - 1];
+  eq(w.length, 10, '10-byte Current Time value');
+  eq(w[0] | (w[1] << 8), new Date().getFullYear(), 'current year');
+  ok(w[8] >= 0 && w[8] <= 255, 'fraction byte present');
+  await waitFor(() => !p.$('devtime').classList.contains('warn'),
+                 'the clocks agree after a set');
 });
 
 await test('connect: a rejected CCC write recovers with a reconnect', async () => {

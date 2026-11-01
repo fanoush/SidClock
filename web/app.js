@@ -18,12 +18,13 @@ const $ = (id) => document.getElementById(id);
 const sc = new SidClock();
 
 const CONTROLS = ['prev', 'play', 'next', 'stop', 'subprev', 'subnext',
-                  'subtune', 'ends', 'settime'];
+                  'subtune', 'ends', 'settime', 'volume'];
 
 let lastGeneration = -1;
 let noteTimer = null;
-let deviceBase = null;       // { time, at } of the last device clock read
+let deviceBase = null;       // { ms, at } of the last device clock read
 let deviceTimeUnset = false; // the device answered "unset" (fresh reset)
+let volDragging = false;     // ignore pushed volume while the slider is used
 let currentInfo = null;      // last info read (title / name / author)
 let currentState = null;     // last pushed player state
 let smp = null;              // SMP client while connected in R/W mode
@@ -173,6 +174,11 @@ $('connect').addEventListener('click', async () => {
       note(`tune info failed: ${errorText(e)}`, true);
     }
     await readClock();
+    try {
+      showVolume(await sc.readVolume());
+    } catch (e) {
+      console.error('volume', e);
+    }
     await setupSmp();
     refreshControls();
     refreshLibrary();
@@ -226,6 +232,7 @@ function renderState(st) {
   $('engine').textContent = st.legacyEngine ? 'legacy engine'
     : st.splitEngine ? 'cRSID split (FLPR CPU)' : 'cRSID';
   $('snd').textContent = st.sound ? 'snd on' : 'muted';
+  showVolume(st.volume);
 
   const pct = st.length > 0
     ? Math.min(100, (st.elapsed / st.length) * 100) : 0;
@@ -295,10 +302,19 @@ function fmtClock(d) {
   return d.toTimeString().slice(0, 8);
 }
 
+/** Device epoch milliseconds from a Current Time value (local fields, like
+ *  the device keeps them). The 1/256 s fraction is rounded to ms - the
+ *  display still shows whole seconds, it just flips at the device's own
+ *  second boundary instead of an arbitrary browser phase. */
+function timeMs(t) {
+  const d = new Date(t.year, t.month - 1, t.day,
+                     t.hours, t.minutes, t.seconds);
+  return d.getTime() + Math.round(((t.fraction || 0) * 1000) / 256);
+}
+
 function deviceNow() {
   if (!deviceBase) return null;
-  return new Date(deviceBase.time.getTime() +
-                  (performance.now() - deviceBase.at));
+  return new Date(deviceBase.ms + (performance.now() - deviceBase.at));
 }
 
 function showTime(t) {
@@ -309,30 +325,43 @@ function showTime(t) {
     return;
   }
   deviceTimeUnset = false;
-  deviceBase = {
-    time: new Date(t.year, t.month - 1, t.day,
-                   t.hours, t.minutes, t.seconds),
-    at: performance.now(),
-  };
+  /* The value was sampled about half a round trip before it arrived, so
+   * the device clock at `at` was that much further on. Without the
+   * correction the page ran up to a second behind the device. */
+  const at = (typeof t.at === 'number') ? t.at : performance.now();
+  deviceBase = { ms: timeMs(t) + (t.rtt || 0) / 2, at };
   tickClocks();
 }
 
+let clockTimer = 0;
+
+/* Repaint the two clocks, then re-arm for just after the next second
+ * boundary of the clock being displayed: the device's when it is known, so
+ * the seconds flip together with the device's own panel instead of on an
+ * arbitrary phase (which made one clock look a second ahead). */
 function tickClocks() {
+  clearTimeout(clockTimer);
   const now = new Date();
   $('hosttime').textContent = fmtClock(now);
 
   const dev = deviceNow();
+  let wait;
+
   if (dev) {
+    const devMs = dev.getTime();
     $('devtime').textContent = fmtClock(dev);
-    // a couple of seconds of slack: clock reads truncate sub-second time
-    $('devtime').classList.toggle('warn', Math.abs(dev - now) > 2500);
+    // a second and a half of slack: the read is accurate to a few ms now,
+    // so anything more is a real disagreement
+    $('devtime').classList.toggle('warn',
+      Math.abs(devMs - now.getTime()) > 1500);
+    wait = 1000 - (((devMs % 1000) + 1000) % 1000) + 15;
   } else {
     $('devtime').textContent = deviceTimeUnset ? 'unset' : '--:--:--';
     $('devtime').classList.toggle('warn', deviceTimeUnset);
+    wait = 1000 - (performance.now() % 1000) + 15;
   }
+  clockTimer = setTimeout(tickClocks, wait);
 }
-
-setInterval(tickClocks, 1000);
 
 async function readClock() {
   try {
@@ -971,6 +1000,65 @@ function applyTheme(theme, persist) {
 $('theme').addEventListener('click', () => {
   applyTheme(document.documentElement.dataset.theme === 'light'
     ? 'dark' : 'light', true);
+});
+
+/* ---------- volume ---------- */
+
+function fmtVolume(v) {
+  return `${Math.round(v * 100 / 255)}%`;
+}
+
+/* The device pushes its volume back in the player state; a drag would fight
+ * that, so ignore pushes while the pointer is on the slider. */
+function showVolume(v) {
+  if (v == null || volDragging) return;
+  const el = $('volume');
+  if (Number(el.value) !== v) el.value = String(v);
+  $('volpct').textContent = fmtVolume(v);
+}
+
+/* A drag produces far more values than the link can carry, so send the
+ * latest one and drop the rest: one write in flight at a time, and a value
+ * that arrives while it runs replaces the queued one. */
+let volSending = false;
+let volNext = null;
+
+async function pushVolume(v) {
+  if (volSending) {
+    volNext = v;
+    return;
+  }
+  volSending = true;
+  try {
+    await sc.setVolume(v);
+  } catch (e) {
+    note(commandError(e, 'volume'), true);
+  } finally {
+    volSending = false;
+    if (volNext != null) {
+      const next = volNext;
+      volNext = null;
+      pushVolume(next);
+    }
+  }
+}
+
+const sendVolume = throttled((v) => { pushVolume(v); }, 80);
+
+$('volume').addEventListener('pointerdown', () => {
+  volDragging = true;
+});
+window.addEventListener('pointerup', () => {
+  volDragging = false;
+});
+window.addEventListener('pointercancel', () => {
+  volDragging = false;
+});
+
+$('volume').addEventListener('input', () => {
+  const v = Number($('volume').value);
+  $('volpct').textContent = fmtVolume(v);
+  sendVolume(v);
 });
 
 /* ---------- controls ---------- */

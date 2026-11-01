@@ -67,6 +67,13 @@ bool flpr_alive(void)
 void flpr_clear(void)
 {
 	FLPR_SHARED->magic = 0U;
+	/* The shared block is retained RAM: a stale profiling average (or
+	 * run flag) from an earlier split run must not look live after a
+	 * warm reset or an engine switch. */
+	for (int i = 0; i < 4; i++) {
+		FLPR_SHARED->prof[i] = 0U;
+	}
+	FLPR_SHARED->run = 0U;
 }
 
 int flpr_start(void)
