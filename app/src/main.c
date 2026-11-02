@@ -110,27 +110,31 @@ LOG_MODULE_REGISTER(sidclock, LOG_LEVEL_INF);
  * HOME button on the second header line; the idle clock face is
  * unchanged. */
 
-/* Shared HOME button, centred between the date and the charging status */
+/* Shared HOME button, centred between the date and the charging status.
+ * Its height matches the SID transport buttons (42 px) so it is as easy to
+ * hit; the text stays on the same line because the extra height is split
+ * above and below. */
 #define HOME_X 184
-#define HOME_Y 26
+#define HOME_Y 19
 #define HOME_W 80
-#define HOME_H 28
+#define HOME_H 42
 
 /* Main screen: utility buttons in a 3x2 grid between the tiles and the
  * sliders (columns align with the sliders below, the middle cell of the
- * second row is intentionally empty) */
+ * second row is intentionally empty). Height matches the shared HOME
+ * button so the rows are as easy to hit as the SID transport. */
 #define UB_W 136
-#define UB_H 34
+#define UB_H 42
 #define UB_X1 8
 #define UB_X2 156
 #define UB_X3 304
-#define UB_Y1 198
-#define UB_Y2 244
+#define UB_Y1 181
+#define UB_Y2 236
 
 /* Main screen: navigation tiles (SID / alarms / sensors / settings) */
-#define TILE_Y 96
+#define TILE_Y 84
 #define TILE_W 106
-#define TILE_H 92
+#define TILE_H 84
 #define TILE_SID_X 6
 #define TILE_ALM_X 116
 #define TILE_SENS_X 226
@@ -3333,7 +3337,7 @@ static void draw_sid_buttons(void)
 	bool playing = sid_player_is_playing();
 	bool is_paused = sid_player_is_paused();
 
-	draw_button(SID_TUNEL_X, SID_ROW1_Y, SID_TUNEL_W, SID_ROW1_H, "TUNE<",
+	draw_button(SID_TUNEL_X, SID_ROW1_Y, SID_TUNEL_W, SID_ROW1_H, "<TUNE",
 		    false);
 	draw_button(SID_PLAY_X, SID_ROW1_Y, SID_PLAY_W, SID_ROW1_H,
 		    !playing ? "PLAY" : is_paused ? "RESUME" : "PAUSE",
@@ -3342,7 +3346,7 @@ static void draw_sid_buttons(void)
 		    false);
 	draw_button(SID_TUNER_X, SID_ROW1_Y, SID_TUNER_W, SID_ROW1_H, "TUNE>",
 		    false);
-	draw_button(SID_SUBL_X, SID_ROW2_Y, SID_SUB_W, SID_SUB_H, "SUB<", false);
+	draw_button(SID_SUBL_X, SID_ROW2_Y, SID_SUB_W, SID_SUB_H, "<SUB", false);
 	draw_button(SID_END_X, SID_ROW2_Y, SID_SUB_W, SID_SUB_H,
 		    end_labels[sid_end_mode], false);
 	draw_button(SID_SUBR_X, SID_ROW2_Y, SID_SUB_W, SID_SUB_H, "SUB>", false);

@@ -24,6 +24,13 @@
 
 **Fixes**
 
+- UI hit targets: the shared HOME button is 42 px tall now - the same as
+  the SID transport row, with the label on the same line (the extra height
+  is split above and below). On the main screen the tile row starts at the
+  SID screen's transport line (y 84) instead of 12 px lower, the tiles are
+  slightly shorter, and the two utility rows below are 42 px tall like
+  HOME, with even 13 px gaps down to the sliders. The SID prev-tune and
+  prev-subtune buttons read `<TUNE` and `<SUB` (arrow first).
 - Setting the clock from a host now repaints the panel immediately. The
   clock only redrew when the minute *of the day* changed, so a set that
   kept the same HH:MM (e.g. a date-only correction, or a few seconds of
