@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.0.10
 
 **New**
 
@@ -21,6 +21,17 @@
   send the time at which the write *arrives*, instead of the time the
   payload was built, so the device no longer ends up one link delay
   behind the host.
+
+- The split engine runs the SID stage at a high rate (nominal 42.5 kHz,
+  ~45.9 kHz true after the amplifier's clock error), because cRSID's
+  filter tables are built for 44.1 kHz - at the old 22 kHz mode every
+  cutoff was ~0.9 octave low. The M33's SID half costs ~35-40% of the
+  core instead of ~20%, the FLPR half is unchanged. cRSID/cSID cannot
+  afford it and stay at 22 kHz. `splitrate [HZ]` over BLE (`0x36`)
+  switches the split rate live, at the same tune position, for A/B. The
+  default follows the SID count (1 SID and 2 SID 34 kHz, 3 SID 22 kHz)
+  because the M33 SID-stage cost scales with it (55% / 50%; 3 SID at
+  42.5 kHz was 91% and underran).
 
 **Fixes**
 
@@ -113,42 +124,6 @@
   no listing slowdown. A 1024-byte LittleFS cache was tried as well and
   gave nothing over 256 bytes.
 
-## 1.0.9
-
-**New**
-
-- New player command `22` + mode: the end-of-tune mode the SID screen's END
-  button cycles (next subtune, next tune, loop). It runs in the main loop
-  like the other player commands, so the on-device label and the pushed
-  state stay in sync; `sidclock_ble.py endmode nextsub|nexttune|loop`
-  drives it from the host.
-- **Web remote: the end-mode badge**. The cryptic "next sub" text in the
-  progress row moved next to the chip/engine/snd badges and became the
-  one pressable badge: tapping it cycles next sub -> next tune -> loop
-  over the new firmware command `22` (the device pushes the new state and
-  repaints its own SID screen).
-- **Web remote: "already on the device" markers**. Search results now
-  remember what this browser uploaded - the upload map plus the `/home`
-  listing - so a tune that is still on the device shows a green
-  "on device ✓" instead of the upload button. The match is the HVSC id,
-  not the file name, so shortened/renamed uploads and the ~3,700
-  same-name HVSC files are not confused.
-
-**New**
-
-- The split engine runs the SID stage at a high rate (nominal 42.5 kHz,
-  ~45.9 kHz true after the amplifier's clock error), because cRSID's
-  filter tables are built for 44.1 kHz - at the old 22 kHz mode every
-  cutoff was ~0.9 octave low. The M33's SID half costs ~35-40% of the
-  core instead of ~20%, the FLPR half is unchanged. cRSID/cSID cannot
-  afford it and stay at 22 kHz. `splitrate [HZ]` over BLE (`0x36`)
-  switches the split rate live, at the same tune position, for A/B. The
-  default follows the SID count (1 SID and 2 SID 34 kHz, 3 SID 22 kHz)
-  because the M33 SID-stage cost scales with it (55% / 50%; 3 SID at
-  42.5 kHz was 91% and underran).
-
-**Fixes**
-
 - Subtune switching in cRSID and the split engine: Afterburner's second
   and later subtunes played on cSID but went silent/stuck on cRSID
   (and therefore split). cRSID only resets the CPU on a subtune change
@@ -185,14 +160,6 @@
   that health line (`split: flpr cpu N% lead ... (min ...) starved N`),
   and `FLPR_PROF=1 app/build.sh` builds a blob whose per-section cycle
   counts (interpreter/CIAs/VIC) the debug log reports.
-- The `/home` listing stays smooth past the 2 KB RAM index: when the
-  library outgrows it (already the case on the device), the fallback used
-  to reopen the directory and rescans the metadata for every 60-byte
-  page. It now keeps the LittleFS directory iterator and its position
-  open between pages, so a page walks only its own entries; the first
-  page of a session pays one scan, and uploads, deletes and a format
-  restart the iterator. Measured on the device with the index forced to
-  overflow: page 0 ~110 ms, later pages ~65 ms (was ~0.5 s per page).
 
 ## 1.0.9
 
