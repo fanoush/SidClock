@@ -301,8 +301,35 @@ CRSID_HOT_CODE_SPEED INLINE cRSID_Output cRSID_generateSample () { //call this f
  Insert = (signed char) ( (unsigned char) ( ( ( (LFSR >> 16) & 0x99 ) + ( (LFSR >> 8) & 0x72 ) + (LFSR & 0xB4) + 0x7C ) & 0xFF ) >> DITHERNOISE_DIVSHIFTS ) - DITHERNOISE_MID;
  Output.L += Insert; Output.R += Insert;
 
- if ( RARELY(Output.L>=32767) ) Output.L=32767; else if ( RARELY (Output.L<=-32768) ) Output.L=-32768; //saturation arithmetic on overflow
- if ( RARELY(Output.R>=32767) ) Output.R=32767; else if ( RARELY (Output.R<=-32768) ) Output.R=-32768; //saturation arithmetic on overflow
+ //Soft-knee limiter instead of hard clipping: below KNEE the sample is
+ //unchanged (bit-exact), above it the excess is compressed towards full scale
+ //with a continuous slope. Hard saturation of a loud multi-SID mix (e.g. Yet
+ //Bigger Beat 2SID, whose peaks reach ~1.2x full scale) is audible as
+ //crackle/pops on every peak; the knee keeps the level and only touches the
+ //samples that would have clipped.
+ //32-bit math on purpose: this file is linked into the FLPR blob, which has
+ //no 64-bit divide helper. The input is clamped to 8*KNEE first (the curve is
+ //already at ~32650 there), so excess*TOP cannot overflow.
+ { enum { LIMIT_KNEE = 28000, LIMIT_TOP = 32767 - LIMIT_KNEE,
+          LIMIT_IN = 8 * LIMIT_KNEE };
+   FASTVAR int v;
+   if ( RARELY(Output.L > LIMIT_KNEE || Output.L < -LIMIT_KNEE) ) {
+    v = Output.L;
+    if ( v > LIMIT_IN ) v = LIMIT_IN; else if ( v < -LIMIT_IN ) v = -LIMIT_IN;
+    if ( v < 0 ) v = -v;
+    v = LIMIT_KNEE + ((v - LIMIT_KNEE) * LIMIT_TOP) /
+                     ((v - LIMIT_KNEE) + LIMIT_TOP);
+    Output.L = (Output.L < 0) ? -v : v;
+   }
+   if ( RARELY(Output.R > LIMIT_KNEE || Output.R < -LIMIT_KNEE) ) {
+    v = Output.R;
+    if ( v > LIMIT_IN ) v = LIMIT_IN; else if ( v < -LIMIT_IN ) v = -LIMIT_IN;
+    if ( v < 0 ) v = -v;
+    v = LIMIT_KNEE + ((v - LIMIT_KNEE) * LIMIT_TOP) /
+                     ((v - LIMIT_KNEE) + LIMIT_TOP);
+    Output.R = (Output.R < 0) ? -v : v;
+   }
+ }
  return Output;
 }
 
