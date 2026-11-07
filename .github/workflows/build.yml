@@ -68,6 +68,7 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+      actions: write  # dispatch the pages workflow after the release
     steps:
       # gh release needs a git context (it runs `git rev-parse` etc.), so
       # the repo must be checked out even though only artifacts are used.
@@ -103,3 +104,12 @@ jobs:
               --generate-notes \
               dist/*
           fi
+
+      - name: Refresh the web remote
+        # A release created with GITHUB_TOKEN does not fire the `release`
+        # event, so pages.yml would not run and the site would keep the
+        # previous manifest. Dispatch it explicitly (needs actions: write).
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh workflow run pages --ref main

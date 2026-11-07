@@ -232,8 +232,13 @@ Before calling a change done, verify on hardware:
 
    CI builds the firmware and **creates the GitHub release automatically**
    (tag pushes only) with the signed application, the bootloader images and
-   a `SHA256SUMS` file attached. The release also triggers the `pages`
-   workflow, which publishes that image + `firmware/index.json` next to the
-   web remote (that is what its update flow offers). A build re-run on an
-   *existing* release only replaces assets without firing the event, so
-   run Actions -> *pages* -> *Run workflow* afterwards.
+   a `SHA256SUMS` file attached. The release job then **dispatches the
+   `pages` workflow** (`gh workflow run pages`), which publishes that image
+   and `firmware/index.json` next to the web remote - the update flow
+   offers it from there. The explicit dispatch is needed because a release
+   created with `GITHUB_TOKEN` does not fire the `release` event, so
+   `pages.yml` would not run on its own (1.0.11 was the first release to
+   show that: its site kept listing 1.0.10). If you only re-upload assets
+   to an existing release (a re-run), dispatch `pages` by hand; the page
+   and browsers cache the manifest for up to an hour, so a fresh tab or
+   clearing site data shows it immediately.
