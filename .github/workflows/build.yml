@@ -30,11 +30,27 @@ jobs:
       - name: Python build requirements
         run: python3 -m pip install --user -r tools/requirements-build.txt
 
+      - name: Wire protocol descriptors
+        run: |
+          # The committed generated files must match current.json, and the
+          # host tools must at least parse (app/build.sh repeats the check
+          # with --require-version, so VERSION is covered there too).
+          python3 tools/proto_gen.py check
+          python3 -m py_compile tools/protocol.py tools/sidclock_ble.py \
+            tools/fw_manifest.py
+
       - name: Build bootloader
         run: bootloader/build.sh
 
       - name: Build application
         run: app/build.sh
+
+      - name: Firmware update manifest
+        run: |
+          # The web remote's update card trusts this parser: run it on the
+          # real signed image so a header/TLV format change fails the build.
+          python3 tools/fw_manifest.py app/build/zephyr/zephyr.signed.bin \
+            > /dev/null
 
       - uses: actions/upload-artifact@v4
         with:

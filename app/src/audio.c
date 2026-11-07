@@ -40,6 +40,7 @@
 #include <string.h>
 
 #include "audio.h"
+#include "proto_gen.h"
 #include "sid_player.h"
 #include "flpr.h"
 #include "flpr_shared.h"
@@ -125,7 +126,8 @@ static volatile bool split_mode; /* engine split: FLPR CPU + M33 SID */
 static uint32_t flpr_underruns; /* split: buffers that found no samples */
 
 static uint8_t volume = 100;
-static uint8_t dbg[20];
+/* First part of the BLE debug snapshot (the fields audio.c owns). */
+static uint8_t dbg[SC_SNAP_OFF_I2S_PSEL_SCK];
 /* Worst audio-loop gap (ms, low byte) since the host last read the debug
  * snapshot: shows stalls that start after the boot-time max in dbg[16]. */
 static uint8_t stall_since_read;
@@ -978,7 +980,7 @@ void audio_sid_stop(void)
 	}
 }
 
-void audio_read_hw(uint8_t *out, size_t len)
+void audio_read_hw(uint8_t *snap)
 {
 	uint32_t words[3] = {
 		I2S_REGS->PSEL.SCK,
@@ -986,25 +988,24 @@ void audio_read_hw(uint8_t *out, size_t len)
 		I2S_REGS->PSEL.MCK,
 	};
 
-	for (size_t i = 0; i < 12U && i < len; i++) {
-		out[i] = ((const uint8_t *)words)[i];
-	}
-	if (len > 12U) {
-		out[12] = (uint8_t)(I2S_REGS->ENABLE & 1U);
-	}
-	if (len > 13U) {
-		out[13] = (uint8_t)(I2S_REGS->CONFIG.TXEN & 1U);
-	}
+	memcpy(snap + SC_SNAP_OFF_I2S_PSEL_SCK, words, sizeof(words));
+	snap[SC_SNAP_OFF_I2S_ENABLE] =
+		(uint8_t)(I2S_REGS->ENABLE & 1U);
+	snap[SC_SNAP_OFF_I2S_TXEN] =
+		(uint8_t)(I2S_REGS->CONFIG.TXEN & 1U);
 }
 
 /*
- * Live diagnostics for the BLE debug read:
- *   [0]   reserved
- *   [2..3] peak |sample| in the two DMA buffers (LE)
- *   [4..7]/[8..11] first word of each DMA buffer
- *   [21..24]/[25..28] EasyDMA bus-error addresses (0 = none)
+ * Live diagnostics for the BLE debug read (absolute snapshot offsets from
+ * protocol/current.json, i.e. the generated SC_SNAP_OFF_DIAG_... and
+ * SC_SNAP_OFF_I2S_... macros):
+ *   [34]  reserved
+ *   [36..37] peak |sample| in the two DMA buffers (LE)
+ *   [38..41]/[42..45] first word of each DMA buffer
+ *   [55..58]/[59..62] EasyDMA bus-error addresses (0 = none)
+ *   [66..68] configured sample rate (u24)
  */
-void audio_diag(uint8_t *out, size_t len)
+void audio_diag(uint8_t *snap)
 {
 	uint16_t peak = 0;
 
@@ -1025,48 +1026,42 @@ void audio_diag(uint8_t *out, size_t len)
 		}
 	}
 
-	if (len > 0U) {
-		out[0] = 0;
-	}
-	if (len > 3U) {
-		out[2] = (uint8_t)(peak & 0xFFU);
-		out[3] = (uint8_t)(peak >> 8);
-	}
-	if (len > 11U) {
-		uint32_t w0 = (uint32_t)play_buf[0][0];
-		uint32_t w1 = (uint32_t)play_buf[1][0];
+	snap[SC_SNAP_OFF_DIAG_PIN_MASK] = 0;
+	snap[SC_SNAP_OFF_DIAG_PEAK] = (uint8_t)(peak & 0xFFU);
+	snap[SC_SNAP_OFF_DIAG_PEAK + 1U] = (uint8_t)(peak >> 8);
 
-		memcpy(out + 4, &w0, 4);
-		memcpy(out + 8, &w1, 4);
-	}
-	if (len > 12U) {
-		out[12] = dbg[8]; /* DMA consumption counter */
-	}
-	if (len > 16U) {
-		out[13] = (uint8_t)(I2S_REGS->CONFIG.RATIO & 0xFFU);
-		out[14] = (uint8_t)(I2S_REGS->CONFIG.SWIDTH & 0xFFU);
-		out[15] = (uint8_t)(I2S_REGS->CONFIG.CHANNELS & 0xFFU);
-		out[16] = (uint8_t)(I2S_REGS->CONFIG.ALIGN & 0xFFU);
-	}
-	if (len > 20U) {
-		uint32_t mck = I2S_REGS->CONFIG.MCKFREQ;
+	uint32_t w0 = (uint32_t)play_buf[0][0];
+	uint32_t w1 = (uint32_t)play_buf[1][0];
 
-		memcpy(out + 17, &mck, 4);
-	}
-	if (len > 28U) {
-		uint32_t berr0 = I2S_REGS->CHANNEL[0].BUSERRORADDRESS;
-		uint32_t berr1 = I2S_REGS->CHANNEL[1].BUSERRORADDRESS;
+	memcpy(snap + SC_SNAP_OFF_DIAG_DMA0_WORD0, &w0, 4);
+	memcpy(snap + SC_SNAP_OFF_DIAG_DMA1_WORD0, &w1, 4);
 
-		memcpy(out + 21, &berr0, 4);
-		memcpy(out + 25, &berr1, 4);
-	}
+	snap[SC_SNAP_OFF_DIAG_DMA_CONSUMED] = dbg[SC_SNAP_OFF_DMA_CONSUMED];
+	snap[SC_SNAP_OFF_I2S_RATIO] =
+		(uint8_t)(I2S_REGS->CONFIG.RATIO & 0xFFU);
+	snap[SC_SNAP_OFF_I2S_SWIDTH] =
+		(uint8_t)(I2S_REGS->CONFIG.SWIDTH & 0xFFU);
+	snap[SC_SNAP_OFF_I2S_CHANNELS] =
+		(uint8_t)(I2S_REGS->CONFIG.CHANNELS & 0xFFU);
+	snap[SC_SNAP_OFF_I2S_ALIGN] =
+		(uint8_t)(I2S_REGS->CONFIG.ALIGN & 0xFFU);
+
+	uint32_t mck = I2S_REGS->CONFIG.MCKFREQ;
+
+	memcpy(snap + SC_SNAP_OFF_I2S_MCKFREQ, &mck, 4);
+
+	uint32_t berr0 = I2S_REGS->CHANNEL[0].BUSERRORADDRESS;
+	uint32_t berr1 = I2S_REGS->CHANNEL[1].BUSERRORADDRESS;
+
+	memcpy(snap + SC_SNAP_OFF_I2S_BUSERR0, &berr0, 4);
+	memcpy(snap + SC_SNAP_OFF_I2S_BUSERR1, &berr1, 4);
 	/* NOTE: no pin probing here on purpose. Touching PIN_CNF on the live
 	 * LRCK/BCK lines disturbs the bit clock, and the amplifier's clock
 	 * check then mutes and re-locks (~0.5 s of audible garbage). Every
 	 * debug read must stay passive. */
-	if (len > 33U) {
-		out[32] = (uint8_t)(cfg_rate & 0xFFU);
-		out[33] = (uint8_t)((cfg_rate >> 8) & 0xFFU);
-		out[34] = (uint8_t)((cfg_rate >> 16) & 0xFFU);
-	}
+	snap[SC_SNAP_OFF_CFG_RATE] = (uint8_t)(cfg_rate & 0xFFU);
+	snap[SC_SNAP_OFF_CFG_RATE + 1U] =
+		(uint8_t)((cfg_rate >> 8) & 0xFFU);
+	snap[SC_SNAP_OFF_CFG_RATE + 2U] =
+		(uint8_t)((cfg_rate >> 16) & 0xFFU);
 }

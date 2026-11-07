@@ -48,7 +48,13 @@ ROOT="$(cd "$HERE/.." && pwd)"
 [ -f "$ROOT/local.conf" ] && . "$ROOT/local.conf"
 SDK="${SIDCLOCK_SDK:-$ROOT/.sdk}"
 
-VERSION="1.0.10"
+VERSION="1.0.11"
+
+# protocol/current.json is the single source of truth for the BLE wire
+# protocol; app/src/proto_gen.h as well as the tool/web descriptors are
+# generated from it. Refuse to build when a generated file is stale or the
+# descriptor's firmware version disagrees with VERSION above.
+python3 "$ROOT/tools/proto_gen.py" check --require-version "$VERSION"
 
 # Always passed explicitly: the CMake cache would otherwise keep an earlier
 # build's value (same caveat as SIDCLOCK_SID_ENGINE below).

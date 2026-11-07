@@ -73,12 +73,13 @@ const uint8_t *audio_debug(void);
 /* Worst audio-loop gap since the previous call (ms, low byte). */
 uint8_t audio_take_stall(void);
 
-/* [0..3] PSEL.SCK  [4..7] PSEL.SDOUT  [8..11] PSEL.MCK
- * [12] ENABLE  [13] TXEN */
-void audio_read_hw(uint8_t *out, size_t len);
+/* Fill the I2S register block of the BLE debug snapshot (absolute offsets
+ * from proto_gen.h): [20..31] PSEL, [32] ENABLE, [33] TXEN. */
+void audio_read_hw(uint8_t *snap);
 
-/* [0] pin activity mask (P1.04..P1.07)  [2..3] DMA buffer peak
- * [4..7]/[8..11] first word of each DMA buffer */
-void audio_diag(uint8_t *out, size_t len);
+/* Fill the diagnostics block of the debug snapshot: [34] pin activity mask,
+ * [36..37] DMA buffer peak, [38..45] first word of each DMA buffer,
+ * [46..68] I2S config, MCKFREQ, bus errors and configured rate. */
+void audio_diag(uint8_t *snap);
 
 #endif /* AUDIO_H_ */

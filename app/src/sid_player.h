@@ -8,6 +8,9 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* Generated wire protocol (protocol/current.json): engine values below. */
+#include "proto_gen.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -33,19 +36,18 @@ int sid_player_model_mode(void);
 /* The chip model actually in use (6581/8580) - meaningful in auto mode. */
 int sid_player_chip(void);
 
+/* Engine values come from the generated protocol (SC_ENGINE_MODE_*). */
+#define SID_ENGINE_CRSID SC_ENGINE_MODE_CRSID
+#define SID_ENGINE_LEGACY SC_ENGINE_MODE_LEGACY
+#define SID_ENGINE_SPLIT SC_ENGINE_MODE_SPLIT /* M33 SID, FLPR C64/CPU */
+
 #ifdef SID_ENGINE_DUAL
 /* Engine choice for all tunes (default: cRSID on the M33). The engine
  * button cycles it; the next load (or reload) applies it. */
-#define SID_ENGINE_CRSID 0
-#define SID_ENGINE_LEGACY 1
-#define SID_ENGINE_SPLIT 2 /* M33 runs the SID, FLPR runs the C64/CPU */
 void sid_player_set_engine_mode(int mode);
 int sid_player_engine_mode(void);
 
 #else
-#define SID_ENGINE_CRSID 0
-#define SID_ENGINE_LEGACY 1
-#define SID_ENGINE_SPLIT 2
 int sid_player_engine_mode(void);
 void sid_player_set_engine_mode(int mode);
 #endif
@@ -72,8 +74,9 @@ void sid_player_md5_prefix(uint8_t out[4]);
 /* Produce `frames` mono 16-bit samples at 22050 Hz. */
 void sid_player_render(int16_t *dst, int frames);
 
-/* Compact status for the BLE debug read: [0] playing, [1] songs, [2..] title */
-void sid_player_info(uint8_t *out, size_t len);
+/* Fill the SID block of the BLE debug snapshot (absolute offsets from
+ * proto_gen.h): playing/songs/last_rc, title, call counters. */
+void sid_player_info(uint8_t *snap);
 
 /* Crash telemetry (see main.c): record what is playing. */
 void dbg_record_tune(const char *name, int engine);

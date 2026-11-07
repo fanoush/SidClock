@@ -575,32 +575,24 @@ extern "C" void sid_player_md5_prefix(uint8_t out[4])
 	}
 }
 
-extern "C" void sid_player_info(uint8_t *out, size_t len)
+extern "C" void sid_player_info(uint8_t *snap)
 {
-	if (len == 0U) {
-		return;
-	}
-	memset(out, 0, len);
-	out[0] = playing ? 1 : 0;
-	if (len > 1U) {
-		out[1] = (uint8_t)sid_player_songs();
-	}
-	if (len > 2U) {
-		out[2] = (uint8_t)last_rc;
-	}
-	if (len > 3U) {
-		strncpy((char *)out + 3, sid_player_title(), 15U);
-	}
-	if (len > 19U) {
-		out[18] = (uint8_t)(render_calls & 0xFFU);
-		out[19] = (uint8_t)(render_calls >> 8);
-	}
-	if (len > 21U) {
-		out[20] = (uint8_t)((unsigned)sid_frame_calls & 0xFFU);
-		out[21] = (uint8_t)(((unsigned)sid_frame_calls >> 8) & 0xFFU);
-	}
-	if (len > 23U) {
-		out[22] = (uint8_t)(sid_cpu_delta & 0xFFU);
-		out[23] = (uint8_t)(sid_cpu_delta >> 8);
-	}
+	/* Zero the whole SID block ([72..95]) first, then fill it. */
+	memset(snap + SC_SNAP_OFF_SID_PLAYING, 0,
+	       SC_SNAP_OFF_UPTIME_MS - SC_SNAP_OFF_SID_PLAYING);
+	snap[SC_SNAP_OFF_SID_PLAYING] = playing ? 1 : 0;
+	snap[SC_SNAP_OFF_SID_SONGS] = (uint8_t)sid_player_songs();
+	snap[SC_SNAP_OFF_SID_LAST_RC] = (uint8_t)last_rc;
+	strncpy((char *)snap + SC_SNAP_OFF_SID_TITLE, sid_player_title(),
+		SC_SNAP_LEN_SID_TITLE);
+	snap[SC_SNAP_OFF_SID_RENDER_CALLS] =
+		(uint8_t)(render_calls & 0xFFU);
+	snap[SC_SNAP_OFF_SID_RENDER_CALLS + 1U] =
+		(uint8_t)(render_calls >> 8);
+	snap[SC_SNAP_OFF_SID_FRAME_CALLS] =
+		(uint8_t)((unsigned)sid_frame_calls & 0xFFU);
+	snap[SC_SNAP_OFF_SID_FRAME_CALLS + 1U] =
+		(uint8_t)(((unsigned)sid_frame_calls >> 8) & 0xFFU);
+	snap[SC_SNAP_OFF_SID_CPU_DELTA] = (uint8_t)(sid_cpu_delta & 0xFFU);
+	snap[SC_SNAP_OFF_SID_CPU_DELTA + 1U] = (uint8_t)(sid_cpu_delta >> 8);
 }
