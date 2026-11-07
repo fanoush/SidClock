@@ -89,9 +89,13 @@ is unset - run `tools/sidclock_ble.py set-time`.
 
 `web/` is published to GitHub Pages by `.github/workflows/pages.yml` on
 every push that touches `web/**` (or by hand: Actions -> *pages* -> *Run
-workflow*). The artifact is `web/` itself, so the page is served at the
-site root - <https://fanoush.github.io/SidClock/> - and a change is only
-live once the `pages` workflow has succeeded.
+workflow*), and again whenever a release is published. The artifact is
+`web/` itself, so the page is served at the site root -
+<https://fanoush.github.io/SidClock/> - and a change is only live once the
+`pages` workflow has succeeded. The same workflow stages the latest
+release's signed image and its manifest into `web/firmware/`, which is
+what the device card's update section fetches (release assets themselves are not
+CORS-readable - see [ota.md](ota.md#web-remote)).
 
 One-time setup per repository (a fork or a fresh clone needs it too):
 Pages has to exist before `actions/configure-pages` can use it, and the
@@ -187,15 +191,31 @@ Before calling a change done, verify on hardware:
 8. Web remote (`web/`): `tools/web-tests/` in a browser - all pass, `?live`
    too (network; downloads the HVSC databases) - then the page itself in
    Chrome: connect, play/pause, search + upload a tune (R/W mode), the
-   HVSC info card, and play/delete from the device library. A merged
-   `web/**` change reaches the published page only through the `pages`
-   workflow (see [Web remote deployment](#web-remote-deployment)).
+   HVSC info card, and play/delete from the device library. For the update
+   card: connect an older build (or point the page at a manifest with a
+   newer version) and check that the card appears, the upload/verify/arm
+   sequence ends on *staged*, *Reboot now* reconnects on the new image and
+   *Discard* erases slot 1. A merged `web/**` change reaches the published
+   page only through the `pages` workflow (see [Web remote
+   deployment](#web-remote-deployment)); the firmware published beside it
+   comes from the latest release, so a release also redeploys the site.
 
 ## Releases
 
 1. Bump `VERSION` in `app/build.sh` and update `CHANGELOG.md`.
-2. Build + test the checklist above.
-3. Commit, push, then tag and push the tag:
+2. If anything on the wire changed, bump `protocol` in
+   `protocol/current.json` and run `python3 tools/proto_gen.py emit`. Then
+   freeze the release descriptor and commit the generated files:
+
+   ```sh
+   python3 tools/proto_gen.py freeze --version X.Y.Z
+   python3 tools/proto_gen.py check
+   ```
+
+   Frozen `protocol/versions/*.json` files are never edited afterwards;
+   they are what lets an updated web remote or CLI talk to an old device.
+3. Build + test the checklist above.
+4. Commit, push, then tag and push the tag:
 
    ```sh
    git tag -a vX.Y.Z -m "SidClock X.Y.Z"
@@ -204,4 +224,8 @@ Before calling a change done, verify on hardware:
 
    CI builds the firmware and **creates the GitHub release automatically**
    (tag pushes only) with the signed application, the bootloader images and
-   a `SHA256SUMS` file attached.
+   a `SHA256SUMS` file attached. The release also triggers the `pages`
+   workflow, which publishes that image + `firmware/index.json` next to the
+   web remote (that is what its update flow offers). A build re-run on an
+   *existing* release only replaces assets without firing the event, so
+   run Actions -> *pages* -> *Run workflow* afterwards.

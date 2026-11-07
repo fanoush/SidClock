@@ -126,6 +126,68 @@ not come back (MCUboot reverted the test swap).
    of for a test swap, so MCUboot never reverts a bad image. Use it only
    when the SWD pads (or the serial recovery path) are reachable.
 
+## Web remote
+
+The web remote (`web/`) does the same upload-arm-reboot sequence in the
+browser, on top of the same SMP link it already uses for HVSC file
+transfers. After every connect it fetches `firmware/index.json` next to the
+page, compares the connected firmware with the release it describes, and
+offers the update when the device is older:
+
+```
+fetch manifest  ->  download the image  ->  verify it in the browser
+  -> upload slot 1  ->  check the slot hash  ->  arm a test swap
+    -> "firmware X is staged" card with Reboot now / Discard
+      -> os reset  ->  poll reconnect  ->  report the new version or a revert
+```
+
+- The **manifest and the image live on GitHub Pages**, not on the release
+  page. A browser cannot read a GitHub release asset cross-origin (the
+  redirect to `release-assets.githubusercontent.com` sends no CORS
+  headers), while Pages sends `access-control-allow-origin: *`. The Pages
+  workflow copies the latest release's `*.signed.bin` into `web/firmware/`
+  and runs `tools/fw_manifest.py` to write the manifest beside it; the
+  deploy happens again whenever a release is published.
+- `tools/fw_manifest.py` takes the version, size and both hashes **from
+  the image itself** (MCUboot header + TLV area), so a mis-named file
+  cannot advertise a version it does not contain. `build.yml` runs the
+  same parser on every built image.
+- The page verifies the header and TLV structure, the SHA-256 TLV against
+  the image body, the whole-file SHA-256 and size against the manifest,
+  and the version. The image hash it computes (`sha256(header + body)`)
+  is exactly the value `image state-write` needs.
+- Nothing is applied until the user presses **Reboot now**; the device
+  keeps running the old image until then (a power cycle also applies it).
+  The update is armed as a **test swap**, so MCUboot reverts an image that
+  fails to boot. The reconnect loop then reports either the new version or
+  that the device came back on the old one.
+- **Choose file…** flashes a local `.signed.bin` through the same
+  verification/upload/arming path (development builds, pre-releases, a
+  fully offline recovery). It skips the manifest comparison but still
+  checks the image's own structure and hash.
+- `os reset` reboots without a clean BLE disconnect, and the browser can
+  keep the dead link "connected" for a few seconds; every operation on
+  it then fails with `GATT Server is disconnected`. The page therefore
+  drops the link itself before reconnecting, retries the reconnect until
+  a *fresh* link has read the device's identity, and only then decides
+  whether the new firmware came up or MCUboot reverted the swap.
+- The card never offers a downgrade: a development build newer than the
+  latest release shows "dev build" and no update button. `BLE R/O` hides
+  the SMP service, so the card explains that the device must be in R/W
+  mode instead of failing the upload.
+
+To publish a build by hand (for example a pre-release or a local server):
+
+```sh
+python3 tools/fw_manifest.py app/build/zephyr/zephyr.signed.bin \
+    --page https://github.com/fanoush/SidClock/releases \
+    --out web/firmware/index.json
+cp app/build/zephyr/zephyr.signed.bin web/firmware/
+```
+
+Both generated files are gitignored; a plain `python3 -m http.server
+--directory web` has no manifest and simply hides the update section.
+
 ## Troubleshooting
 
 - `--ble <addr> not found`: BlueZ sometimes drops the device from cache
@@ -133,6 +195,14 @@ not come back (MCUboot reverted the test swap).
 - SMP service not found / `upgrade` fails immediately: the device is in
   `BLE R/O` or `BLE OFF` (main-screen button). Set it back to `BLE R/W`;
   a reboot also restores R/W.
+- Every SMP request times out (`no answer to SMP request`) while the
+  debug characteristic still answers (status, tune listing): the link is
+  up, the transport is not. The page probes SMP right after connecting
+  and, when the probe stays silent, keeps the remote usable but disables
+  tune uploads and firmware updates with that reason in the device card's
+  update section -
+  reconnect, and if `smpmgr --ble <addr> image state-read` also hangs it
+  is device-side: capture `tools/sidclock_ble.py log --peek`.
 - Transfer stalls: check the battery/charger and that no central is
   connected. Retrying is safe - a partial image in slot 1 is simply
   overwritten.

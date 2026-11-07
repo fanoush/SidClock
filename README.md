@@ -26,9 +26,11 @@ from the device's external flash.
   unplugging anything), plus a debug/control characteristic.
 - **Web remote** - a [phone-friendly page](https://fanoush.github.io/SidClock/)
   over Web Bluetooth (Chrome/Edge on a computer or Android): battery,
-  device clock, current tune/subtune with progress, transport controls and
-  one-press clock sync. Static files in `web/`, deployed by the `pages`
-  workflow - nothing to install.
+  device clock, current tune/subtune with progress, transport controls,
+  HVSC search/upload, one-press clock sync and firmware updates (it checks
+  the latest release on connect, verifies the image and offers the update).
+  Static files in `web/`, deployed by the `pages` workflow - nothing to
+  install.
 - **Low power** - tickless kernel, duty-cycled sensors, stream suspend,
   dark sleep mode; the design keeps the SID emulator and alarm service
   running while the panel is off.
@@ -109,8 +111,9 @@ alt="QR code linking to the SidClock web remote"></a>
 
 [**fanoush.github.io/SidClock**](https://fanoush.github.io/SidClock/) is a
 single static page that talks to the device over Web Bluetooth: battery,
-the device and browser clocks side by side (the device one turns amber
-while they disagree - it has no RTC and forgets the time on every reset),
+a compact device card with the firmware version and the device clock
+against the browser one (it turns amber while they disagree - the device
+has no RTC and forgets the time on every reset),
 the current tune and subtune with a progress bar, play/pause/stop, tune
 and subtune transport, one-press clock sync and a light/dark switch.
 It runs in Chrome or Edge (desktop) and Chrome on Android; the device

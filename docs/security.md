@@ -36,6 +36,18 @@ an update while the device is connected).
 - Do not ship a device configured this way to end users without the
   hardening below.
 
+## Firmware update manifest (web remote)
+
+The web remote's update card trusts `firmware/index.json` and the image next
+to the page, so it is only as trustworthy as the site that serves them
+(GitHub Pages over HTTPS, from the project's own repository). Before
+uploading, the page checks the MCUboot header/TLV structure, the image's
+SHA-256 TLV, and the whole-file SHA-256 and size from the manifest. That
+catches a corrupted or interrupted download, a stale cache and a mis-named
+file - it does **not** prove who built the image, because the device itself
+performs no signature check. `Choose file…` deliberately skips the manifest
+and flashes any structurally valid signed image (development builds).
+
 ## Hardening path (not implemented here)
 
 1. **Own signing key**: build MCUboot with `CONFIG_BOOT_SIGNATURE_TYPE_ECDSA_P256`

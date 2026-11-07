@@ -52,13 +52,18 @@ tools/       host-side Python tools (BLE CLI, HVSC importer, backup, web server,
              plus tools/web-tests/ - browser tests for web/)
 sids/        local tune staging (gitignored contents)
 docs/        the documents above
-web/         web remote (Web Bluetooth status/control + HVSC search/upload)
+protocol/    wire-protocol descriptors: current.json (source of truth),
+             versions/<fw>.json (frozen per release), caps.json, index.json
+web/         web remote (Web Bluetooth status/control + HVSC search/upload),
+             including web/protocol/ - generated descriptor copies
 ```
 
 ## Build / flash / test
 
 ```sh
 bootloader/fetch-sdk.sh                 # one-time pinned dependency fetch
+python3 tools/proto_gen.py check        # generated wire constants are current
+python3 tools/proto_gen.py emit         # regenerate them after editing current.json
 app/build.sh                            # -> app/build/zephyr/zephyr.signed.bin
 SIDCLOCK_DEBUG=1 app/build.sh           # bench build: bring-up test commands
 tools/flash_ota.py                      # arm the OTA image (next reset applies it)
@@ -108,6 +113,17 @@ Do not break these without discussing it in the PR/commit:
 - **AUTO ROT** toggle controls all automatic orientation changes.
 - **Persistence** formats are documented in `docs/architecture.md`; keep
   them backwards compatible (they live in LittleFS across updates).
+- **The wire protocol has one source of truth**: `protocol/current.json`
+  (UUIDs, characteristic sizes, field offsets, opcodes, enums, capability
+  bits). `app/src/proto_gen.h`, `protocol/index.json` and `web/protocol/`
+  are produced by `tools/proto_gen.py` and committed - never hand-edit
+  them, and never hardcode a wire constant in firmware, `tools/` or `web/`.
+  Bump `protocol` in `current.json` on every wire-visible change, freeze
+  release descriptors with `freeze --version X.Y.Z`, and keep the frozen
+  files unchanged afterwards. The hello characteristic
+  `73696463-6c6f-4b05-9c1d-77ce3f41a5c0` and its 12-byte layout are
+  permanent; older firmware is identified by the legacy probe documented in
+  `docs/ble-services.md`.
 - **Uptime deltas** must be unsigned modular (`k_uptime_get_32() - t0`) -
   the base is large and persists across warm resets. The wall clock does
   **not** use `k_uptime` at all: `epoch_now()` runs on the raw GRTC counter
@@ -155,24 +171,46 @@ Do not break these without discussing it in the PR/commit:
   1-byte constant there makes that address unaligned and the copy traps.
 - `image state-read` version only changes when `VERSION` in `app/build.sh`
   is bumped.
+- `app/build.sh` runs `tools/proto_gen.py check`, so it fails (before
+  compiling) when `protocol/current.json`, its `firmware` field, the
+  committed generated files and `VERSION` disagree. Fix with
+  `python3 tools/proto_gen.py emit` after editing the descriptor, or bump
+  `VERSION` in `app/build.sh` too.
 - OTA uploads never arm anything: Zephyr's `image upload` writes slot 1
   and stops, and only `image state-write` (a *client* request) makes
   MCUboot boot it. Plain `smpmgr upgrade` resets without that request, so
   the device comes back on the old image looking like a failed update; use
   `tools/flash_ota.py` (arm-only, or `--now`) or `smpmgr upgrade --slot 1`.
   A staged image is persistent and drops with `smpmgr image erase 1`.
-- BLE tooling can be flaky right after a reset; retry once.
+- `img_mgmt` has **no declare-only upload request**: a request at
+  `off=0` starts (or resumes) the session and is rejected with
+  `INVALID_IMAGE_HEADER`/`INVALID_LENGTH` unless that *same* request
+  carries `len` and at least `sizeof(struct image_header)` (32) bytes of
+  image data. `smpclient` gets this right only because
+  `_maximize_image_upload_write_packet` stuffs the first chunk into the
+  "declaration" packet. Group errors come back as a nested
+  `{"err":{"group":1,"rc":N}}` with no top-level `rc`; a client that
+  only checks `rc` treats a rejected chunk as success and then stalls
+  when the retried offset meets the device's unchanged one. The device
+  also drops the session when the image completes, so a lost answer to
+  the last chunk returns `off=0` on the retry.
+- BLE tooling can be flaky right after a reset; retry once. The same
+  applies to the first `getPrimaryService` after a connect on Android: it
+  can answer `NotFoundError` ("No Services matching UUID ... found in
+  Device") while the service table is still filling in, which is why
+  `web/ble.js` retries that lookup once.
 - The web remote's `web/hvsc.js` is the browser twin of `tools/sid_add.py`:
   same `.len`/`.stil` rules (name/tune/note caps 24/200/160 chars, 3000
   bytes), same truncation, keyed the same way. HVSC's `Songlengths.md5`
   is keyed on the **whole-file** MD5 - the HVSC API's `md5` field is the
   libsidplayfp PSID fingerprint and does *not* match it (that one is only
   for the legacy `Songlengths.txt`). Change both implementations together.
-- The page shortens uploaded names to 20 characters (`sid_find_next` skips
-  names over 23; the name-taking commands `11`/`16`/`20` take up to 23,
-  but a `.stil` sidecar is one character longer than its `.sid`, so 20
-  keeps every uploaded sidecar deletable) and remembers the original HVSC
-  path per device name, because several HVSC files can share one name.
+- The page shortens uploaded names to 20 characters (`sid_find_next` and
+  the play commands skip names over 23, the loader's buffer size) and
+  remembers the original HVSC path per device name, because several HVSC
+  files can share one name. Delete is the exception: it takes any name a
+  listing page can carry (up to 59), so a tune that was uploaded with an
+  over-long name can still be removed even though it cannot be played.
 - Tune identity is exact now: the info characteristic is 96 bytes and its
   last 8 are the loaded file's whole-file MD5 prefix (`sid_player_md5_prefix`,
   `app/src/md5.c`; `00000000` = unknown - no HVSC file has that prefix).
@@ -182,6 +220,19 @@ Do not break these without discussing it in the PR/commit:
   order. Anything that grows `player_info` again must stay inside the
   `sizeof` comparisons in `player_info_check` (it bumps the generation
   byte) and needs no GATT table change.
+- The web remote's firmware update flow reads `firmware/index.json` and
+  the image next to the page (`pages.yml` stages both from the latest
+  release). GitHub **release assets are not CORS-readable** (the redirect
+  to `release-assets.githubusercontent.com` has no
+  `access-control-allow-origin`), GitHub Pages is - do not "simplify" this
+  back to a direct release URL. `tools/fw_manifest.py` takes the version
+  and both hashes from the image itself; parse the MCUboot TLV correctly:
+  `it_tlv_tot` **includes** its own 4-byte header, so the file ends at
+  `hdr_size + img_size + tlv_tot`, not `...+4+tlv_tot`. The page verifies
+  the image hash (SHA-256 of header+body), which is the value
+  `image state-write` arms, then stages a **test swap** and only reboots
+  when the user asks. The offline page test covers upload -> arm -> reboot
+  -> reconnect and the revert path (`tools/web-tests/connect.js`).
 - Web remote tests: `python3 tools/web-tests/record.py --out /tmp/wt.txt &`
   then a headless Chrome on
   `http://127.0.0.1:8901/tools/web-tests/index.html?record&live` - the

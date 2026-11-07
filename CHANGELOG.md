@@ -1,5 +1,164 @@
 # Changelog
 
+## 1.0.11
+
+**New**
+
+- **The BLE wire protocol now has one versioned description.**
+  `protocol/current.json` lists the service and characteristic UUIDs,
+  characteristic sizes, snapshot/state/info field offsets, command
+  opcodes with their arguments, enumerated values and capability bits;
+  `tools/proto_gen.py emit` generates the firmware's
+  `app/src/proto_gen.h`, the descriptor index and the copies served by the
+  web remote. The firmware uses the generated macros (with static asserts
+  on the value sizes) instead of repeating UUIDs and offsets by hand, and
+  the Python CLI and web remote decode everything through a descriptor,
+  so the three can no longer drift apart. `tools/proto_gen.py check` fails
+  when a generated file is stale or when `current.json` names a different
+  firmware version than `VERSION` in `app/build.sh`; the build runs it,
+  and a release freezes its descriptor with
+  `tools/proto_gen.py freeze --version X.Y.Z`.
+- **Protocol detection (`hello`)**: a new read-only characteristic
+  `73696463-6c6f-4b05-9c1d-77ce3f41a5c0` reports the wire protocol id, a
+  layout id, the capability bits, the firmware version and build flags in
+  12 bytes. Its UUID and layout are permanent. This release speaks
+  protocol 5 (1.0.7 = 1, 1.0.8 = 2, 1.0.9 = 3, 1.0.10 = 4). Devices
+  without hello (1.0.10 and older) are identified by the legacy probe:
+  which of the debug/state/info characteristics exist plus the debug
+  value length (1.0.10 = state+info+160, 1.0.9 = state+info+140,
+  1.0.7 = debug only+140).
+- **The web remote and the CLI now adapt to the connected firmware.** Both
+  pick the descriptor of the device they are actually talking to
+  (`hello` first, legacy probe otherwise), report how sure that
+  identification is, and hide or disable what the firmware cannot do
+  instead of failing on every press. The page shows the firmware and
+  protocol in a compact device card under the player and, under the tune
+  title, only the features the connected firmware is missing; the CLI
+  gained a `protocol` command that prints the same summary. Firmware
+  without the state characteristic (1.0.7) runs in a degraded mode: the
+  page polls the debug snapshot every 2 s and complains only once, while
+  the live-only controls stay hidden. A device newer than the page still
+  works for every command both understand.
+- **Frozen descriptors**: `protocol/versions/<firmware>.json` (and the
+  web copies) keep one descriptor per released firmware, so updating the
+  page or the CLI never breaks an older clock. `1.0.8` is intentionally
+  never selected by the legacy probe - without hello it cannot be told
+  apart from 1.0.9, whose descriptor covers it (the one missing opcode,
+  end-of-tune mode, is rejected by the device and handled as a failed
+  command).
+
+- **The web remote can install firmware updates.** After every connect it
+  fetches the release manifest published next to the page
+  (`firmware/index.json`, generated from the signed image by
+  `tools/fw_manifest.py` in the Pages workflow), compares the connected
+  firmware with the latest release and offers the update when the device
+  is older. The page downloads the image, verifies its MCUboot header/TLV
+  structure, the SHA-256 TLV, the whole-file hash and size from the
+  manifest, uploads slot 1 over the existing SMP link, checks the slot
+  hash, and arms a **test swap**. Nothing reboots on its own: a staged
+  card offers *Reboot now* (and *Discard*), and after the reset the page
+  reconnects and reports the new version or an MCUboot revert. *Choose
+  file…* flashes a local `.signed.bin` through the same checks. Release
+  assets cannot be fetched cross-origin, so the deploy workflow copies the
+  latest release into the Pages artifact. The update card never offers a
+  downgrade and explains when the device is not in BLE R/W mode.
+- **The firmware and clock cards are now one compact device card** under
+  the player, joined with the list of tunes on the device. Collapsed it is
+  a single line: firmware version, update state, tune count, device time
+  and the offset to the browser clock. It opens by itself when an update
+  is offered, an image is already staged, or the clock is unset or more
+  than a minute off, and a click opens or closes it otherwise. Expanded it
+  shows the clocks and *set time*, the update controls (*Flash local
+  build…* works even when the installed firmware is the latest release)
+  and then the tune list; the version no longer takes a line under the
+  tune title.
+
+**Fixes**
+
+- Loud multi-SID mixes no longer hard-clip. `Yet Bigger Beat 2SID` peaks at
+  about 1.2x full scale from 15 s on (the mix, not the filter: the same
+  section is clean in the reference player, which runs ~5x quieter), so
+  the engine's int16 saturation flattened the tops and every peak clicked.
+  The output stage now has a soft knee at 28000: samples below it are
+  unchanged, above it the excess is compressed towards full scale with a
+  continuous slope, so the rail is never reached. Verified on the host:
+  the tune peaks at 31568 with no clipped sample, and everything else
+  stays bit-identical - its peaks (Commando, IK+, Knucklebusters, Last
+  Ninja 2, Shades, Supremacy, Odyssey 2SID, Light Years 3SID, Melbourne
+  Shuffle 3SID) all sit below the knee.
+- The filter no longer breaks into full-scale noise on 3-SID tunes. The
+  per-rate cutoff tables reach the Chamberlin SVF's coefficient for fs/4,
+  which is outside the filter's stable region at low resonance: the
+  recurrence is stable only while `K^2 + 2*K*q < 4` (q = the resonance
+  DAC value / 4096, i.e. 1.414 at 8580 resonance 0), so the top of the
+  cutoff range made the filter grow ~17% per sample until the 32-bit
+  state saturated. Heard as bursts of harsh clipping whenever a sweep
+  sat above the limit - `Melbourne Shuffle 3SID` at 11 s and 15-17 s,
+  repeating later, identically in cRSID and the split engine (both use
+  the same output stage; 44.1 kHz renders and libsidplayfp were clean,
+  which is why the web players sounded fine). The cutoff coefficient is
+  now capped at the stability limit of the resonance register in use
+  (16 limits per chip model, derived from the resonance DAC curve and
+  listed in `SID_FilterCurves.h`). Tunes that never reach the top of the
+  range render bit-identically - verified against the previous build on
+  Commando, IK+, Knucklebusters, Last Ninja 2, Shades, Supremacy and
+  Yet Bigger Beat 2SID - and only the unstable corner is affected.
+- Delete accepts any name a listing page can carry (up to 59 characters),
+  not just the 23 the loader can play. Two tunes on this device were
+  uploaded as 24 and 26 characters; they were listed but could be neither
+  played nor removed (the delete command rejected the payload), and the
+  24-character one also tripped the listing bug below. The loader still
+  stops at 23 (`sid_find_next` and the play commands), so a long name
+  remains unplayable, but it can always be removed - the web remote shows
+  its play button locked and its delete button live. `tools/sid_add.py`
+  now refuses over-long names at import time with a `--name` hint instead
+  of uploading a file the device cannot address.
+- The `/home` listing can no longer exhaust the LittleFS directory-handle
+  pool. The page iterator parks a name that did not fit the current page
+  in a 24-byte buffer; a 24-character name (this device had
+  `Yet_Bigger_Beat_2SID.sid`, uploaded by an `sid_add.py` that does not
+  check the protocol's 23-character name limit, plus
+  `Melbourne_Shuffle_3SID.sid` at 26) wrote its terminating NUL one byte
+  past that buffer, onto the iterator's "handle is open" flag. From then
+  on every page opened a new directory without closing the previous one,
+  so a single listing walked the four-entry handle pool dry: `fs_opendir`
+  answered `-12` (`ENOMEM`), the listing returned nothing and the device
+  said "0 tunes" / "no .sid files in /home" although every file was
+  intact. The buffer now holds any name a page can carry (60), the open
+  state *is* the handle (`dirp != NULL`) so it cannot drift, and a name
+  too long for a page is skipped instead of copied. Measured: 1.0.10
+  listed 62, 62, 54, then 0 files on repeated listings and logged
+  `fs: directory open error (-12)`; 1.0.11 listed all 62 ten times in a
+  row, through the same page boundaries and the same long names. The
+  files were never lost - a reboot cleared the leaked handles.
+- Several `sidclock_ble.py` commands decoded the device's answer after the
+  connection context had closed, and the protocol object (which names enum
+  values and field offsets) is cleared with the link: `state` died with
+  `'NoneType' object has no attribute 'value_items'`, `stacks` and
+  `protocol` died on the missing object, and `sid`/`sidname` did the same
+  after starting a tune. They now print while the link is still up, like
+  `ls`. The command encoder also honours optional arguments, so `stacks`,
+  `log` and `accel` can send their bare opcode again.
+- The web remote connected with hardcoded UUIDs and offsets, so it broke
+  when a characteristic or field moved and could not talk to 1.0.7 at
+  all. It now derates cleanly per firmware and says why. The browser
+  tests cover a hello device, a 1.0.10 legacy device and a 1.0.7 device
+  without state/info.
+- The page now proves the SMP link works instead of assuming it: the
+  mcumgr parameters read right after connecting doubles as a transport
+  probe (with one re-subscribe for a swallowed first notification), and
+  a silent transport leaves the remote usable while tune uploads and
+  firmware updates are disabled with that reason on the card. Previously
+  a dead SMP link looked like a working one and every press ran into
+  15 s of `no answer to SMP request` timeouts. The client also stops the
+  retired client on reconnect (its listener sat on the same GATT
+  characteristic object), drains frames batched into one notification,
+  and names the group/command in a timeout message.
+- A failed read of the debug value on a fresh link is retried once: that
+  length is the only thing that separates 1.0.9 from 1.0.10 without the
+  hello characteristic, and Chrome's first-operation flake used to make
+  the page call an older clock "1.0.10, up to date" and skip the update.
+
 ## 1.0.10
 
 **New**

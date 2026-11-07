@@ -9,9 +9,10 @@ All interactions use standard services plus one custom debug service.
 | Battery `0x180F` | Battery Level `0x2A19` | read, notify | percent |
 | Current Time `0x1805` | Current Time `0x2A2B` | read, write | 10-byte little-endian; there is no RTC, the time is kept from uptime. The sub-second byte (`[8]`, 1/256 s) is both reported and honoured, so a host can set and compare the clock to millisecond precision |
 | Environmental Sensing `0x181A` | Illuminance `0x2AFB` | read | uint24 little-endian, **0.01 lx** units |
-| SidClock (custom) `73696463-6c6f-4b01-9c1d-77ce3f41a5c0` | `73696463-6c6f-4b02-9c1d-77ce3f41a5c0` | read, write | 132-byte debug snapshot; commands below. Writes are rejected in the R/O and OFF access modes (see below). |
+| SidClock (custom) `73696463-6c6f-4b01-9c1d-77ce3f41a5c0` | `73696463-6c6f-4b02-9c1d-77ce3f41a5c0` | read, write | 160-byte debug snapshot; commands below. Writes are rejected in the R/O and OFF access modes (see below). |
 | " | `73696463-6c6f-4b03-9c1d-77ce3f41a5c0` | read, notify | **player state**, 16 bytes - notifies on change and 1 Hz while playing |
 | " | `73696463-6c6f-4b04-9c1d-77ce3f41a5c0` | read | **player strings**, 96 bytes (title/name/author/`id`) |
+| " | `73696463-6c6f-4b05-9c1d-77ce3f41a5c0` | read | **hello**, 12 bytes - protocol/layout ids, capability bits and firmware version; lets a host pick the right descriptor (see [Protocol versions](#protocol-versions-and-descriptors)) |
 | GATT `0x1801` | Service Changed `0x2A05` | indicate | standard |
 
 The debug characteristic is a **developer interface**: its snapshot layout
@@ -62,10 +63,14 @@ signals: they are only compiled into **debug builds**
 | `1F` [+ u8 `mode`] | accelerometer diagnosis into the log (**read-only** in a release image): I2C scan 0x08-0x77, `WHO_AM_I` at both possible addresses (0x19/0x18), what the Zephyr driver and the built-in poller each return, registers 0x00-0x5F as eight-byte rows, single-register reads of the control block and of the six output bytes, and a `CTRL_REG1`/`CTRL_REG4` write/read-back. This is what showed that a unit serving all zeros only needed the missing initialization: `ctrl2=30 ctrl4=88` and a moving `reg 28` row mean the chip is configured and converting, `ctrl2=00` with frozen output bytes means it is not. `SIDCLOCK_DEBUG` builds also take `mode` 1 (reboot the register file from OTP via the `CTRL_REG5` BOOT bit, then walk the ODR settings logging the output registers after each) and `mode` 2 (drop the sensor rail P1.11 for 150 ms, then bring touch, ambient light and the accelerometer back up and watch the data registers). |
 | `50` | 1 s test tone |
 
-Name-taking commands (`11`, `16`, `20`) accept up to 23 characters - the
-full 24-byte buffer - so a `.sid` and all of its sidecars stay addressable
-(a `.stil` is one character longer than its `.sid`; uploaded `.sid` names
-stay at 20, keeping the sidecars inside the limit with room to spare).
+Name-taking commands (`11`, `20`) accept up to 23 characters - the full
+24-byte buffer, the longest name the loader can carry. `16` (delete) takes
+up to 59, the longest name a listing page can carry, so **anything the
+device lists can be removed** even when its name is too long to play: such
+a tune is a dead entry otherwise (it cannot be selected, and `fsformat` is
+the only other way out). Uploaded `.sid` names stay at 20 characters, which
+keeps the page's names comfortably inside both limits (a `.stil` is one
+character longer than its `.sid`).
 
 Player commands (`0E`, `11`, `12`, `17`, `22` and `18`..`21`) are executed by
 the **main loop** a moment after the write - the same path as a button
@@ -76,7 +81,7 @@ is still queued is rejected with `INSUFFICIENT_RESOURCES`. Reading the
 player state (or the snapshot) right after a write can still show the
 previous tune for that moment.
 
-The read snapshot (152 bytes) mixes audio state (sample rate, DMA buffer
+The read snapshot (160 bytes) mixes audio state (sample rate, DMA buffer
 health, enable registers), SID state (playing flag, song count, title,
 render timing) and UI diagnostics; bytes [96..127] carry timekeeping
 telemetry - `k_uptime_get()` ms, the raw GRTC cycle counter, the clock
@@ -95,7 +100,9 @@ Bytes [140..151] are the FLPR tail: the blob heartbeat (u16 LE at
 [140..141], 0 while not alive), flags at [142] (bit 0 = alive, i.e. it
 published its magic; bit 1 = rendering, i.e. `run` is set), a spare byte
 at [143], the FLPR bench microseconds (u32 LE at [144..147]) and its
-checksum (u32 LE at [148..151]).
+checksum (u32 LE at [148..151]). Bytes [152..159] carry the FLPR health
+counters (sample count and the spare word); the current field names and
+offsets are in `protocol/current.json`.
 
 The stack telemetry (`1D`) reports **peaks, not current depth**: stacks are
 filled with 0xAA when a thread starts (`CONFIG_INIT_STACKS`), and the
@@ -188,6 +195,76 @@ notifications - the shell counterpart of the [web
 remote](https://fanoush.github.io/SidClock/) (`web/`), which uses exactly
 these two characteristics plus the command writes above.
 
+## Protocol versions and descriptors
+
+Every wire-visible detail - service and characteristic UUIDs, characteristic
+sizes, snapshot/state/info field offsets, command opcodes and their
+arguments, enumerated values and the capability bits - lives in one JSON
+descriptor, `protocol/current.json`. It is the single source of truth: the
+firmware, the Python CLI and the web remote all derive from it, so they
+cannot drift apart.
+
+- `tools/proto_gen.py emit` regenerates `app/src/proto_gen.h` (the C macros
+  the firmware uses instead of hardcoded UUIDs, offsets and opcodes),
+  `protocol/index.json` and the copies under `web/protocol/`.
+- `tools/proto_gen.py check` fails when a generated file is stale or when
+  `current.json` names a different firmware version than `VERSION` in
+  `app/build.sh`. The app build runs it, so a wire change that forgets the
+  descriptor cannot build.
+- `tools/proto_gen.py freeze --version X.Y.Z` writes
+  `protocol/versions/X.Y.Z.json` (plus the web copy) from the current
+  descriptor at release time. Frozen descriptors never change, so tools
+  keep working with an old device after the page or CLI is updated.
+
+The `protocol` number in `current.json` is bumped on **every** wire-visible
+change (new or renamed command, moved field, extra characteristic, changed
+size). Release history: 1.0.7 = 1, 1.0.8 = 2, 1.0.9 = 3, 1.0.10 = 4,
+1.0.11 = 5.
+
+### hello
+
+`73696463-6c6f-4b05-9c1d-77ce3f41a5c0`, read-only, 12 bytes. Added with
+protocol 5 and permanent: a host can look for this UUID before it knows
+which firmware it is talking to. It is the only characteristic that lets a
+tool identify the wire format exactly.
+
+| Offset | Type | Field |
+|---|---|---|
+| 0 | u16 LE | protocol id |
+| 2 | u16 LE | layout id: low 16 bits of the CRC of the descriptor's wire schema (UUIDs, offsets, opcodes, enums, sizes) |
+| 4 | u32 LE | capability bits (see `protocol/caps.json`) |
+| 8 | u8 ×3 | firmware major/minor/patch |
+| 11 | u8 | build flags: bit 0 debug build, bit 1 legacy engine available, bit 2 split engine available |
+
+### Selecting a descriptor
+
+Host tools resolve the firmware in this order (`tools/protocol.py` and
+`web/protocol.js` are twins):
+
+1. **hello present** - match `(protocol, layout)` against
+   `protocol/index.json` exactly. If the protocol matches but the layout is
+   unknown, use the newest descriptor of that protocol and say so; if the
+   device protocol is newer than every descriptor, use the newest one and
+   disable commands it does not declare.
+2. **no hello** (1.0.10 and older) - legacy probe: which of the debug,
+   state and info characteristics exist plus the length of the debug value.
+   1.0.10 = state+info with a 160-byte debug value, 1.0.9 = state+info with
+   140, 1.0.7 = debug only with 140. 1.0.8 has no probe entry and is never
+   selected: without hello it cannot be told apart from 1.0.9, and the
+   1.0.9 descriptor is used for both. The one opcode 1.0.8 lacks (`22`,
+   end-of-tune mode) is rejected by the device and surfaces as a failed
+   command rather than a wrong write.
+
+The selected descriptor also says which **features** the firmware has
+(`state`, `info`, `transport`, `subplay`, `end_mode`, `volume`, ...), so a
+tool can hide what would only fail. The web remote disables those controls
+and writes a line under the tune title saying what is missing; firmware
+without the state characteristic (1.0.7) runs in a degraded mode instead:
+the page polls the debug snapshot every 2 s and synthesizes the few fields
+it carries (playing, song count, title, volume) while live-only controls
+stay hidden. `tools/sidclock_ble.py protocol` prints the same summary for
+the CLI.
+
 ## BLE access modes
 
 The main screen has a `BLE R/W` / `BLE R/O` / `BLE OFF` button that
@@ -211,6 +288,19 @@ This is not a security boundary (the BLE link is open and images are
 SHA-256-checked only) - it prevents accidental or casual changes while
 the device is unattended; see [ota.md](ota.md) and [security.md](security.md).
 
+### Updates from the web remote
+
+The page uses this SMP service for firmware updates as well as file
+transfers: after connecting it fetches the published manifest, offers a
+newer release, uploads slot 1, verifies the slot hash and arms a **test
+swap** (`image state-write` with `confirm=false`), then waits for the user
+to press Reboot now (which sends `os reset`). R/O and OFF unregister the
+service, so the update section of the device card explains that the
+device must be switched back to R/W instead of failing mid-upload. The
+manifest and image are served
+from GitHub Pages because release assets are not CORS-readable; details
+and the browser-side verification are in [ota.md](ota.md).
+
 ## Removing tunes
 
 `tools/sidclock_ble.py filedelete <name>` deletes `/home/<name>`; for a
@@ -225,6 +315,7 @@ address from `--addr`, `$SIDCLOCK_ADDR`, or a scan for the advertised name:
 
 ```sh
 tools/sidclock_ble.py status         # battery, device time, lux
+tools/sidclock_ble.py protocol       # firmware/protocol id, caps, disabled cmds
 tools/sidclock_ble.py set-time       # write the host clock
 tools/sidclock_ble.py sidname Last_Ninja_2.sid
 tools/sidclock_ble.py sidname Parallax.sid --sub 2   # start at subtune 2
