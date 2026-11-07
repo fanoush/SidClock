@@ -197,7 +197,7 @@
     {
       "firmware": "1.0.11",
       "protocol": 5,
-      "layout": "3fac",
+      "layout": "6820",
       "file": "versions/1.0.11.json",
       "legacy": null,
       "features": [

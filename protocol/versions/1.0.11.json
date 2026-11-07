@@ -231,7 +231,8 @@
       "args": [
         {
           "name": "name",
-          "type": "name"
+          "type": "name",
+          "max": 59
         }
       ],
       "feature": "delete"
