@@ -6,18 +6,24 @@ tool validates it and emits:
 
   app/src/proto_gen.h              C constants used by the firmware
   protocol/index.json              descriptor index for host tools
-  web/protocol/index.json          the same index, served by the web remote
-  web/protocol/versions/*.json     descriptor copies for the web remote
+  protocol/versions/*.json         frozen descriptors (one per release)
 
-Run `tools/proto_gen.py check` in CI: it fails when any generated file is
-out of date.  A release freezes the current descriptor with
+`tools/proto_gen.py check` fails when any of those is out of date; the build
+and CI run it.  A release freezes the current descriptor with
 `tools/proto_gen.py freeze --version X`.
+
+The web remote is served from web/ alone (GitHub Pages artifact,
+tools/serve_web.py), so it needs its own copies below that root;
+`tools/proto_gen.py stage` writes web/protocol/ at deploy and serve time and
+the directory is gitignored - the repository keeps one copy of each
+descriptor.
 """
 
 import argparse
 import json
 import os
 import re
+import shutil
 import sys
 import zlib
 
@@ -26,6 +32,7 @@ ROOT = os.path.dirname(HERE)
 PROTO = os.path.join(ROOT, "protocol")
 VERSIONS = os.path.join(PROTO, "versions")
 HEADER = os.path.join(ROOT, "app", "src", "proto_gen.h")
+WEB_PROTO = os.path.join(ROOT, "web", "protocol")
 BUILD_SH = os.path.join(ROOT, "app", "build.sh")
 
 TYPES = {
@@ -481,8 +488,6 @@ def expected_files(current, frozen, caps):
         os.path.relpath(HEADER, ROOT): emit_header(current, caps),
         os.path.relpath(os.path.join(PROTO, "index.json"), ROOT):
             dump_json(index),
-        os.path.relpath(os.path.join(ROOT, "web", "protocol", "index.json"),
-                        ROOT): dump_json(index),
     }
     for e in entries:
         fw = e["firmware"]
@@ -490,8 +495,7 @@ def expected_files(current, frozen, caps):
         if src is None:
             die(f"no descriptor for {fw}")
         files[os.path.relpath(
-            os.path.join(ROOT, "web", "protocol", "versions", f"{fw}.json"),
-            ROOT)] = dump_json(src)
+            os.path.join(VERSIONS, f"{fw}.json"), ROOT)] = dump_json(src)
     return files, index
 
 
@@ -532,17 +536,40 @@ def cmd_check(require_version=None):
             continue
         if have != text:
             bad.append(f"{rel}: differs")
-    web_versions = os.path.join(ROOT, "web", "protocol", "versions")
-    expected = {os.path.basename(p) for p in files
-                if p.startswith("web/protocol/versions/")}
-    if os.path.isdir(web_versions):
-        for name in os.listdir(web_versions):
-            if name.endswith(".json") and name not in expected:
-                bad.append(f"web/protocol/versions/{name}: stale")
     if bad:
         die("generated protocol files are out of date:\n  " +
             "\n  ".join(bad) + "\nrun tools/proto_gen.py emit")
     print("protocol: ok")
+
+
+def stage_web(quiet=False):
+    """Copy the descriptors the static page serves into web/protocol/.
+
+    The page is deployed as the web/ directory alone, so it can only fetch
+    files below it.  The copies are generated, never edited: this runs at
+    deploy and serve time, and web/protocol/ is gitignored.
+    """
+    dst_versions = os.path.join(WEB_PROTO, "versions")
+    os.makedirs(dst_versions, exist_ok=True)
+    for name in os.listdir(dst_versions):
+        if name.endswith(".json") and not os.path.exists(
+                os.path.join(VERSIONS, name)):
+            os.unlink(os.path.join(dst_versions, name))
+    shutil.copyfile(os.path.join(PROTO, "index.json"),
+                    os.path.join(WEB_PROTO, "index.json"))
+    n = 1
+    for name in sorted(os.listdir(VERSIONS)):
+        if name.endswith(".json"):
+            shutil.copyfile(os.path.join(VERSIONS, name),
+                            os.path.join(dst_versions, name))
+            n += 1
+    if not quiet:
+        print(f"protocol: staged {n} files for the web remote")
+    return n
+
+
+def cmd_stage():
+    stage_web()
 
 
 def cmd_emit(require_version=None):
@@ -584,11 +611,15 @@ def main():
     p_emit.add_argument("--require-version", default=None)
     p_freeze = sub.add_parser("freeze")
     p_freeze.add_argument("--version", required=True)
+    sub.add_parser("stage", help="copy the descriptors into web/protocol/ "
+                                 "(deploy/serve time; gitignored)")
     args = ap.parse_args()
     if args.cmd == "check":
         cmd_check(args.require_version)
     elif args.cmd == "emit":
         cmd_emit(args.require_version)
+    elif args.cmd == "stage":
+        cmd_stage()
     else:
         cmd_freeze(args.version)
 

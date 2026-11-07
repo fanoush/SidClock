@@ -35,3 +35,6 @@ sids/hvsc/
 
 # Local device backups (user data, never commit)
 backups/
+
+# Protocol descriptors copied under web/ at deploy/serve time (proto_gen stage)
+web/protocol/

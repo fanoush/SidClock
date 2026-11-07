@@ -95,7 +95,9 @@ workflow*), and again whenever a release is published. The artifact is
 `pages` workflow has succeeded. The same workflow stages the latest
 release's signed image and its manifest into `web/firmware/`, which is
 what the device card's update section fetches (release assets themselves are not
-CORS-readable - see [ota.md](ota.md#web-remote)).
+CORS-readable - see [ota.md](ota.md#web-remote)), and the protocol
+descriptors into `web/protocol/` (`python3 tools/proto_gen.py stage`) -
+both directories are generated and not committed.
 
 One-time setup per repository (a fork or a fresh clone needs it too):
 Pages has to exist before `actions/configure-pages` can use it, and the
@@ -158,14 +160,20 @@ Bluetooth is only exposed in a secure context, so it needs one of:
 
 ```sh
 # a quick tunnel in front of the local server - real certificate, no warning:
+python3 tools/proto_gen.py stage                # web/protocol/ descriptors
 python3 -m http.server 8000 --directory web
 cloudflared tunnel --url http://localhost:8000  # open the tunnel URL on the phone
 
 # or self-signed TLS, no third party involved (accept the warning once):
 python3 tools/serve_web.py                      # https://<this-computer>:8443/
 python3 tools/serve_web.py -v                   # log requests with their User-Agent
+
+# desktop testing (Web Bluetooth accepts http on localhost):
+python3 tools/serve_web.py --http               # http://127.0.0.1:8443/
 ```
 
+`serve_web.py` stages `web/protocol/` on startup; a plain static server
+needs `tools/proto_gen.py stage` once (and again after a release freeze).
 Both serve `web/` as the site root, so the remote is at `/`. The phone
 must be Chrome or Edge on Android - iOS Safari has no Web Bluetooth.
 

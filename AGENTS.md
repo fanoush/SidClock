@@ -54,8 +54,8 @@ sids/        local tune staging (gitignored contents)
 docs/        the documents above
 protocol/    wire-protocol descriptors: current.json (source of truth),
              versions/<fw>.json (frozen per release), caps.json, index.json
-web/         web remote (Web Bluetooth status/control + HVSC search/upload),
-             including web/protocol/ - generated descriptor copies
+web/         web remote (Web Bluetooth status/control + HVSC search/upload);
+             web/protocol/ is staged here at serve/deploy time (gitignored)
 ```
 
 ## Build / flash / test
@@ -115,9 +115,12 @@ Do not break these without discussing it in the PR/commit:
   them backwards compatible (they live in LittleFS across updates).
 - **The wire protocol has one source of truth**: `protocol/current.json`
   (UUIDs, characteristic sizes, field offsets, opcodes, enums, capability
-  bits). `app/src/proto_gen.h`, `protocol/index.json` and `web/protocol/`
-  are produced by `tools/proto_gen.py` and committed - never hand-edit
-  them, and never hardcode a wire constant in firmware, `tools/` or `web/`.
+  bits). `app/src/proto_gen.h`, `protocol/index.json` and
+  `protocol/versions/*` are produced by `tools/proto_gen.py` and committed;
+  the web copies under `web/protocol/` are staged from them by
+  `proto_gen.py stage` at serve/deploy time (gitignored) - never hand-edit
+  any of them, and never hardcode a wire constant in firmware, `tools/` or
+  `web/`.
   Bump `protocol` in `current.json` on every wire-visible change, freeze
   release descriptors with `freeze --version X.Y.Z`, and keep the frozen
   files unchanged afterwards. The hello characteristic

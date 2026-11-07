@@ -8,10 +8,19 @@ self-signed certificate that is generated on first run. Browsers warn
 once per device - accept the warning ("Advanced" -> "Proceed") and the
 page gets a usable secure context.
 
+For desktop testing plain HTTP is enough (Web Bluetooth accepts `http` on
+localhost itself):
+
+    python3 tools/serve_web.py --http     # open http://127.0.0.1:8443/
+    python3 tools/serve_web.py --http 8000
+
 No certificate warning at all: serve `web/` itself with
 `python3 -m http.server 8000 --directory web` and put a quick tunnel in
 front of it, `cloudflared tunnel --url http://localhost:8000` (the tunnel
-URL then serves the page at its root - see docs/development.md).
+URL then serves the page at its root - see docs/development.md). Both
+paths need the protocol descriptors below `web/`: this script stages them
+on startup (`tools/proto_gen.py stage`), so run that too before a plain
+static server.
 
     python3 tools/serve_web.py            # open https://<this-computer>:8443/
     python3 tools/serve_web.py 9443       # another port
@@ -110,16 +119,24 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
 def main():
     ap = argparse.ArgumentParser(
-        description="Serve web/ over https for local testing")
+        description="Serve web/ over https (default) or http for local testing")
     ap.add_argument("port", nargs="?", type=int, default=8443)
     ap.add_argument("-v", "--verbose", action="store_true",
                     help="log every request with its User-Agent")
+    ap.add_argument("--http", action="store_true",
+                    help="plain http instead of TLS; Web Bluetooth accepts "
+                         "http on localhost, use the https default for a phone")
     args = ap.parse_args()
 
     if not os.path.isdir(WEB_ROOT):
         sys.exit(f"{WEB_ROOT} not found - run this from a repository checkout")
 
-    ensure_cert()
+    # The page is served from web/ alone, so the protocol descriptors have
+    # to exist below that root; they are generated (and gitignored).
+    sys.path.insert(0, TOOLS)
+    import proto_gen
+    proto_gen.stage_web()
+
     Handler.verbose = args.verbose
 
     try:
@@ -128,15 +145,23 @@ def main():
     except OSError as e:
         sys.exit(f"cannot listen on port {args.port}: {e}")
 
-    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    ctx.load_cert_chain(CERT, KEY)
-    httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
+    scheme = "http"
+    if not args.http:
+        scheme = "https"
+        ensure_cert()
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(CERT, KEY)
+        httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
 
-    say("serving the SidClock web remote over https:")
+    say(f"serving the SidClock web remote over {scheme}:")
     for a in lan_addresses():
-        say(f"  https://{a}:{args.port}/")
-    say("accept the certificate warning once per device "
-        "(Advanced -> Proceed); Ctrl-C stops the server.")
+        say(f"  {scheme}://{a}:{args.port}/")
+    if args.http:
+        say("Web Bluetooth needs https, or http on localhost itself - "
+            "use the https default for a phone.")
+    else:
+        say("accept the certificate warning once per device "
+            "(Advanced -> Proceed); Ctrl-C stops the server.")
 
     try:
         httpd.serve_forever()

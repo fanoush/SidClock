@@ -205,8 +205,11 @@ firmware, the Python CLI and the web remote all derive from it, so they
 cannot drift apart.
 
 - `tools/proto_gen.py emit` regenerates `app/src/proto_gen.h` (the C macros
-  the firmware uses instead of hardcoded UUIDs, offsets and opcodes),
-  `protocol/index.json` and the copies under `web/protocol/`.
+  the firmware uses instead of hardcoded UUIDs, offsets and opcodes) and
+  `protocol/index.json`; `tools/proto_gen.py stage` copies the descriptors
+  into `web/protocol/`, which the page fetches because it is deployed from
+  `web/` alone (gitignored, staged by the Pages workflow and by
+  `tools/serve_web.py`).
 - `tools/proto_gen.py check` fails when a generated file is stale or when
   `current.json` names a different firmware version than `VERSION` in
   `app/build.sh`. The app build runs it, so a wire change that forgets the

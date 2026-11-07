@@ -27,6 +27,8 @@ from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / 'tools'))
+import proto_gen  # noqa: E402  (path set up above)
 
 
 class Handler(http.server.SimpleHTTPRequestHandler):
@@ -71,6 +73,10 @@ def main() -> int:
     ap.add_argument('--out', type=Path, default=None,
                     help='also write the final report to this file')
     args = ap.parse_args()
+
+    # The page serves its protocol descriptors from web/protocol/, which is
+    # generated (and gitignored): materialise it for a fresh checkout.
+    proto_gen.stage_web()
 
     with Server(('127.0.0.1', args.port), Handler) as server:
         server.result = ''

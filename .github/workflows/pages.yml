@@ -69,6 +69,11 @@ jobs:
             --page "https://github.com/${GH_REPO}/releases/tag/${tag}" \
             --out web/firmware/index.json
 
+      # The artifact root is web/ and the page fetches ../protocol/... as
+      # ./protocol/...; stage the generated descriptors below that root.
+      - name: Stage the protocol descriptors
+        run: python3 tools/proto_gen.py stage
+
       - uses: actions/upload-pages-artifact@v3
         with:
           path: web
