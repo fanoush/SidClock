@@ -7,6 +7,9 @@ one line; a link that drops when a command finishes is not an error.
 
 User commands:
   status    read battery level, device time and ambient light level
+  protocol  show which wire protocol the device speaks: firmware, protocol
+            and layout ids, capability bits and which commands this tool
+            has to disable for it
   set-time  write the host's local date/time to the Current Time Service
             (optional UTC offset in hours, e.g. "set-time +2")
   monitor   poll battery + lux every 2 s until interrupted
@@ -66,7 +69,8 @@ The bring-up tests (click, beep, tone, rate, tonefreq, tonestart,
 tonestop) exist only in debug builds (SIDCLOCK_DEBUG=1 ./build.sh); a
 release build rejects them and this tool says so.
 
-Uploading SID tunes (any name, played in file name order by the device):
+Uploading SID tunes (names up to 23 characters, played in file name order by
+the device):
   smpmgr --ble <addr> file upload <local.sid> /home/<name>.sid
   tools/sid_add.py <local.sid>     # generates .len from HVSC and uploads
 
@@ -89,17 +93,20 @@ import time
 from bleak import BleakClient, BleakScanner
 from bleak.exc import BleakDeviceNotFoundError, BleakError
 
+import protocol
+
 TONES = [1000, 2000, 4000, 8000, 10000, 12000, 15000, 18000,
          20000, 22000, 24000, 26000, 28000, 30000]
 BATTERY_CHAR = "00002a19-0000-1000-8000-00805f9b34fb"  # BAS Battery Level
 CTS_CHAR = "00002a2b-0000-1000-8000-00805f9b34fb"      # CTS Current Time
 ILLUMINANCE_CHAR = "00002afb-0000-1000-8000-00805f9b34fb"  # ESS Illuminance
-DBG_CHAR = "73696463-6c6f-4b02-9c1d-77ce3f41a5c0"      # SidClock debug
-PLAYER_STATE_CHAR = "73696463-6c6f-4b03-9c1d-77ce3f41a5c0"  # player state
-PLAYER_INFO_CHAR = "73696463-6c6f-4b04-9c1d-77ce3f41a5c0"   # player strings
 CONNECT_TIMEOUT = 3.0  # s; fail fast when the device is not advertising
-LOG_CHUNK = 60        # log text bytes the 0x1E command serves per read
-LOG_MAX_CHUNKS = 300  # ...so this is one 8 KB window (debug build)
+LOG_MAX_CHUNKS = 300  # 300 x 60 bytes = one 8 KB RTT window
+
+# Selected when a connection is made (see _detect_protocol). Every command
+# reads UUIDs, offsets, opcodes and limits from it, so the tool follows the
+# connected firmware instead of assuming the newest release.
+DEV = None
 
 
 def lux_u24(raw):
@@ -158,9 +165,71 @@ def _sigint_graceful():
         signal.signal(signal.SIGINT, prev)
 
 
+async def _device_chars(c):
+    """Map lower-case characteristic UUID -> bleak characteristic object."""
+    services = getattr(c, "services", None)
+    if services is None:
+        getter = getattr(c, "get_services", None)
+        if getter is not None:
+            services = await getter()
+    chars = {}
+    for svc in services or []:
+        for ch in getattr(svc, "characteristics", []) or []:
+            chars[ch.uuid.lower()] = ch
+    return chars
+
+
+async def _detect_protocol(c):
+    """Select the descriptor that matches the connected firmware.
+
+    A 1.0.11+ device answers the hello read exactly; older firmware is
+    identified by which characteristics exist plus the size of the debug
+    value (see the legacy block in protocol/*.json).
+    """
+    chars = await _device_chars(c)
+    present = {name for name, uuid in (
+        ("debug", protocol.DEBUG_UUID),
+        ("state", protocol.STATE_UUID),
+        ("info", protocol.INFO_UUID),
+        ("hello", protocol.HELLO_UUID)) if uuid in chars}
+    if "debug" not in present:
+        raise SystemExit(
+            "protocol: the device exposes no SidClock debug characteristic - "
+            "is this a SidClock, and is BLE access R/W?")
+    hello = None
+    if "hello" in present:
+        try:
+            hello = await c.read_gatt_char(protocol.HELLO_UUID)
+        except (BleakError, AttributeError) as e:
+            # A characteristic whose value cannot be read says nothing about
+            # the layout: fall through to the legacy probe without it.
+            print(f"protocol: hello read failed ({e}); falling back to the "
+                  "legacy probe", file=sys.stderr)
+    if hello is not None:
+        try:
+            desc, notes = protocol.select_for_hello(hello)
+        except protocol.ProtocolError as e:
+            raise SystemExit(f"protocol: {e}")
+    else:
+        probe = present - {"hello"}
+        size = None
+        try:
+            size = len(await c.read_gatt_char(protocol.DEBUG_UUID))
+        except (BleakError, AttributeError):
+            pass
+        desc, notes = protocol.select_legacy(probe, size)
+        if desc is None:
+            raise SystemExit(
+                "protocol: unrecognised legacy device layout "
+                f"(characteristics: {', '.join(sorted(probe))}, "
+                f"debug {size or '?'} bytes)")
+    desc.notes = notes
+    return desc
+
+
 @contextlib.asynccontextmanager
 async def connect(addr):
-    """Connect to the device, then leave quietly.
+    """Connect to the device, select its protocol, then leave quietly.
 
     Discovery + connect give up after CONNECT_TIMEOUT seconds with a
     one-line message instead of a traceback (a device that is off, not
@@ -168,6 +237,7 @@ async def connect(addr):
     the device has already dropped the link on the way out - a reset, BLE
     OFF, or simply the end of the command - is swallowed.
     """
+    global DEV
     c = BleakClient(addr, timeout=CONNECT_TIMEOUT)
 
     try:
@@ -181,8 +251,12 @@ async def connect(addr):
         raise SystemExit(f"could not connect to {addr}: {e}")
 
     try:
+        DEV = await _detect_protocol(c)
+        for note in DEV.notes:
+            print(f"protocol: {note}", file=sys.stderr)
         yield c
     finally:
+        DEV = None
         try:
             await c.disconnect()
         except Exception:
@@ -196,11 +270,29 @@ async def dbg_write(c, payload, what, test_only=False):
     (SIDCLOCK_DEBUG=1 ./build.sh), so a release device rejects them.
     """
     try:
-        await c.write_gatt_char(DBG_CHAR, payload, response=True)
+        await c.write_gatt_char(DEV.char("debug"), payload, response=True)
     except BleakError as e:
         hint = (" - the bring-up test commands need a debug build "
                 "(SIDCLOCK_DEBUG=1 ./build.sh)") if test_only else ""
         raise SystemExit(f"{what}: rejected by the device ({e}){hint}")
+
+
+def snap(raw, area, name, default=None):
+    """Read a descriptor field from a device value, or `default` when the
+    connected firmware predates that field."""
+    if not DEV.has_field(area, name):
+        return default
+    return DEV.int(raw, area, name)
+
+
+def snap_text(raw, area, name, default=""):
+    if not DEV.has_field(area, name):
+        return default
+    return DEV.text(raw, area, name)
+
+
+def has(area, name):
+    return DEV.has_field(area, name)
 
 
 async def resolve_addr(explicit):
@@ -222,12 +314,53 @@ async def resolve_addr(explicit):
     return dev.address
 
 
+async def cmd_protocol(addr):
+    """Describe the wire protocol the connected device speaks.
+
+    Every tool command is driven by the descriptor picked here, so this is
+    the one place that answers "why is feature X missing?": a hello device
+    selects by protocol+layout, an older one by the legacy probe.
+    """
+    async with connect(addr) as c:
+        hello = None
+        if DEV.has_char("hello"):
+            raw = await c.read_gatt_char(DEV.char("hello"))
+            try:
+                hello = protocol.parse_hello(raw)
+            except protocol.ProtocolError:
+                hello = None
+
+        # Everything below reads DEV (and reloads the index); print while
+        # the link is still up, like status does.
+        print(f"firmware: {DEV.firmware}  (protocol {DEV.protocol}, "
+              f"{'hello' if DEV.source == 'hello' else 'legacy probe'})")
+        if hello:
+            print(f"hello:    protocol {hello['protocol']}  layout "
+                  f"0x{hello['layout']:04x}  caps 0x{hello['caps']:08x}")
+            build = [n for n, on in (("debug", hello["debug"]),
+                                     ("legacy engine", hello["legacy_engine"]),
+                                     ("split engine", hello["split_engine"]))
+                     if on]
+            print(f"build:    {', '.join(build) if build else 'release'}")
+        for note in DEV.notes:
+            print(f"note:     {note}")
+        index = protocol.load_index()
+        newest = protocol.load_descriptor(index["latest"])
+        missing = sorted(newest.features - DEV.features)
+        print(f"features: {len(DEV.features)} of {len(newest.features)} "
+              f"({newest.firmware} has the rest)")
+        if missing:
+            print(f"disabled: {', '.join(missing)}")
+
+
 async def cmd_status(addr):
     async with connect(addr) as c:
         batt = await c.read_gatt_char(BATTERY_CHAR)
         ct = await c.read_gatt_char(CTS_CHAR)
         lux = await c.read_gatt_char(ILLUMINANCE_CHAR)
-        raw = await c.read_gatt_char(DBG_CHAR)
+        raw = await c.read_gatt_char(DEV.char("debug"))
+        print(f"firmware: {DEV.firmware}  (protocol {DEV.protocol}, "
+              f"{'hello' if DEV.source == 'hello' else 'legacy probe'})")
         print(f"battery: {batt[0]} %")
         print(f"time:    {time_str(ct)}")
         print(f"lux:     {lux_u24(lux):.2f} lx")
@@ -279,7 +412,7 @@ async def cmd_monitor(addr):
             while not stop():
                 batt = await c.read_gatt_char(BATTERY_CHAR)
                 lux = await c.read_gatt_char(ILLUMINANCE_CHAR)
-                raw = await c.read_gatt_char(DBG_CHAR)
+                raw = await c.read_gatt_char(DEV.char("debug"))
                 guard = _time_guard(raw)
                 extra = ""
                 if guard:
@@ -297,21 +430,22 @@ async def cmd_monitor(addr):
 async def cmd_blemode(addr, mode=None):
     """Switch BLE access mode (R/W only; R/O and OFF need the device UI or
     a reboot to undo)."""
-    code = {"rw": 0, "r/w": 0, "ro": 1, "r/o": 1, "readonly": 1,
-            "off": 2}.get((mode or "rw").lower())
-    if code is None:
-        raise SystemExit("ble mode: rw | ro | off")
     async with connect(addr) as c:
-        before = await c.read_gatt_char(DBG_CHAR)
         try:
-            await c.write_gatt_char(DBG_CHAR, bytes([0x15, code]),
+            code = DEV.value("ble_mode", mode or "rw")
+        except protocol.ProtocolError:
+            raise SystemExit("ble mode: rw | ro | off")
+        before = await c.read_gatt_char(DEV.char("debug"))
+        try:
+            await c.write_gatt_char(DEV.char("debug"),
+                                    DEV.build("set_ble_mode", code),
                                     response=True)
         except Exception:
             if code != 2:
                 raise  # only OFF is expected to drop the link
         await asyncio.sleep(1)
         try:
-            after = await c.read_gatt_char(DBG_CHAR)
+            after = await c.read_gatt_char(DEV.char("debug"))
         except Exception:
             after = None  # BLE OFF drops the link immediately
 
@@ -322,9 +456,13 @@ async def cmd_blemode(addr, mode=None):
 
 def _flpr(raw):
     """(heartbeat, alive, rendering) from the snapshot, or None (old fw)."""
-    if raw is None or len(raw) < 143:
+    if not has("snapshot", "flpr_heartbeat"):
         return None
-    return (raw[140] | (raw[141] << 8), raw[142] & 1, (raw[142] >> 1) & 1)
+    hb = snap(raw, "snapshot", "flpr_heartbeat")
+    flags = snap(raw, "snapshot", "flpr_flags")
+    alive = DEV.snapshot_flags().get("flpr_alive", 0x01)
+    rendering = DEV.snapshot_flags().get("flpr_rendering", 0x02)
+    return (hb, bool(flags & alive), bool(flags & rendering))
 
 
 async def cmd_flpr(addr, mode=None):
@@ -332,10 +470,14 @@ async def cmd_flpr(addr, mode=None):
     code = {"start": 1, "stop": 0}.get((mode or "start").lower())
     if code is None:
         raise SystemExit("flpr mode: start | stop")
-    async with BleakClient(addr) as c:
-        await c.write_gatt_char(DBG_CHAR, bytes([0x30, code]), response=True)
+    async with connect(addr) as c:
+        try:
+            payload = DEV.build("flpr", code)
+        except protocol.Unsupported as e:
+            raise SystemExit(f"flpr: {e}")
+        await c.write_gatt_char(DEV.char("debug"), payload, response=True)
         await asyncio.sleep(1.5)
-        after = await c.read_gatt_char(DBG_CHAR)
+        after = await c.read_gatt_char(DEV.char("debug"))
     hb = _flpr(after)
     if hb is None:
         print("no FLPR telemetry (old firmware?)")
@@ -353,17 +495,19 @@ async def cmd_flpralu(addr, value=None):
     if not 1 <= n <= 65000:
         raise SystemExit("flpralu [ITERATIONS]")
     async with connect(addr) as c:
-        await c.write_gatt_char(DBG_CHAR,
-                                bytes([0x33, n & 0xFF, (n >> 8) & 0xFF]),
-                                response=True)
+        try:
+            payload = DEV.build("flpralu", n)
+        except protocol.Unsupported as e:
+            raise SystemExit(f"flpralu: {e}")
+        await c.write_gatt_char(DEV.char("debug"), payload, response=True)
         await asyncio.sleep(0.5)
-        after = await c.read_gatt_char(DBG_CHAR)
-    if len(after) < 160 or not int.from_bytes(after[152:156], "little"):
+        after = await c.read_gatt_char(DEV.char("debug"))
+    cyc = snap(after, "snapshot", "flpr_bench_cycles", 0)
+    if not cyc:
         print("no probe telemetry (old firmware?)")
         return
-    cyc = int.from_bytes(after[152:156], "little")
-    ins = int.from_bytes(after[156:160], "little")
-    us = int.from_bytes(after[144:148], "little")
+    ins = snap(after, "snapshot", "flpr_bench_instr", 0)
+    us = snap(after, "snapshot", "flpr_bench_us", 0)
     print(f"flpralu {n} iter: {cyc} cycles, {ins} instr, "
           f"IPC {ins / cyc:.2f}, clock ~{cyc / us:.0f} MHz")
 
@@ -376,12 +520,14 @@ async def cmd_glitch(addr, mode=None):
         raise SystemExit("glitch mode: reset | fwd")
     async with connect(addr) as c:
         clock_before = await c.read_gatt_char(CTS_CHAR)
-        before = await c.read_gatt_char(DBG_CHAR)
-        await c.write_gatt_char(DBG_CHAR, bytes([0x14, code]), response=True)
+        before = await c.read_gatt_char(DEV.char("debug"))
+        await c.write_gatt_char(DEV.char("debug"),
+                                DEV.build("glitch", code), response=True)
         await asyncio.sleep(1.5)  # the next clock sample trips the guard
         clock_after = await c.read_gatt_char(CTS_CHAR)
-        after = await c.read_gatt_char(DBG_CHAR)
-    gb, ga = _u32(before, 112), _u32(after, 112)
+        after = await c.read_gatt_char(DEV.char("debug"))
+    gb = snap(before, "snapshot", "time_glitches", 0)
+    ga = snap(after, "snapshot", "time_glitches", 0)
     print(f"glitch counter {gb} -> {ga}")
     print(f"clock:  {time_str(clock_before)}")
     print(f"     -> {time_str(clock_after)}")
@@ -391,77 +537,76 @@ async def cmd_glitch(addr, mode=None):
         print("guard absorbed the glitch")
 
 
-def _u32(raw, off):
-    return int.from_bytes(bytes(raw[off:off + 4]), "little")
-
-
-def _u64(raw, off):
-    return int.from_bytes(bytes(raw[off:off + 8]), "little")
-
-
 def _time_guard(raw):
     """(uptime_s, grtc_s, glitches) from the debug snapshot tail."""
-    if len(raw) < 128:
+    if not has("snapshot", "uptime_ms"):
         return None
-    return (_u64(raw, 96) / 1000.0, _u64(raw, 104) / 1e6, _u32(raw, 112))
+    return (snap(raw, "snapshot", "uptime_ms") / 1000.0,
+            snap(raw, "snapshot", "grtc_cycles") / 1e6,
+            snap(raw, "snapshot", "time_glitches"))
+
+
+def _value_label(set_name, value, default=None):
+    for item in DEV.value_items(set_name):
+        if item["value"] == value:
+            return item.get("label", item["name"])
+    return str(value) if default is None else default
 
 
 def _ble_mode(raw):
     """'R/W' | 'R/O' | 'OFF' from the snapshot, or None (old firmware)."""
-    if raw is None or len(raw) < 129 or raw[128] > 2:
+    if raw is None or not has("snapshot", "ble_mode"):
         return None
-    return ("R/W", "R/O", "OFF")[raw[128]]
+    value = snap(raw, "snapshot", "ble_mode")
+    if value > 2:
+        return None
+    return _value_label("ble_mode", value)
 
 
 def _fs_state(raw):
-    """(mounted, err) from snapshot [137]/[138], or None (old firmware)."""
-    if raw is None or len(raw) < 139:
+    """(mounted, err) from the snapshot, or None (old firmware)."""
+    if raw is None or not has("snapshot", "fs_state"):
         return None
-    return raw[137] == 0, raw[138]
-
-
-# Player-status characteristics (see docs/ble-services.md). The state char
-# (read + notify) is 16 bytes; the info char (read) is 96 bytes of
-# title[32] + file name[24] + author[32] + id[8], NUL padded strings. id is
-# the first 4 bytes of the loaded file's MD5 as 8 lowercase hex characters
-# (all zeros when unknown) - HVSC's Songlengths.md5 is keyed on that digest.
-END_MODES = ("next sub", "next tune", "loop sub")
-MODEL_MODES = ("auto", "6581", "8580")
-INFO_ID_OFF = 88
+    return snap(raw, "snapshot", "fs_state") == 0, snap(raw, "snapshot",
+                                                        "fs_err")
 
 
 def _player_state(raw):
-    """Decode the 16-byte state value, or None if the read looks wrong."""
-    if len(raw) < 16:
+    """Decode the state value, or None if the read looks wrong."""
+    if raw is None or not has("state", "flags"):
         return None
-    flags = raw[0]
+    if len(raw) < DEV.char_size("state"):
+        return None
+    flags = snap(raw, "state", "flags")
+    f = DEV.state_flags()
     return {
-        "playing": bool(flags & 0x01),
-        "paused": bool(flags & 0x02),
-        "sound": bool(flags & 0x04),
-        "legacy": bool(flags & 0x08),
-        "split": bool(flags & 0x20),
-        "subtune": raw[1],  # 0-based on the wire, 1-based in every print
-        "songs": raw[2],
-        "end": raw[3],
-        "model": raw[4],
-        "chip": raw[5],
-        "gen": raw[6],
-        "volume": raw[7],
-        "elapsed": _u32(raw, 8),
-        "length": _u32(raw, 12),
+        "playing": bool(flags & f.get("playing", 0x01)),
+        "paused": bool(flags & f.get("paused", 0x02)),
+        "sound": bool(flags & f.get("sound", 0x04)),
+        "legacy": bool(flags & f.get("legacy_engine", 0x08)),
+        "split": bool(flags & f.get("split_engine", 0x00)),
+        # 0-based on the wire, 1-based in every print
+        "subtune": snap(raw, "state", "subtune"),
+        "songs": snap(raw, "state", "songs"),
+        "end": snap(raw, "state", "end_mode"),
+        "model": snap(raw, "state", "model_mode"),
+        "chip": snap(raw, "state", "chip"),
+        "gen": snap(raw, "state", "generation"),
+        "volume": snap(raw, "state", "volume", 0),
+        "elapsed": snap(raw, "state", "elapsed"),
+        "length": snap(raw, "state", "length"),
     }
 
 
 def _player_info(raw):
-    def field(off, n):
-        return bytes(raw[off:off + n]).split(b"\0")[0].decode(errors="replace")
-
-    info = {"title": field(0, 32), "name": field(32, 24), "author": field(56, 32)}
-    info["id"] = None
-    if raw is not None and len(raw) >= INFO_ID_OFF + 8:
-        text = bytes(raw[INFO_ID_OFF:INFO_ID_OFF + 8]).decode(errors="replace")
-        text = text.lower()
+    info = {
+        "title": snap_text(raw, "info", "title") if raw is not None else "",
+        "name": snap_text(raw, "info", "name") if raw is not None else "",
+        "author": snap_text(raw, "info", "author") if raw is not None else "",
+        "id": None,
+    }
+    if raw is not None and has("info", "md5_id"):
+        text = snap_text(raw, "info", "md5_id").lower()
         if len(text) == 8 and all(ch in "0123456789abcdef" for ch in text) \
                 and text != "00000000":
             info["id"] = text
@@ -479,11 +624,11 @@ def _state_pos(st):
 
 
 def _end_label(st):
-    return END_MODES[st["end"]] if st["end"] < len(END_MODES) else str(st["end"])
+    return _value_label("end_mode", st["end"])
 
 
 def _model_label(st):
-    return MODEL_MODES[st["model"]] if st["model"] < len(MODEL_MODES) else str(st["model"])
+    return _value_label("model_mode", st["model"])
 
 
 async def _read_char(c, uuid, what):
@@ -492,15 +637,17 @@ async def _read_char(c, uuid, what):
         return bytes(await c.read_gatt_char(uuid))
     except (BleakError, AttributeError) as e:
         raise SystemExit(
-            f"{what}: characteristic not found ({e}) - the device firmware "
-            "predates the player status interface"
+            f"{what}: characteristic not found ({e}) - firmware "
+            f"{DEV.firmware} does not provide it"
         )
 
 
 async def _maybe_state(c):
     """Player state value, or None when the firmware predates the char."""
+    if not DEV.has_char("state"):
+        return None
     try:
-        return _player_state(bytes(await c.read_gatt_char(PLAYER_STATE_CHAR)))
+        return _player_state(bytes(await c.read_gatt_char(DEV.char("state"))))
     except (BleakError, AttributeError):
         return None
 
@@ -526,77 +673,95 @@ async def _settle_player(c, before, timeout=2.0):
 
 
 def _rate_of(raw):
-    return raw[66] | (raw[67] << 8) | (raw[68] << 16)
+    return snap(raw, "snapshot", "cfg_rate", 0)
 
 
 async def cmd_audio(addr):
     async with connect(addr) as c:
-        raw = await c.read_gatt_char(DBG_CHAR)
-        print(f"ready {raw[0]}  init_rc {raw[1]}  enabled {raw[6]}  "
-              f"volume {raw[7]}  asleep {raw[5]}")
-        if len(raw) > 12 and (raw[2] or raw[3]):
-            print(f"flpr: rendering {raw[3]}  underruns {raw[2]}")
-        print(f"play attempts {raw[9]}  tone buffers left {raw[17]}  "
-              f"combo {raw[18]} (flags 0x{raw[19]:02x})")
-        print(f"PSEL sck 0x{_u32(raw, 20):08x}  sdout 0x{_u32(raw, 24):08x}  "
-              f"mck 0x{_u32(raw, 28):08x}")
-        print(f"enable {raw[32]}  txen {raw[33]}")
-        if len(raw) > 45:
-            peak = raw[36] | (raw[37] << 8)
-            print(f"buffers: peak {peak}   w0 0x{_u32(raw, 38):08x}  "
-                  f"w1 0x{_u32(raw, 42):08x}")
-            print(f"dma events {raw[46]}  mck 0x{_u32(raw, 51):08x}  "
-                  f"ratio {raw[47]}  width {raw[48]}  ch {raw[49]}  "
-                  f"align {raw[50]}")
-            print(f"buserr0 0x{_u32(raw, 55):08x}  "
-                  f"buserr1 0x{_u32(raw, 59):08x}")
-            if len(raw) > 93:
-                title = bytes(raw[75:90]).split(b"\0")[0].decode(
-                    errors="replace")
-                print(f"sid playing {raw[72]}  songs {raw[73]}  "
-                      f"rc {raw[74] - 256 if raw[74] > 127 else raw[74]}  "
-                      f"render {raw[13] | (raw[14] << 8)} us  title {title!r}  "
-                      f"calls {raw[90] | (raw[91] << 8)}  "
-                      f"frames {raw[92] | (raw[93] << 8)}")
-                if len(raw) >= 152 and raw[143] == 1:
-                    load = raw[144] | (raw[145] << 8)
-                    lmin = raw[146] | (raw[147] << 8)
-                    lcur = raw[148] | (raw[149] << 8)
-                    starved = raw[150] | (raw[151] << 8)
-                    lms = "n/a" if lmin == 0xFFFF else str(lmin)
-                    print(f"split: flpr cpu {load / 10:.1f}%  "
-                          f"lead {lcur} (min {lms})  starved {starved}")
-            if len(raw) > 139:
-                print(f"crash: boots {raw[129]}  cause 0x{raw[131]:02x}{raw[130]:02x}  "
-                      f"audio_hb {raw[132] | (raw[133] << 8)}  "
-                      f"main_hb {raw[134] | (raw[135] << 8)}  "
-                      f"engine {raw[136]}")
-            if len(raw) >= 160 and _u32(raw, 152):
-                cyc, ins, us = _u32(raw, 152), _u32(raw, 156), _u32(raw, 144)
-                ipc = ins / cyc if cyc else 0
-                mhz = cyc / us if us else 0
-                print(f"flpr bench: {us} us  {cyc} cycles  {ins} instr  "
-                      f"IPC {ipc:.2f}  clock ~{mhz:.0f} MHz")
-            if len(raw) > 68:
-                mode = "direct" if raw[10] == 255 else f"step {raw[10]}"
-                print(f"{mode}  rate {_rate_of(raw)} Hz")
+        raw = await c.read_gatt_char(DEV.char("debug"))
+        print(f"ready {snap(raw, 'snapshot', 'audio_ready')}  "
+              f"init_rc {snap(raw, 'snapshot', 'audio_init_rc')}  "
+              f"enabled {snap(raw, 'snapshot', 'audio_enabled')}  "
+              f"volume {snap(raw, 'snapshot', 'audio_volume')}  "
+              f"asleep {snap(raw, 'snapshot', 'audio_spare5')}")
+        under = snap(raw, "snapshot", "pipe_underruns", 0)
+        active = snap(raw, "snapshot", "pipe_active", 0)
+        if under or active:
+            print(f"flpr: rendering {active}  underruns {under}")
+        print(f"play attempts {snap(raw, 'snapshot', 'play_attempts')}  "
+              f"tone buffers left {snap(raw, 'snapshot', 'tone_buffers')}  "
+              f"combo {snap(raw, 'snapshot', 'amp_combo')} "
+              f"(flags 0x{snap(raw, 'snapshot', 'combo_flags'):02x})")
+        print(f"PSEL sck 0x{snap(raw, 'snapshot', 'i2s_psel_sck'):08x}  "
+              f"sdout 0x{snap(raw, 'snapshot', 'i2s_psel_sdout'):08x}  "
+              f"mck 0x{snap(raw, 'snapshot', 'i2s_psel_mck'):08x}")
+        print(f"enable {snap(raw, 'snapshot', 'i2s_enable')}  "
+              f"txen {snap(raw, 'snapshot', 'i2s_txen')}")
+        if has("snapshot", "diag_peak"):
+            print(f"buffers: peak {snap(raw, 'snapshot', 'diag_peak')}   "
+                  f"w0 0x{snap(raw, 'snapshot', 'diag_dma0_word0'):08x}  "
+                  f"w1 0x{snap(raw, 'snapshot', 'diag_dma1_word0'):08x}")
+            print(f"dma events {snap(raw, 'snapshot', 'diag_dma_consumed')}  "
+                  f"mck 0x{snap(raw, 'snapshot', 'i2s_mckfreq'):08x}  "
+                  f"ratio {snap(raw, 'snapshot', 'i2s_ratio')}  "
+                  f"width {snap(raw, 'snapshot', 'i2s_swidth')}  "
+                  f"ch {snap(raw, 'snapshot', 'i2s_channels')}  "
+                  f"align {snap(raw, 'snapshot', 'i2s_align')}")
+            print(f"buserr0 0x{snap(raw, 'snapshot', 'i2s_buserr0'):08x}  "
+                  f"buserr1 0x{snap(raw, 'snapshot', 'i2s_buserr1'):08x}")
+        if has("snapshot", "sid_playing"):
+            print(f"sid playing {snap(raw, 'snapshot', 'sid_playing')}  "
+                  f"songs {snap(raw, 'snapshot', 'sid_songs')}  "
+                  f"rc {snap(raw, 'snapshot', 'sid_last_rc')}  "
+                  f"render {snap(raw, 'snapshot', 'render_us')} us  "
+                  f"title {snap_text(raw, 'snapshot', 'sid_title')!r}  "
+                  f"calls {snap(raw, 'snapshot', 'sid_render_calls')}  "
+                  f"frames {snap(raw, 'snapshot', 'sid_frame_calls')}")
+            if has("snapshot", "flpr_split") and \
+                    snap(raw, "snapshot", "flpr_split") == 1:
+                load = snap(raw, "snapshot", "flpr_health_cpu_load")
+                lmin = snap(raw, "snapshot", "flpr_health_lead_min")
+                lcur = snap(raw, "snapshot", "flpr_health_lead")
+                starved = snap(raw, "snapshot", "flpr_health_starved")
+                lms = "n/a" if lmin == 0xFFFF else str(lmin)
+                print(f"split: flpr cpu {load / 10:.1f}%  "
+                      f"lead {lcur} (min {lms})  starved {starved}")
+        if has("snapshot", "boots"):
+            print(f"crash: boots {snap(raw, 'snapshot', 'boots')}  "
+                  f"cause 0x{snap(raw, 'snapshot', 'reset_cause_hi'):02x}"
+                  f"{snap(raw, 'snapshot', 'reset_cause_lo'):02x}  "
+                  f"audio_hb {snap(raw, 'snapshot', 'audio_hb')}  "
+                  f"main_hb {snap(raw, 'snapshot', 'main_hb')}  "
+                  f"engine {snap(raw, 'snapshot', 'engine')}")
+        if has("snapshot", "flpr_bench_cycles") and \
+                snap(raw, "snapshot", "flpr_bench_cycles"):
+            cyc = snap(raw, "snapshot", "flpr_bench_cycles")
+            ins = snap(raw, "snapshot", "flpr_bench_instr")
+            us = snap(raw, "snapshot", "flpr_bench_us")
+            ipc = ins / cyc if cyc else 0
+            mhz = cyc / us if us else 0
+            print(f"flpr bench: {us} us  {cyc} cycles  {ins} instr  "
+                  f"IPC {ipc:.2f}  clock ~{mhz:.0f} MHz")
+        if has("snapshot", "cfg_rate"):
+            step = snap(raw, "snapshot", "rate_index")
+            mode = "direct" if step == 0xFF else f"step {step}"
+            print(f"{mode}  rate {_rate_of(raw)} Hz")
 
 
-async def cmd_tone(addr, code):
+async def cmd_tone(addr, name):
+    """Bare-opcode developer sounds: click, beep, long_tone."""
     label = {
-        1: "click",
-        2: "beep",
-        3: "sound on/off toggle",
-        0x0D: "FORMAT /home storage (DESTRUCTIVE!)",
-        0x0E: "play SID",
-        0x0F: "stop SID",
-        0x50: "1 s steady test tone",
-    }.get(code, f"code 0x{code:02x}")
+        "click": "click",
+        "beep": "beep",
+        "long_tone": "1 s steady test tone",
+    }.get(name, name)
     async with connect(addr) as c:
-        await dbg_write(c, bytes([code]), label, test_only=code in (1, 2, 0x50))
+        try:
+            payload = DEV.build(name)
+        except protocol.Unsupported as e:
+            raise SystemExit(f"{name}: {e}")
+        await dbg_write(c, payload, name, test_only=True)
         print(f"triggered: {label}")
-
-
 
 
 async def cmd_fsformat(addr, yes=False):
@@ -606,8 +771,8 @@ async def cmd_fsformat(addr, yes=False):
             "the saved clock are gone and cannot be recovered.", yes):
         raise SystemExit("aborted - nothing was formatted")
     async with connect(addr) as c:
-        await dbg_write(c, bytes([0x0D]), "format /home")
-        raw = await c.read_gatt_char(DBG_CHAR)
+        await dbg_write(c, DEV.build("fsformat"), "format /home")
+        raw = await c.read_gatt_char(DEV.char("debug"))
     state = _fs_state(raw)
     if state is None:
         print("formatted (this firmware does not report the filesystem state)")
@@ -643,24 +808,35 @@ async def cmd_rate(addr, hz=None):
         if not 1000 <= hz <= 96000:
             raise SystemExit("rate must be 1000..96000 Hz")
         async with connect(addr) as c:
-            await dbg_write(c,
-                            bytes([0x09]) + hz.to_bytes(4, "little"),
-                            "rate", test_only=True)
-            raw = await c.read_gatt_char(DBG_CHAR)
+            try:
+                payload = DEV.build("set_rate", hz)
+            except protocol.Unsupported as e:
+                raise SystemExit(f"rate: {e}")
+            await dbg_write(c, payload, "rate", test_only=True)
+            raw = await c.read_gatt_char(DEV.char("debug"))
             print(f"sample rate set to {_rate_of(raw)} Hz")
         return
     async with connect(addr) as c:
-        await dbg_write(c, bytes([0x07]), "rate", test_only=True)
-        raw = await c.read_gatt_char(DBG_CHAR)
-        print(f"sample rate now {_rate_of(raw)} Hz (step {raw[10] + 1})")
+        try:
+            payload = DEV.build("rate_next")
+        except protocol.Unsupported as e:
+            raise SystemExit(f"rate: {e}")
+        await dbg_write(c, payload, "rate", test_only=True)
+        raw = await c.read_gatt_char(DEV.char("debug"))
+        print(f"sample rate now {_rate_of(raw)} Hz "
+              f"(step {snap(raw, 'snapshot', 'rate_index') + 1})")
 
 
 async def cmd_tonefreq(addr, hz=None):
     if hz is None:
         async with connect(addr) as c:
-            await dbg_write(c, bytes([0x08]), "tonefreq", test_only=True)
-            raw = await c.read_gatt_char(DBG_CHAR)
-            hz = TONES[raw[11]]
+            try:
+                payload = DEV.build("tone_next")
+            except protocol.Unsupported as e:
+                raise SystemExit(f"tonefreq: {e}")
+            await dbg_write(c, payload, "tonefreq", test_only=True)
+            raw = await c.read_gatt_char(DEV.char("debug"))
+            hz = TONES[snap(raw, "snapshot", "tone_index") % len(TONES)]
         rate = _rate_of(raw)
         warn = ("  (ALIASED - above Nyquist for this rate)"
                 if hz * 2 >= rate else "")
@@ -670,10 +846,12 @@ async def cmd_tonefreq(addr, hz=None):
     if not 100 <= hz <= 30000:
         raise SystemExit("tone must be 100..30000 Hz")
     async with connect(addr) as c:
-        await dbg_write(c,
-                        bytes([0x0A]) + hz.to_bytes(4, "little"),
-                        "tonefreq", test_only=True)
-        raw = await c.read_gatt_char(DBG_CHAR)
+        try:
+            payload = DEV.build("tone_10s", hz)
+        except protocol.Unsupported as e:
+            raise SystemExit(f"tonefreq: {e}")
+        await dbg_write(c, payload, "tonefreq", test_only=True)
+        raw = await c.read_gatt_char(DEV.char("debug"))
     rate = _rate_of(raw)
     warn = ("  (ALIASED - above Nyquist for this rate)" if hz * 2 >= rate
             else "")
@@ -685,16 +863,35 @@ async def cmd_tonestart(addr, hz=None):
     if not 100 <= hz <= 30000:
         raise SystemExit("tone must be 100..30000 Hz")
     async with connect(addr) as c:
-        await dbg_write(c,
-                        bytes([0x0B]) + hz.to_bytes(4, "little"),
-                        "tonestart", test_only=True)
+        try:
+            payload = DEV.build("tone_hold", hz)
+        except protocol.Unsupported as e:
+            raise SystemExit(f"tonestart: {e}")
+        await dbg_write(c, payload, "tonestart", test_only=True)
     print(f"steady {hz} Hz tone started - stop with: tonestop")
 
 
 async def cmd_tonestop(addr):
     async with connect(addr) as c:
-        await dbg_write(c, bytes([0x0C]), "tonestop", test_only=True)
+        try:
+            payload = DEV.build("tone_release")
+        except protocol.Unsupported as e:
+            raise SystemExit(f"tonestop: {e}")
+        await dbg_write(c, payload, "tonestop", test_only=True)
     print("tone stopped")
+
+
+def _snap_sid_summary(raw):
+    """(playing, songs, rc, title, render_calls, frame_calls) from the
+    debug snapshot, or None when the firmware has no SID block there."""
+    if not has("snapshot", "sid_playing"):
+        return None
+    return (snap(raw, "snapshot", "sid_playing"),
+            snap(raw, "snapshot", "sid_songs"),
+            snap(raw, "snapshot", "sid_last_rc"),
+            snap_text(raw, "snapshot", "sid_title"),
+            snap(raw, "snapshot", "sid_render_calls", 0),
+            snap(raw, "snapshot", "sid_frame_calls", 0))
 
 
 async def cmd_sid(addr, n=None, sub=None):
@@ -703,46 +900,68 @@ async def cmd_sid(addr, n=None, sub=None):
         raise SystemExit("SID index must be 0..9 (/home/<n>.sid)")
     if sub is not None and not 1 <= sub <= 255:
         raise SystemExit("subtune must be 1..255 (255 = the PSID default)")
-    if sub is None:
-        payload = bytes([0x0E, n])
-    else:
-        payload = bytes([0x20, sub]) + f"{n}.sid".encode()
     async with connect(addr) as c:
+        try:
+            payload = (DEV.build("play_file", sub, f"{n}.sid")
+                       if sub is not None else
+                       DEV.build("play_index", n))
+        except protocol.Unsupported as e:
+            raise SystemExit(f"sid: {e}")
         before = await _maybe_state(c)
-        await c.write_gatt_char(DBG_CHAR, payload, response=True)
+        await c.write_gatt_char(DEV.char("debug"), payload, response=True)
         await _settle_player(c, before)
-        raw = await c.read_gatt_char(DBG_CHAR)
-    title = bytes(raw[75:90]).split(b"\0")[0].decode(errors="replace")
-    rc = raw[74] - 256 if raw[74] > 127 else raw[74]
-    print(f"SID: playing={raw[72]} songs={raw[73]} rc={rc} title={title!r} "
-          f"render_calls={raw[90] | (raw[91] << 8)} "
-          f"frame_calls={raw[92] | (raw[93] << 8)}")
+        raw = await c.read_gatt_char(DEV.char("debug"))
+        # _snap_sid_summary() reads field offsets from DEV, which goes away
+        # with the link: decode while it is still up.
+        summary = _snap_sid_summary(raw)
+        if summary is None:
+            print(f"played {n}.sid (this firmware does not report SID "
+                  "status)")
+            return
+        playing, songs, rc, title, calls, frames = summary
+        print(f"SID: playing={playing} songs={songs} rc={rc} "
+              f"title={title!r} render_calls={calls} frame_calls={frames}")
 
 
 async def cmd_sidname(addr, name=None, sub=None):
     if not name:
         raise SystemExit("usage: sidname <name.sid>  (file in /home)")
     data = name.encode("ascii", "replace")
-    if len(data) > 23:
-        raise SystemExit("file name too long (max 23 chars)")
     if sub is not None and not 1 <= sub <= 255:
         raise SystemExit("subtune must be 1..255 (255 = the PSID default)")
-    payload = (bytes([0x20, sub]) if sub is not None else bytes([0x11])) + data
     async with connect(addr) as c:
+        nmax = DEV.name_max("play_file" if sub is not None else
+                            "play_file_default")
+        if len(data) > nmax:
+            raise SystemExit(f"file name too long (max {nmax} chars)")
+        try:
+            payload = (DEV.build("play_file", sub, data)
+                       if sub is not None else
+                       DEV.build("play_file_default", data))
+        except protocol.Unsupported as e:
+            raise SystemExit(f"sidname: {e}")
         before = await _maybe_state(c)
-        await c.write_gatt_char(DBG_CHAR, payload, response=True)
+        await c.write_gatt_char(DEV.char("debug"), payload, response=True)
         await _settle_player(c, before)
-        raw = await c.read_gatt_char(DBG_CHAR)
-    title = bytes(raw[75:90]).split(b"\0")[0].decode(errors="replace")
-    rc = raw[74] - 256 if raw[74] > 127 else raw[74]
-    print(f"SID '{name}': playing={raw[72]} songs={raw[73]} rc={rc} "
-          f"title={title!r}")
+        raw = await c.read_gatt_char(DEV.char("debug"))
+        summary = _snap_sid_summary(raw)
+        if summary is None:
+            print(f"SID '{name}': played (this firmware does not report SID "
+                  "status)")
+            return
+        playing, songs, rc, title, _calls, _frames = summary
+        print(f"SID '{name}': playing={playing} songs={songs} rc={rc} "
+              f"title={title!r}")
 
 
-async def cmd_transport(addr, opcode, what):
-    """The 0x18..0x1C transport commands: bare opcode, no reply."""
+async def cmd_transport(addr, name, what):
+    """The play/pause and tune/subtune step commands: bare opcode, no reply."""
     async with connect(addr) as c:
-        await c.write_gatt_char(DBG_CHAR, bytes([opcode]), response=True)
+        try:
+            payload = DEV.build(name)
+        except protocol.Unsupported as e:
+            raise SystemExit(f"{name}: {e}")
+        await c.write_gatt_char(DEV.char("debug"), payload, response=True)
     print(what)
 
 
@@ -754,7 +973,12 @@ async def cmd_subplay(addr, n=None):
         raise SystemExit("subtune must be 1..255 (255 = the PSID default)")
     async with connect(addr) as c:
         try:
-            await c.write_gatt_char(DBG_CHAR, bytes([0x21, n]), response=True)
+            payload = DEV.build("subplay", n)
+        except protocol.Unsupported as e:
+            raise SystemExit(f"subplay: {e}")
+        try:
+            await c.write_gatt_char(DEV.char("debug"), payload,
+                                    response=True)
         except BleakError as e:
             raise SystemExit(
                 f"subplay: rejected by the device ({e}) - is a tune loaded?"
@@ -772,24 +996,38 @@ def _state_line(st):
 async def cmd_state(addr):
     """One-shot read of the player state + info characteristics."""
     async with connect(addr) as c:
-        state = _player_state(await _read_char(c, PLAYER_STATE_CHAR, "state"))
-        info = _player_info(await _read_char(c, PLAYER_INFO_CHAR, "state"))
-    if state is None:
-        raise SystemExit("state: unexpected value from the device")
-    engine = ("legacy" if state["legacy"] else
-              "split (FLPR CPU + M33 SID)" if state.get("split") else "cRSID")
-    print(f"player:  {_state_line(state)}")
-    print(f"engine:  {engine}")
-    if info["title"] or info["name"]:
-        print(f"tune:    {info['title'] or '-'}  [{info['name'] or '-'}]")
-        print(f"author:  {info['author'] or '-'}")
-        if info["id"]:
-            print(f"id:      {info['id']} (whole-file MD5 prefix, HVSC match)")
+        if not DEV.has_char("state"):
+            raise SystemExit(
+                f"state: firmware {DEV.firmware} has no player state "
+                "characteristic (added in 1.0.9)")
+        state = _player_state(await _read_char(c, DEV.char("state"), "state"))
+        info = (_player_info(await _read_char(c, DEV.char("info"), "state"))
+                if DEV.has_char("info") else
+                {"title": "", "name": "", "author": "", "id": None})
+        # The labels in _state_line() come from DEV, which the protocol
+        # object clears when the link goes away: print while it is alive.
+        if state is None:
+            raise SystemExit("state: unexpected value from the device")
+        engine = ("legacy" if state["legacy"] else
+                  "split (FLPR CPU + M33 SID)" if state.get("split")
+                  else "cRSID")
+        print(f"player:  {_state_line(state)}")
+        print(f"engine:  {engine}")
+        if info["title"] or info["name"]:
+            print(f"tune:    {info['title'] or '-'}  [{info['name'] or '-'}]")
+            print(f"author:  {info['author'] or '-'}")
+            if info["id"]:
+                print(f"id:      {info['id']} (whole-file MD5 prefix, "
+                      "HVSC match)")
 
 
 async def cmd_watch(addr):
     """Follow the player state notifications until Ctrl-C."""
     async with connect(addr) as c:
+        if not DEV.has_char("state"):
+            raise SystemExit(
+                f"watch: firmware {DEV.firmware} has no player state "
+                "characteristic (added in 1.0.9)")
         last_gen = {"value": -1}
         want_info = {"flag": False}
 
@@ -804,7 +1042,7 @@ async def cmd_watch(addr):
                   flush=True)
 
         try:
-            await c.start_notify(PLAYER_STATE_CHAR, on_state)
+            await c.start_notify(DEV.char("state"), on_state)
         except (BleakError, AttributeError) as e:
             raise SystemExit(
                 f"watch: cannot subscribe ({e}) - firmware too old?"
@@ -814,15 +1052,19 @@ async def cmd_watch(addr):
             while not stop():
                 if want_info["flag"]:
                     want_info["flag"] = False
-                    raw = await _read_char(c, PLAYER_INFO_CHAR, "watch")
-                    info = _player_info(raw)
+                    if DEV.has_char("info"):
+                        raw = await _read_char(c, DEV.char("info"), "watch")
+                        info = _player_info(raw)
+                    else:
+                        info = {"title": "", "name": "", "author": "",
+                                "id": None}
                     print(f"          tune: {info['title']} "
                           f"[{info['name']}] by {info['author']}"
                           + (f"  id {info['id']}" if info["id"] else ""),
                           flush=True)
                 await asyncio.sleep(0.1)
         with contextlib.suppress(Exception):
-            await c.stop_notify(PLAYER_STATE_CHAR)
+            await c.stop_notify(DEV.char("state"))
 
 
 async def cmd_quality(addr, value=None):
@@ -832,7 +1074,11 @@ async def cmd_quality(addr, value=None):
                          "~4.6x the SID cost, not persisted)")
     code = {"light": 0, "hq": 1}[value]
     async with connect(addr) as c:
-        await c.write_gatt_char(DBG_CHAR, bytes([0x35, code]), response=True)
+        try:
+            payload = DEV.build("set_quality", code)
+        except protocol.Unsupported as e:
+            raise SystemExit(f"quality: {e}")
+        await c.write_gatt_char(DEV.char("debug"), payload, response=True)
     print(f"SID quality: {value}")
 
 
@@ -841,8 +1087,8 @@ async def cmd_volume(addr, value=None):
     usage = "volume [0-255]  (no value = read)"
     async with connect(addr) as c:
         if value is None:
-            raw = await c.read_gatt_char(DBG_CHAR)
-            v = raw[7]
+            raw = await c.read_gatt_char(DEV.char("debug"))
+            v = snap(raw, "snapshot", "audio_volume")
             print(f"volume: {v} ({round(v * 100 / 255)}%)")
             return
         try:
@@ -851,7 +1097,11 @@ async def cmd_volume(addr, value=None):
             raise SystemExit(usage)
         if not 0 <= v <= 255:
             raise SystemExit(usage)
-        await c.write_gatt_char(DBG_CHAR, bytes([0x37, v]), response=True)
+        try:
+            payload = DEV.build("set_volume", v)
+        except protocol.Unsupported as e:
+            raise SystemExit(f"volume: {e}")
+        await c.write_gatt_char(DEV.char("debug"), payload, response=True)
         print(f"volume: {v} ({round(v * 100 / 255)}%) (saved)")
 
 
@@ -865,8 +1115,11 @@ async def cmd_splitrate(addr, value=None):
     if not 0 <= hz <= 96000:
         raise SystemExit(usage)
     async with connect(addr) as c:
-        await c.write_gatt_char(DBG_CHAR, bytes([0x36, hz & 0xFF, hz >> 8]),
-                                response=True)
+        try:
+            payload = DEV.build("splitrate", hz)
+        except protocol.Unsupported as e:
+            raise SystemExit(f"splitrate: {e}")
+        await c.write_gatt_char(DEV.char("debug"), payload, response=True)
     print(f"split SID rate: {hz if hz else 'default by SID count'} (saved)")
 
 
@@ -877,8 +1130,11 @@ async def cmd_engine(addr, value=None):
                          "cSID-light / split: FLPR runs the C64/CPU)")
     code = {"new": 0, "old": 1, "split": 2}[value]
     async with connect(addr) as c:
-        await c.write_gatt_char(DBG_CHAR, bytes([0x17, code]),
-                                response=True)
+        try:
+            payload = DEV.build("set_engine", code)
+        except protocol.Unsupported as e:
+            raise SystemExit(f"engine: {e}")
+        await c.write_gatt_char(DEV.char("debug"), payload, response=True)
         print(f"SID engine: {value}")
 
 
@@ -890,15 +1146,20 @@ async def cmd_filedelete(addr, name=None):
     if name.lower().endswith(".sid"):
         names += [name[:-4] + ".len", name[:-4] + ".stil"]
     async with connect(addr) as c:
+        nmax = DEV.name_max("delete")
         for i, n in enumerate(names):
             data = n.encode("ascii", "replace")
-            if len(data) > 23:
+            if len(data) > nmax:
                 if i == 0:
-                    raise SystemExit("file name too long (max 23 chars)")
+                    raise SystemExit(f"file name too long (max {nmax} chars)")
                 print(f"cannot delete (name too long): {n}")
                 continue
             try:
-                await c.write_gatt_char(DBG_CHAR, bytes([0x16]) + data,
+                payload = DEV.build("delete", data)
+            except protocol.Unsupported as e:
+                raise SystemExit(f"filedelete: {e}")
+            try:
+                await c.write_gatt_char(DEV.char("debug"), payload,
                                         response=True)
                 print(f"deleted: {n}")
             except Exception as e:
@@ -916,7 +1177,11 @@ async def cmd_chip(addr, mode=None):
     if m is None:
         raise SystemExit("chip mode: auto | 6581 | 8580")
     async with connect(addr) as c:
-        await c.write_gatt_char(DBG_CHAR, bytes([0x12, m]), response=True)
+        try:
+            payload = DEV.build("set_chip", m)
+        except protocol.Unsupported as e:
+            raise SystemExit(f"chip: {e}")
+        await c.write_gatt_char(DEV.char("debug"), payload, response=True)
     print(f"SID chip mode -> {('auto (PSID flag)', '6581', '8580')[m]}"
           f" (reloads the current tune)")
 
@@ -928,21 +1193,30 @@ async def cmd_endmode(addr, value=None):
     if m is None:
         raise SystemExit("end mode: nextsub | nexttune | loop")
     async with connect(addr) as c:
-        await c.write_gatt_char(DBG_CHAR, bytes([0x22, m]), response=True)
-    print(f"end mode -> {END_MODES[m]}")
+        try:
+            payload = DEV.build("set_end_mode", m)
+        except protocol.Unsupported as e:
+            raise SystemExit(f"end mode: {e}")
+        await c.write_gatt_char(DEV.char("debug"), payload, response=True)
+    print(f"end mode -> {_value_label('end_mode', m)}")
 
 
 def _rtt_chunk(raw):
-    """Log text from a snapshot read served by the 0x1E debug command."""
-    if len(raw) < 96 or raw[34] != 0x1E:
+    """Log text from a snapshot read served by the log debug command."""
+    if raw is None or not has("log", "marker") or \
+            snap(raw, "log", "marker") != DEV.opcode("log"):
         return None
-    return bytes(raw[36:36 + min(raw[35], LOG_CHUNK)])
+    n = min(snap(raw, "log", "count"), int(DEV.limits["log_chunk"]))
+    return bytes(raw[DEV.offset("log", "text"):][:n])
 
 
 async def _log_chunk(c, mode):
-    """One log chunk; exit in one line when the device does not serve 0x1E."""
-    await dbg_write(c, bytes([0x1E, mode]), "log")
-    raw = await c.read_gatt_char(DBG_CHAR)
+    """One log chunk; exit in one line when the device does not serve it."""
+    try:
+        await dbg_write(c, DEV.build("log", mode), "log")
+    except protocol.Unsupported as e:
+        raise SystemExit(f"log: {e}")
+    raw = await c.read_gatt_char(DEV.char("debug"))
     text = _rtt_chunk(raw)
     if text is None:
         raise SystemExit("log: unexpected snapshot (old firmware?)")
@@ -1046,7 +1320,11 @@ async def cmd_accel(addr, mode=None):
                 sys.stdout.write(text.decode(errors="replace"))
                 sys.stdout.flush()
 
-        payload = bytes([0x1F]) if code == 0 else bytes([0x1F, code])
+        try:
+            payload = (DEV.build("accel", code) if code else
+                       DEV.build("accel"))
+        except protocol.Unsupported as e:
+            raise SystemExit(f"accel: {e}")
         await dbg_write(c, payload, "accel")
         await _pull_log(c, emit)
         emit(b"", last=True)
@@ -1056,36 +1334,44 @@ async def cmd_ls(addr):
     async with connect(addr) as c:
         start = 0
         names = []
+        raw = b""
         for _ in range(400):  # ~4 files/page; 40 pages truncated big libraries
-            await c.write_gatt_char(
-                DBG_CHAR,
-                bytes([0x13, start & 0xFF, (start >> 8) & 0xFF]),
-                response=True)
-            raw = await c.read_gatt_char(DBG_CHAR)
-            chunk = bytes(raw[34:95]).split(b"\0")[0].decode(errors="replace")
+            try:
+                payload = DEV.build("list_page", start)
+            except protocol.Unsupported as e:
+                raise SystemExit(f"ls: {e}")
+            await c.write_gatt_char(DEV.char("debug"), payload,
+                                    response=True)
+            raw = await c.read_gatt_char(DEV.char("debug"))
+            chunk = DEV.text(raw, "listing", "text")
             names += [n for n in chunk.split("\n") if n]
-            nxt = raw[95]
+            nxt = snap(raw, "listing", "next", 0xFF)
             if nxt == 0xFF:
                 break
             start = nxt
+        # The protocol object is cleared when the link goes away, so read
+        # the filesystem state while the connection (and DEV) still exists.
+        state = _fs_state(raw)
     print("/home:")
     for n in names:
         print(f"  {n}")
     print(f"  ({len(names)} files)")
-    if len(raw) > 138 and raw[137]:
+    if state is not None and not state[0]:
         print(f"  filesystem corrupt or not formatted (mount error "
-              f"-{raw[138]}) - nothing is stored, so the listing is empty; "
+              f"-{state[1]}) - nothing is stored, so the listing is empty; "
               "'fsformat' recreates it")
+    elif state is not None and not names:
+        print("  /home is mounted but the directory could not be read - "
+              "the firmware's directory-handle pool may be exhausted; "
+              "a reboot clears it (do not 'fsformat')")
 
 
 async def _poll_marker(c, marker):
     """Poll the snapshot until the deferred op serves its marker."""
     for _ in range(15):
         await asyncio.sleep(1)
-        raw = await c.read_gatt_char(DBG_CHAR)
-        if len(raw) < 96:
-            raise SystemExit("short snapshot (old firmware?)")
-        if raw[34] == marker:
+        raw = await c.read_gatt_char(DEV.char("debug"))
+        if snap(raw, "stacks", "marker", None) == marker:
             return raw
     raise SystemExit("op not served (retry)")
 
@@ -1093,15 +1379,23 @@ async def _poll_marker(c, marker):
 async def cmd_stacks(addr, value=None):
     """Stack high-water marks: the interrupt stack first, then the threads."""
     async with connect(addr) as c:
+        try:
+            marker = DEV.opcode("stacks")
+        except protocol.Unsupported as e:
+            raise SystemExit(f"stacks: {e}")
         raws = []
         for page in range(4):  # firmware caps the listing at 3 pages
-            payload = bytes([0x1D]) if page == 0 else bytes([0x1D, page])
-            await c.write_gatt_char(DBG_CHAR, payload, response=True)
-            raw = await _poll_marker(c, 0x1D)
+            payload = (DEV.build("stacks", page) if page else
+                       DEV.build("stacks"))
+            await c.write_gatt_char(DEV.char("debug"), payload,
+                                    response=True)
+            raw = await _poll_marker(c, marker)
             raws.append(raw)
-            if not _stacks_more(raw[35], page):
+            if not _stacks_more(snap(raw, "stacks", "page"), page):
                 break
-    rows = _parse_stack_pages(raws)
+        # _parse_stack_pages() reads the row names through DEV, which goes
+        # away with the link: decode while it is still up.
+        rows = _parse_stack_pages(raws)
     print(f"stacks: {len(rows)} rows (interrupt stack, then threads "
           f"in creation order)")
     wid = max((len(name) for name, _, _ in rows), default=4)
@@ -1113,10 +1407,10 @@ async def cmd_stacks(addr, value=None):
 
 
 def _stacks_more(page_byte, page):
-    """Whether another 0x1D page should be requested.
+    """Whether another stacks page should be requested.
 
-    Bit 6 of the page byte in [35] marks the last page (firmware that has
-    the interrupt stack row); older firmware leaves it clear, and then the
+    Bit 6 of the page byte marks the last page (firmware that has the
+    interrupt stack row); older firmware leaves it clear, and then the
     named layout has 3 pages and the pre-name layout 2.
     """
     if page_byte & 0x40:
@@ -1125,28 +1419,34 @@ def _stacks_more(page_byte, page):
 
 
 def _parse_stack_pages(raws):
-    """(name, size, free) rows from the 0x1D snapshot pages.
+    """(name, size, free) rows from the stack telemetry snapshot pages.
 
-    Names live in bytes [52..95] as 11-byte fields, aligned with the
-    (size, free) pairs at [36..51], 4 rows per page; bit 7 of the page
-    byte in [35] marks that layout. Row 0 of the listing is the interrupt
-    stack (named "ISR0" by the firmware); the threads follow in creation
-    order. A firmware that predates the names keeps the 5-per-page pairs
-    at [36..55] and leaves non-text bytes where the names would be, so
-    those rows are labelled by position instead.
+    Names live in a per-row text field aligned with the (size, free) pairs,
+    4 rows per page; bit 7 of the page byte marks that layout. Row 0 of the
+    listing is the interrupt stack (named "ISR0" by the firmware); the
+    threads follow in creation order. A firmware that predates the names
+    keeps the 5-per-page pairs and leaves non-text bytes where the names
+    would be, so those rows are labelled by position instead.
     """
+    rows_off = DEV.offset("stacks", "rows")
+    names_off = DEV.offset("stacks", "names")
+    name_max = int(DEV.limits["stack_name_max"])
+    per_page = int(DEV.limits["stack_rows_per_page"])
     rows = []
     for page, raw in enumerate(raws):
-        named = bool(raw[35] & 0x80)
-        per = 4 if named else 5
+        named = bool(snap(raw, "stacks", "page") & 0x80)
+        per = per_page if named else 5
         for i in range(per):
-            size = raw[36 + 4 * i] | (raw[37 + 4 * i] << 8)
-            free = raw[38 + 4 * i] | (raw[39 + 4 * i] << 8)
+            size = int.from_bytes(raw[rows_off + 4 * i:
+                                     rows_off + 2 + 4 * i], "little")
+            free = int.from_bytes(raw[rows_off + 2 + 4 * i:
+                                     rows_off + 4 + 4 * i], "little")
             if size == 0:
                 continue
             name = f"#{per * page + i}"
             if named:
-                label = raw[52 + 11 * i:63 + 11 * i].split(b"\0")[0]
+                label = raw[names_off + name_max * i:
+                            names_off + name_max * (i + 1)].split(b"\0")[0]
                 if label:
                     name = label.decode("ascii", "replace").strip()
             rows.append((name, size, free))
@@ -1162,7 +1462,8 @@ def main():
         nargs="?",
         default="status",
         choices=[
-            "status", "set-time", "monitor", "audio", "click", "beep",
+            "status", "protocol", "set-time", "monitor", "audio",
+            "click", "beep",
             "tone", "mute", "rate", "tonefreq",
         "tonestart", "tonestop", "fsformat", "sid", "sidname", "chip",
         "sidstop", "ls", "glitch", "blemode", "filedelete", "endmode",
@@ -1201,13 +1502,14 @@ def main():
 
     fn = {
         "status": cmd_status,
+        "protocol": cmd_protocol,
         "set-time": cmd_set_time,
         "monitor": cmd_monitor,
         "audio": cmd_audio,
-        "click": lambda a: cmd_tone(a, 1),
-        "beep": lambda a: cmd_tone(a, 2),
-        "tone": lambda a: cmd_tone(a, 0x50),
-        "mute": lambda a: cmd_tone(a, 3),
+        "click": lambda a: cmd_tone(a, "click"),
+        "beep": lambda a: cmd_tone(a, "beep"),
+        "tone": lambda a: cmd_tone(a, "long_tone"),
+        "mute": lambda a: cmd_tone(a, "mute"),
         "rate": cmd_rate,
         "tonefreq": cmd_tonefreq,
         "tonestart": cmd_tonestart,
@@ -1218,7 +1520,7 @@ def main():
         "chip": cmd_chip,
         "endmode": cmd_endmode,
         "ls": cmd_ls,
-        "sidstop": lambda a: cmd_tone(a, 0x0F),
+        "sidstop": lambda a: cmd_tone(a, "stop"),
         "glitch": cmd_glitch,
         "blemode": cmd_blemode,
         "filedelete": cmd_filedelete,
@@ -1230,11 +1532,14 @@ def main():
         "threads": cmd_stacks,  # alias for the old name
         "log": cmd_log,
         "accel": cmd_accel,
-        "playpause": lambda a: cmd_transport(a, 0x18, "play/pause toggled"),
-        "next": lambda a: cmd_transport(a, 0x19, "next tune"),
-        "prev": lambda a: cmd_transport(a, 0x1A, "previous tune"),
-        "subnext": lambda a: cmd_transport(a, 0x1B, "next subtune"),
-        "subprev": lambda a: cmd_transport(a, 0x1C, "previous subtune"),
+        "playpause": lambda a: cmd_transport(a, "play_pause",
+                                             "play/pause toggled"),
+        "next": lambda a: cmd_transport(a, "next_tune", "next tune"),
+        "prev": lambda a: cmd_transport(a, "prev_tune", "previous tune"),
+        "subnext": lambda a: cmd_transport(a, "next_subtune",
+                                           "next subtune"),
+        "subprev": lambda a: cmd_transport(a, "prev_subtune",
+                                           "previous subtune"),
         "subplay": cmd_subplay,
         "state": cmd_state,
         "watch": cmd_watch,

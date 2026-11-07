@@ -35,6 +35,8 @@ import sys
 import time
 from pathlib import Path
 
+import protocol
+
 ROOT = Path(__file__).resolve().parent.parent
 ARCHIVE = ROOT / "sids"
 DB_DEFAULT = ARCHIVE / "Songlengths.txt"      # legacy format (fallback)
@@ -241,6 +243,10 @@ def main() -> int:
         if not args.addr:
             ap.error("pass --addr, set $SIDCLOCK_ADDR, or use --no-upload")
 
+    # Longest device file name this firmware can address (protocol/current.json).
+    NAME_MAX = protocol.load_descriptor(
+        protocol.load_index()["latest"]).limits["name_max"]
+
     archive = Path(args.dir)
     archive.mkdir(parents=True, exist_ok=True)
     db = load_db(Path(args.db)) if Path(args.db).exists() else {}
@@ -260,6 +266,17 @@ def main() -> int:
         name = args.name or src.name
         if not name.endswith(".sid"):
             print(f"{src.name}: name must end in .sid (use --name)")
+            rc = 1
+            continue
+        # The firmware addresses /home names up to limits.name_max (23)
+        # characters: the play/delete commands carry at most that many, and
+        # sid_find_next skips anything longer. A longer name used to be
+        # uploaded anyway and then could neither be played nor removed (and
+        # used to break the listing iterator). Refuse it here instead.
+        if len(name.encode("ascii", "replace")) > NAME_MAX:
+            print(f"{src.name}: device name {name!r} is {len(name)} "
+                  f"characters, the firmware handles at most {NAME_MAX}; "
+                  "pass --name Short.sid")
             rc = 1
             continue
 
