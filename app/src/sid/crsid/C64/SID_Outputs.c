@@ -44,12 +44,19 @@ static INLINE int cRSID_emulateSIDoutputStage (FASTVAR cRSID_SIDinstance *const 
   if ( MOSTLY (SID->ChipModel == 8580) ) {
    Cutoff = CutoffTable[Cutoff];
    Resonance = cRSID_Resonances8580[Resonance];
+   //Chamberlin-SVF stability: the rate-warped tables reach fs/4, which is
+   //outside the stable region at low resonance (see SID_FilterCurves.h);
+   //cap the coefficient for the resonance register in use.
+   if ( RARELY (Cutoff > cRSID_CutoffLimit8580[FilterSwitchReso >> 4]) )
+    Cutoff = cRSID_CutoffLimit8580[FilterSwitchReso >> 4];
   }
   else { //6581
    Cutoff += (FilterInput*105)>>16; //MOSFET-VCR control-voltage calculation (resistance-modulation aka 6581 filter distortion) emulation
     if ( RARELY (Cutoff > SID_CUTOFF_MAX) ) Cutoff=SID_CUTOFF_MAX; else if ( RARELY(Cutoff<0) ) Cutoff=0;  //can really go below 0 when FilterInput is negative
    Cutoff = CutoffTable[Cutoff];
    Resonance = cRSID_Resonances6581[Resonance];
+   if ( RARELY (Cutoff > cRSID_CutoffLimit6581[FilterSwitchReso >> 4]) )
+    Cutoff = cRSID_CutoffLimit6581[FilterSwitchReso >> 4];
   }
   //64-bit products: the rate-warped tables reach a coefficient of ~fs/4
   //(5793 at 23 kHz) and the filter state can be O(1e6), so the 32-bit
