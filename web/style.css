@@ -148,6 +148,7 @@ details[open] .chev { transform: rotate(90deg); }
 
 .title { font-size: 20px; font-weight: 600; margin-top: 4px; overflow-wrap: anywhere; }
 .sub { color: var(--dim); font-size: 13.5px; min-height: 1.3em; overflow-wrap: anywhere; }
+.fwline { margin-top: 6px; font-size: 12px; line-height: 1.35; }
 .battery { color: var(--dim); font-size: 13px; font-variant-numeric: tabular-nums; }
 
 .progress {
@@ -157,7 +158,8 @@ details[open] .chev { transform: rotate(90deg); }
   overflow: hidden;
   margin: 12px 0 6px;
 }
-#progressbar {
+#progressbar,
+#updprogbar {
   height: 100%;
   width: 0;
   background: linear-gradient(90deg, var(--accent), var(--accent2));
@@ -290,6 +292,84 @@ button.badge.action::after {
   font-size: 14px;
 }
 .note.error { border-color: var(--err); color: var(--err); }
+
+/* ---------- firmware update ---------- */
+
+/* device card (firmware, clock and the tune list). Collapsed, the summary
+ * is the whole story while nothing needs doing - version, update state,
+ * tune count, device time and its offset from the browser clock */
+details.system.attention { border-color: var(--primary-line); }
+.syshead { align-items: center; }
+/* the chevron must not wrap under the label when the line is long */
+.syshead > .label { flex: none; white-space: nowrap; }
+/* collapsed, the word "device" is redundant next to "firmware ...": only
+ * the chevron stays, so the line fits on a phone */
+details.system:not([open]) .syshead { justify-content: flex-start; }
+details.system:not([open]) .syshead > .label { font-size: 0; }
+.sysline {
+  display: flex;
+  flex: 1 1 auto;
+  flex-wrap: wrap;
+  justify-content: flex-start;
+  align-items: baseline;
+  gap: 2px 8px;
+  min-width: 0;
+  font-size: 13px;
+}
+.sysfw { font-weight: 600; overflow-wrap: anywhere; }
+/* empty parts must not leave a gap in the line */
+.sysline > :empty, .sysclockline > :empty { display: none; }
+.sysclockline {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  white-space: nowrap;
+  margin-left: auto;
+}
+.sysclock {
+  font-variant-numeric: tabular-nums;
+  color: var(--fg);
+  flex: none;
+}
+.sysclock.warn { color: var(--warn); }
+.sysbody { margin-top: 12px; }
+.sysproto { font-size: 12px; margin-top: 8px; }
+/* the tune list under the clock/update rows, separated so it does not read
+ * as another firmware row */
+.libhead {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+/* the update block is always present when the card is open: even with the
+ * latest firmware installed, a local build can be flashed */
+#updtitle:empty, #updsub:empty { display: none; }
+.updtitle { font-size: 16px; font-weight: 600; margin-top: 4px; overflow-wrap: anywhere; }
+.updwhy {
+  color: var(--warn);
+  font-size: 13px;
+  margin-top: 8px;
+}
+.updrow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+}
+.updrow .btn { flex: none; }
+.updlink {
+  color: var(--accent2);
+  font-size: 13px;
+  text-decoration: none;
+  margin-left: auto;
+}
+.system .progressline { margin-top: 12px; }
 
 .hint { color: var(--dim); font-size: 12.5px; margin: 16px; }
 

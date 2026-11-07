@@ -49,6 +49,7 @@ try {
     </div>
     <div id="title" class="title">nothing loaded</div>
     <div id="subtitle" class="sub"></div>
+    <div id="fwline" class="dim fwline" hidden></div>
 
     <div class="progress"><div id="progressbar"></div></div>
     <div class="progressrow">
@@ -85,19 +86,6 @@ try {
     </div>
   </section>
 
-  <section class="card">
-    <div class="cardhead"><span class="label">clocks</span></div>
-    <div class="row">
-      <span class="rowlabel">device</span>
-      <span id="devtime" class="value">--:--:--</span>
-      <button id="settime" class="btn">set time</button>
-    </div>
-    <div class="row">
-      <span class="rowlabel">browser</span>
-      <span id="hosttime" class="value">--:--:--</span>
-    </div>
-  </section>
-
   <section id="hvscinfo" class="card" hidden>
     <div class="cardhead">
       <span class="label">hvsc info</span>
@@ -112,13 +100,67 @@ try {
     <p id="metacomment" class="comment" hidden></p>
   </section>
 
-  <details id="libcard" class="card">
-    <summary class="cardhead">
-      <span class="label">on the device<span class="chev" aria-hidden="true"></span></span>
-      <span id="libinfo" class="dim"></span>
-      <button id="librefresh" class="btn small">refresh</button>
+  <!-- firmware, clock and tune list in one card under the player. Collapsed
+       it is a single line (firmware version, update state, tune count,
+       device time and offset); it opens by itself when something needs
+       attention (an update to apply, a staged image, an unset or >1 min
+       wrong clock). Expanded: the clocks, the firmware upload and then the
+       tunes on the device. -->
+  <details id="systemcard" class="card system" hidden>
+    <summary class="cardhead syshead">
+      <span class="label">device<span class="chev" aria-hidden="true"></span></span>
+      <span class="sysline">
+        <span id="sysfw" class="sysfw">firmware --</span>
+        <span id="updstate" class="dim"></span>
+        <span id="libinfo" class="dim tuneinfo"></span>
+        <span class="sysclockline">
+          <span id="systime" class="sysclock">--:--:--</span>
+          <span id="sysoff" class="dim"></span>
+        </span>
+      </span>
     </summary>
-    <ul id="lib" class="results"></ul>
+
+    <div class="sysbody">
+      <div class="row">
+        <span class="rowlabel">device</span>
+        <span id="devtime" class="value">--:--:--</span>
+        <button id="settime" class="btn">set time</button>
+      </div>
+      <div class="row">
+        <span class="rowlabel">browser</span>
+        <span id="hosttime" class="value">--:--:--</span>
+      </div>
+
+      <div id="updblock">
+        <div id="updtitle" class="updtitle"></div>
+        <div id="updsub" class="sub"></div>
+        <div id="updwhy" class="updwhy" hidden></div>
+
+        <div id="updprog" class="progressline" hidden>
+          <div class="progress"><div id="updprogbar"></div></div>
+          <span id="updproglabel" class="dim"></span>
+        </div>
+
+        <div class="updrow">
+          <button id="updinstall" class="btn primary">Update</button>
+          <button id="updreboot" class="btn primary" hidden>Reboot now</button>
+          <button id="upddiscard" class="btn" hidden>Discard</button>
+          <button id="updfile" class="btn"
+                  title="flash a local .signed.bin build">Flash local build…</button>
+          <input id="updfileinput" type="file"
+                 accept=".bin,application/octet-stream" hidden>
+          <a id="updnotes" class="updlink" target="_blank" rel="noopener"
+             hidden>release notes</a>
+        </div>
+        <p id="sysproto" class="dim sysproto"></p>
+      </div>
+
+      <div class="libhead">
+        <span class="label">on the device</span>
+        <button id="librefresh" class="btn small">refresh</button>
+      </div>
+      <ul id="lib" class="results"></ul>
+    </div>
   </details>
 
   <section class="card">
@@ -155,15 +197,19 @@ try {
     The device talks to one host at a time and only accepts commands while
     Bluetooth access is <strong>R/W</strong> (shown on its main screen).
     It has no real-time clock of its own, so after a reset its clock is
-    <em>unset</em> and otherwise drifts: the two clocks above show it, and
-    the device one turns amber while they disagree - press <em>set
+    <em>unset</em> and otherwise drifts: the <em>device</em> card under the
+    player shows both clocks and their offset, and the device time turns
+    amber while they disagree - open the card and press <em>set
     time</em> to copy the browser clock over (the write carries
     milliseconds and compensates the Bluetooth delay, so both displays
     flip their seconds together). The volume slider drives the device's
     software volume, the same one its VOL slider shows. The HVSC section
     searches hvsc.c64.org and writes tunes straight to the device over SMP
     (song lengths and tune info come from the HVSC databases, cached by the
-    browser) - that needs R/W mode too.
+    browser) - that needs R/W mode too. Firmware updates use the same SMP
+    link: the page checks the latest release when it connects and offers it
+    when the device is older; keep the device on its charger and this tab
+    open until the upload finishes.
   </p>
 </main>
 

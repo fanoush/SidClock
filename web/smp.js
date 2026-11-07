@@ -1,6 +1,7 @@
 /*
  * Minimal SMP (mcumgr Simple Management Protocol) client over the
- * Bluetooth SMP characteristic, used for file uploads to /home.
+ * Bluetooth SMP characteristic: file uploads to /home (fs_mgmt) and
+ * firmware updates (img_mgmt + os reset).
  *
  * The wire format mirrors smpmgr/smpclient: an 8-byte big-endian header
  * (op | version << 3, flags, length, group id, sequence, command id)
@@ -13,12 +14,19 @@
  * (CONFIG_MCUMGR_TRANSPORT_NETBUF_SIZE, 2048 here), reported by the
  * OS/parameters command; frames are packed to that size so each round
  * trip carries as much file data as possible.
+ *
+ * Firmware upload and arming are two separate requests, exactly like
+ * `tools/flash_ota.py`: `uploadImage()` writes slot 1, `armImage()` marks
+ * it for a test swap, and the device applies it on the next reset. The
+ * image hash to arm is the MCUboot SHA-256 TLV value (the hash of the
+ * header and body), which the page computes itself - see update.js.
  */
 
 export const SMP_SERVICE = '8d53dc1d-1db7-4cd3-868b-8a527460aa84';
 export const SMP_CHARACTERISTIC = 'da2e7828-fbce-4e01-ae9e-261174997c48';
 
 const GROUP_OS = 0;
+const GROUP_IMG = 1;
 const GROUP_FS = 8;
 
 const OP_READ = 0;
@@ -27,14 +35,27 @@ const OP_WRITE = 2;
 const VERSION = 1; // SMPv2, what smpclient sends
 
 const CMD_OS_MCUMGR_PARAMS = 6;
+const CMD_OS_RESET = 5;
 const CMD_FS_DOWNLOAD_UPLOAD = 0;
 const CMD_FS_STATUS = 1;
 const CMD_FS_CLOSE = 4;
+const CMD_IMG_STATE = 0;   // read lists the slots, write arms one
+const CMD_IMG_UPLOAD = 1;
+const CMD_IMG_ERASE = 5;
 
 /* the largest ATT write to the device: its 247-byte ATT MTU minus the
  * 3-byte ATT header. Only a starting guess - if a write fails the client
  * halves it and retries the frame from the start (nothing was sent). */
 const ATT_CHUNK_MAX = 244;
+
+/* the transport probe in start(): short, because a silent link is a
+ * state the page reports instead of waiting it out */
+const PROBE_TIMEOUT_MS = 1500;
+
+/* sizeof(struct image_header): Zephyr's img_mgmt rejects an upload that
+ * starts at offset 0 unless the request carries this much image data
+ * (the header check needs the MCUboot magic and the version). */
+const IMAGE_HEADER_SIZE = 32;
 
 const GENERIC_RC = [
   'ok', 'unknown error', 'out of memory', 'bad value', 'timed out',
@@ -51,6 +72,25 @@ const FS_RC = [
   'read-only filesystem', 'file is empty',
 ];
 
+/* IMG_MGMT_ERR from Zephyr's mcumgr image group (subsys/mgmt/mcumgr/grp/
+ * img_mgmt/include/mgmt/img_mgmt.h). Kept complete so an unexpected code
+ * still has a name. */
+const IMG_RC = [
+  'ok', 'unknown error', 'cannot query the flash layout', 'no image in the slot',
+  'the image has no TLVs', 'invalid TLV', 'multiple hash TLVs',
+  'invalid TLV size', 'no hash TLV', 'no free slot', 'flash open failed',
+  'flash read failed', 'flash write failed', 'flash erase failed',
+  'invalid slot', 'out of memory', 'flash context already set',
+  'flash context not set', 'no flash device', 'invalid page offset',
+  'missing offset', 'missing length', 'image too short for its header',
+  'bad image magic', 'invalid hash', 'load address does not match the slot',
+  'cannot read the running version', 'the running image is newer',
+  'an image is already pending', 'invalid vector table', 'image too large',
+  'more data than the image length', 'image confirmation denied',
+  'cannot set the active slot to test',
+  'the active slot cannot be determined',
+];
+
 function concat(parts) {
   let n = 0;
   for (const p of parts) n += p.length;
@@ -62,6 +102,21 @@ function concat(parts) {
   }
   return out;
 }
+
+const hexOf = (bytes) => {
+  let s = '';
+  for (const b of bytes) s += b.toString(16).padStart(2, '0');
+  return s;
+};
+
+const bytesOfHex = (hex) => {
+  const clean = String(hex || '').replace(/[^0-9a-fA-F]/g, '');
+  const out = new Uint8Array(clean.length >> 1);
+  for (let i = 0; i < out.length; i++) {
+    out[i] = parseInt(clean.slice(i * 2, i * 2 + 2), 16);
+  }
+  return out;
+};
 
 /* ---------- CBOR (just what SMP uses: uint, bytes, text, map) ---------- */
 
@@ -89,6 +144,8 @@ export const cborText = (s) => {
   const u = new TextEncoder().encode(s);
   return concat([head(3, u.length), u]);
 };
+/** CBOR boolean: 0xf4/0xf5. */
+export const cborBool = (b) => new Uint8Array([b ? 0xf5 : 0xf4]);
 
 /** Map from [key, encodedValue] pairs, in the order given (callers keep
  *  the canonical key order smpclient uses, though the device does not
@@ -224,16 +281,22 @@ export function cborDecode(bytes) {
 /** An SMP error response, with a human-readable `message`. */
 export class SmpError extends Error {
   constructor(msg) {
-    const rc = msg.rc;
-    let what = GENERIC_RC[rc] || `rc ${rc}`;
-    if (msg.err && typeof msg.err === 'object') {
-      what = FS_RC[msg.err.rc] || `${what} (group ${msg.err.group})`;
+    const err = (msg && typeof msg.err === 'object') ? msg.err : null;
+    const rc = typeof msg.rc === 'number' ? msg.rc : undefined;
+    let what = GENERIC_RC[rc] || 'unknown error';
+    if (err) {
+      const table = err.group === 1 ? IMG_RC
+        : err.group === 8 ? FS_RC : null;
+      what = (table && table[err.rc]) ||
+        `${what} (group ${err.group} rc ${err.rc})`;
     }
     super(`device refused: ${what}`);
     this.name = 'SmpError';
-    this.rc = rc;
-    if (msg.err && typeof msg.err === 'object') {
-      this.err = { group: msg.err.group, rc: msg.err.rc };
+    /* the image group's error code is the interesting one when both
+     * shapes are present */
+    this.rc = err ? err.rc : rc;
+    if (err) {
+      this.err = { group: err.group, rc: err.rc };
     }
   }
 }
@@ -263,13 +326,27 @@ export class SmpClient {
     this.seq = 0;
     this.bufSize = 512; // refined by the mcumgr parameters read
     this.chunk = ATT_CHUNK_MAX;
+    /* the first image request erases the secondary slot and can take a
+     * moment longer than a file chunk */
+    this.imageTimeoutMs = 20000;
     this.rx = new Uint8Array(0);
     this.waiter = null;
     this.started = false;
+    /* false when the device never answered the transport probe: the page
+     * hides uploads and updates instead of letting each press run into
+     * a row of timeouts (see start()) */
+    this.healthy = true;
+    this.problem = '';
     this.onLog = () => {};
   }
 
-  /** Subscribe and learn the device's SMP buffer size. */
+  /** Subscribe and learn the device's SMP buffer size.
+   *
+   *  The parameters read doubles as the transport probe: an SMP link
+   *  that does not answer it does not answer anything, and a page that
+   *  pretends otherwise turns one broken link into 15 s of timeouts per
+   *  press. A lost *first* notification looks exactly the same, so the
+   *  CCC is armed once more before the link is called dead. */
   async start() {
     if (this.started) return this;
     this._listener = (ev) => {
@@ -279,15 +356,49 @@ export class SmpClient {
     this.char.addEventListener('characteristicvaluechanged', this._listener);
     await this.char.startNotifications();
     this.started = true;
-    try {
-      const p = await this.request(OP_READ, GROUP_OS, CMD_OS_MCUMGR_PARAMS,
-                                   cborMap([]), { retries: 1 });
-      if (Number.isSafeInteger(p.buf_size) && p.buf_size >= 256) {
-        this.bufSize = p.buf_size;
+
+    const probe = () => this.request(OP_READ, GROUP_OS, CMD_OS_MCUMGR_PARAMS,
+                                     cborMap([]), {
+                                       retries: 0,
+                                       timeoutMs: Math.min(this.timeoutMs,
+                                                          PROBE_TIMEOUT_MS),
+                                     });
+    let params = null;
+    let silent = null;
+    for (let attempt = 0; attempt < 2 && !params; attempt++) {
+      try {
+        params = await probe();
+      } catch (e) {
+        /* an *answer* (even an error) proves the transport works */
+        if (!e.timeout) {
+          silent = null;
+          break;
+        }
+        silent = e;
+        if (attempt === 0) {
+          this.onLog('no answer to the mcumgr parameters read; ' +
+                     're-subscribing once');
+          try {
+            await this.char.stopNotifications();
+          } catch (err) { /* the link is gone: the probe below says so */ }
+          await this.char.startNotifications();
+        }
       }
-    } catch (e) {
-      this.onLog(`mcumgr parameters unavailable (${e.message}); ` +
+    }
+    if (!params && silent) {
+      this.healthy = false;
+      this.problem = 'the device is not answering mcumgr (SMP), so tune ' +
+        'uploads and firmware updates are off - reconnect; if it stays ' +
+        'silent, check that the clock is in BLE R/W mode';
+      this.onLog(`${this.problem} (${silent.message}); ` +
                  `using ${this.bufSize}-byte frames`);
+      return this;
+    }
+    this.healthy = true;
+    this.problem = '';
+    if (params && Number.isSafeInteger(params.buf_size) &&
+        params.buf_size >= 256) {
+      this.bufSize = params.buf_size;
     }
     return this;
   }
@@ -320,6 +431,9 @@ export class SmpClient {
         last = e;
       }
     }
+    /* name the request that went unanswered: "seq 5" alone says nothing
+     * when the console is the only clue (group 1 = image, 8 = files) */
+    if (last) last.message += ` (group ${group}, command ${cmd})`;
     throw last;
   }
 
@@ -328,6 +442,13 @@ export class SmpClient {
       const seq = frame[6];
       const timer = setTimeout(() => {
         if (this.waiter && this.waiter.seq === seq) this.waiter = null;
+        /* Nothing arrived (or only part of a frame did, e.g. a lost
+         * notification): whatever is buffered now can never complete
+         * with this request, and a partial frame would desync every
+         * later response (each one appended behind it, so no length ever
+         * matches again - the link looks dead while the device answers).
+         * SMP has one request in flight, so dropping it is safe. */
+        this.rx = new Uint8Array(0);
         const e = new Error(`no answer to SMP request (seq ${seq})`);
         e.timeout = true;
         reject(e);
@@ -352,7 +473,13 @@ export class SmpClient {
       throw new Error(`unexpected SMP response header (op ${frame[0]})`);
     }
     const msg = length ? cborDecode(frame.subarray(8, 8 + length)) : {};
-    if (typeof msg.rc === 'number' && msg.rc !== 0) throw new SmpError(msg);
+    /* mcumgr reports group errors as a nested map (`err.group`/`err.rc`);
+     * only the legacy protocol puts a non-zero `rc` at the top level.
+     * Both shapes must abort the request - silently accepting an error
+     * response is what turned a rejected upload chunk into a stall. */
+    const failed = (typeof msg.rc === 'number' && msg.rc !== 0) ||
+      (msg.err !== null && typeof msg.err === 'object');
+    if (failed) throw new SmpError(msg);
     return msg;
   }
 
@@ -374,7 +501,9 @@ export class SmpClient {
       const w = this.waiter;
       this.waiter = null;
       w.resolve(frame);
-      return;
+      /* keep draining: one notification can carry more than one frame
+       * (the device is free to batch notifications), and a frame left
+       * behind here would wait for the *next* notification */
     }
   }
 
@@ -494,5 +623,138 @@ export class SmpClient {
       await this.request(OP_WRITE, GROUP_FS, CMD_FS_CLOSE, cborMap([]),
                          { retries: 0 });
     } catch (e) { /* the handle times out on its own */ }
+  }
+
+  /* ---------- mcumgr image management (firmware updates) ---------- */
+
+  /** The device's slots: [{ slot, version, hash, active, pending,
+   *  confirmed, permanent }], hashes as lowercase hex. */
+  async imageState() {
+    const r = await this.request(OP_READ, GROUP_IMG, CMD_IMG_STATE,
+                                 cborMap([]));
+    const list = Array.isArray(r.images) ? r.images : [];
+    return list.map((im) => ({
+      slot: im.slot,
+      version: im.version || '',
+      hash: im.hash instanceof Uint8Array ? hexOf(im.hash) : '',
+      active: !!im.active,
+      pending: !!im.pending,
+      confirmed: !!im.confirmed,
+      permanent: !!im.permanent,
+    }));
+  }
+
+  _imageUploadPayload(off, data, { total, image, sha, declare }) {
+    const pairs = [];
+    if (declare === undefined ? off === 0 : declare) {
+      /* the first request declares the session: length, image number and
+       * the whole-file SHA-256 (used by the device to identify a resumed
+       * upload and to verify the result) */
+      pairs.push(['len', cborUint(total)]);
+      pairs.push(['image', cborUint(image)]);
+      if (sha && sha.length) pairs.push(['sha', cborBytes(sha)]);
+    }
+    pairs.push(['off', cborUint(off)]);
+    pairs.push(['data', cborBytes(data)]);
+    return cborMap(pairs);
+  }
+
+  /* the largest data slice whose whole frame fits the device buffer */
+  _fitImageData(off, bytes, extra) {
+    let n = Math.min(bytes.length - off, this.bufSize);
+    for (;;) {
+      const payload = this._imageUploadPayload(
+        off, bytes.subarray(off, off + n), extra);
+      const room = this.bufSize - 8 - payload.length;
+      if (room >= 0 || n <= 1) return { n, payload };
+      n = Math.max(1, n + room);
+    }
+  }
+
+  /**
+   * Upload `bytes` into the secondary slot, like `smpmgr upgrade --slot 1`.
+   * `sha` is the SHA-256 of the whole file; every response carries the next
+   * expected offset, so a stalled chunk resumes where the device stopped.
+   * Arm the result with `armImage()` - this only writes the slot.
+   *
+   * Zephyr's img_mgmt only accepts an upload that starts at offset 0 when
+   * that same request also carries `len` (and `image`) *and* at least
+   * `sizeof(struct image_header)` bytes of image data: there is no
+   * "declare-only" request. So the first chunk both opens the session and
+   * carries the MCUboot header, exactly like smpclient's first packet.
+   */
+  async uploadImage(bytes, { sha = null, image = 0, onProgress } = {}) {
+    const total = bytes.length;
+    let off = 0;
+    let first = true;
+    let restarts = 0;
+    if (onProgress) onProgress(0, total);
+    while (off < total) {
+      const { n, payload } = this._fitImageData(off, bytes,
+        { total, image, sha, declare: first });
+      if (first && n < IMAGE_HEADER_SIZE) {
+        throw new Error(`the ${this.bufSize}-byte device buffer is too ` +
+                        'small for an image header');
+      }
+      /* the first request erases the secondary slot: it can take longer
+       * than a plain data chunk */
+      const r = await this.request(OP_WRITE, GROUP_IMG, CMD_IMG_UPLOAD,
+        payload, first ? { timeoutMs: this.imageTimeoutMs } : {});
+      if (r.match === false) {
+        throw new Error('the device rejected the image: its SHA-256 does ' +
+                        'not match the manifest');
+      }
+      const next = Number.isSafeInteger(r.off) ? r.off : off + n;
+      if (n > 0 && next < off) {
+        /* the device is behind us: either our chunk lost the race with a
+         * retry or it finished the image and dropped the session (a lost
+         * answer to the last chunk). Rewind to where it says it is and,
+         * when it lost the session entirely, declare the upload again. */
+        if (++restarts > 2) {
+          throw new Error('image upload stalled: the device keeps resetting ' +
+                          'the upload - reconnect and try again');
+        }
+        off = next;
+        first = next === 0;
+        if (onProgress) onProgress(off, total);
+        continue;
+      }
+      if (n > 0 && next === off) {
+        throw new Error('image upload stalled: the device stopped accepting ' +
+                        'chunks - reconnect and try again');
+      }
+      off = next;
+      first = false;
+      if (onProgress) onProgress(off, total);
+    }
+  }
+
+  /** Mark the image with `hash` (hex) for a *test* swap: MCUboot boots it
+   *  on the next reset and rolls back a bad image. This is the same thing
+   *  `image state-write` does in smpmgr/flash_ota.py. */
+  async armImage(hash) {
+    return this.request(OP_WRITE, GROUP_IMG, CMD_IMG_STATE,
+      cborMap([
+        ['hash', cborBytes(bytesOfHex(hash))],
+        ['confirm', cborBool(false)],
+      ]));
+  }
+
+  /** Erase a slot (slot 1 by default: drop a staged update). */
+  async eraseImage(slot = 1) {
+    return this.request(OP_WRITE, GROUP_IMG, CMD_IMG_ERASE,
+                        cborMap([['slot', cborUint(slot)]]),
+                        { timeoutMs: this.imageTimeoutMs });
+  }
+
+  /** Reboot the device (MCUboot applies a swap on the way up). The link
+   *  usually drops before the answer, so a timeout is success. */
+  async reset() {
+    try {
+      await this.request(OP_WRITE, GROUP_OS, CMD_OS_RESET, cborMap([]),
+                         { retries: 0, timeoutMs: 3000 });
+    } catch (e) {
+      if (!e.timeout) throw e;
+    }
   }
 }

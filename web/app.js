@@ -10,9 +10,13 @@
  * ticked locally and compared against the browser clock).
  */
 
-import { SidClock, END_MODES, MODEL_MODES, CHIP_NAMES } from './ble.js';
+import { SidClock } from './ble.js';
 import { SmpClient } from './smp.js';
 import * as hvsc from './hvsc.js';
+import {
+  loadManifest, planUpdate, fetchRelease, verifyRelease, cmpVersion,
+  bytesOfHex,
+} from './update.js';
 
 const $ = (id) => document.getElementById(id);
 const sc = new SidClock();
@@ -36,6 +40,18 @@ let metaKey = '';            // what the HVSC info card currently shows
 let infoReading = null;      // an info read in flight
 let infoAgain = false;       // another read was asked for meanwhile
 let recovering = false;      // a silent reconnect, no disconnect note
+
+let updateManifest = null;   // the published release manifest (or null)
+let updatePlan = null;       // what the update card currently offers
+let updateStaged = null;     // { version, hash } armed in slot 1
+
+/* the device card (firmware + clocks) collapses to one line. `systemChoice`
+ * is the user's explicit open/closed choice, `systemApplied` what the page
+ * last set (so the toggle event can tell our own change from a click), and
+ * `systemAuto` the last "something needs attention" verdict. */
+let systemChoice = null;
+let systemApplied = false;
+let systemAuto = false;
 
 /* ---------- helpers ---------- */
 
@@ -84,6 +100,67 @@ function run(promise, what) {
   });
 }
 
+/* ---------- firmware capabilities ---------- */
+
+/** A value label from the connected firmware's descriptor (end-of-tune
+ *  modes, chip models, ...) - no hardcoded enum copies on this side. */
+function label(set, value) {
+  return sc.protocol ? sc.protocol.valueLabel(set, value) : String(value);
+}
+
+const supports = (feature) => sc.supports(feature);
+
+/** Show only what the connected firmware can actually do, and say what is
+ *  missing once instead of letting a button fail on every press. */
+function applyCapabilities() {
+  const live = supports('state');
+  const transport = supports('transport');
+  const subplay = supports('subplay');
+
+  $('prev').hidden = !transport;
+  $('play').hidden = !transport;
+  $('next').hidden = !transport;
+  $('subprev').hidden = !subplay;
+  $('subnext').hidden = !subplay;
+  $('subtune').hidden = !subplay;
+  /* display-only badges decoded from the state value */
+  $('chip').hidden = !live;
+  $('engine').hidden = !live;
+  $('snd').hidden = !live;
+  $('ends').hidden = !supports('end_mode');
+  $('volume').disabled = !supports('volume');
+  document.querySelector('.volrow').hidden = !supports('volume');
+  document.querySelector('.progress').hidden = !live;
+  document.querySelector('.progressrow').hidden = !live;
+
+  const missing = [];
+  if (!live) missing.push('live player status');
+  if (!transport) missing.push('play/pause and tune stepping');
+  if (!subplay) missing.push('subtune selection');
+  if (!supports('end_mode')) missing.push('end-of-tune mode');
+  if (!supports('volume')) missing.push('volume control');
+  if (!supports('md5_id')) missing.push('tune ids (exact HVSC match)');
+  if (!supports('delete')) missing.push('deleting tunes');
+  if (!supports('listing')) missing.push('the device library');
+
+  /* the version itself lives in the device card; here only what the
+   * connected firmware cannot do, once, instead of a button that fails */
+  const line = $('fwline');
+  line.textContent = missing.length
+    ? `this firmware has no ${missing.join(', ')}` : '';
+  line.hidden = !missing.length;
+
+  $('systemcard').hidden = false;
+  $('sysfw').textContent = `firmware ${sc.firmware || '--'}`;
+  $('sysproto').textContent = sc.protocol
+    ? `protocol ${sc.protocol.protocol} · ${sc.protocol.source === 'hello'
+      ? 'hello characteristic' : 'legacy probe (approximate version)'}`
+    : '';
+  if (sc.notes.length) note(sc.notes.join(' · '));
+  refreshControls();
+  renderSystem();
+}
+
 /* ---------- connection ---------- */
 
 function setConnected(ok) {
@@ -94,15 +171,36 @@ function setConnected(ok) {
   if (!ok) {
     setStatus(sc.device ? 'disconnected' : 'not connected');
     $('play').textContent = '▶';
+    $('fwline').hidden = true;
     deviceBase = null;
     deviceTimeUnset = false;
     $('devtime').textContent = '--:--:--';
     $('devtime').classList.remove('warn');
+    /* the device card disappears with the link; the next connect fills it
+     * again from scratch (and decides by itself whether to open) */
+    $('systemcard').hidden = true;
+    $('systemcard').classList.remove('attention');
+    $('systemcard').open = false;
+    systemChoice = null;
+    systemApplied = false;
+    systemAuto = false;
+    $('sysfw').textContent = 'firmware --';
+    $('updstate').textContent = '';
+    $('systime').textContent = '--:--:--';
+    $('systime').classList.remove('warn');
+    $('sysoff').textContent = '';
+    $('sysproto').textContent = '';
+    $('updtitle').textContent = '';
+    $('updsub').textContent = '';
+    $('updwhy').hidden = true;
+    updatePlan = null;
     smp = null;
     library = null;
     deviceIds = new Set();
     deviceKeys = { exact: new Set(), short: new Set() };
-    busy = null;
+    /* a firmware reboot drops the link on purpose: the reconnect loop owns
+     * busy until it is done, so it must not be cleared here */
+    if (busy !== 'reboot') busy = null;
     renderLibrary();
   }
   refreshControls();
@@ -147,41 +245,7 @@ $('connect').addEventListener('click', async () => {
   setStatus('connecting…', 'busy');
   try {
     const name = await sc.connect();
-
-    /* The GATT link is up: enable the controls now, before the setup
-     * below. On a fresh Android connection a read or the CCC write can
-     * fail transiently ("GATT operation failed") while the link is fine;
-     * leaving the page half-connected used to make the next Connect
-     * click disconnect it. */
-    setConnected(true);
-    setStatus(name, 'ok');
-    lastGeneration = -1;
-
-    const failed = await startLiveUpdates();
-    if (failed) {
-      console.error('state updates', failed);
-      note(`live updates failed: ${errorText(failed)}`, true);
-      if (!sc.connected) {
-        /* the recovery reconnect failed: there is no link left */
-        setConnected(false);
-        return;
-      }
-    }
-    try {
-      await refreshInfo();
-    } catch (e) {
-      console.error('info', e);
-      note(`tune info failed: ${errorText(e)}`, true);
-    }
-    await readClock();
-    try {
-      showVolume(await sc.readVolume());
-    } catch (e) {
-      console.error('volume', e);
-    }
-    await setupSmp();
-    refreshControls();
-    refreshLibrary();
+    await afterLink(name);
   } catch (e) {
     console.error(e);
     setConnected(false);
@@ -191,10 +255,69 @@ $('connect').addEventListener('click', async () => {
   }
 });
 
+/** Everything that follows a new GATT link. Shared by the Connect button
+ *  and the reconnect loop that waits out a firmware-update reboot. */
+async function afterLink(name) {
+  /* The GATT link is up: enable the controls now, before the setup
+   * below. On a fresh Android connection a read or the CCC write can
+   * fail transiently ("GATT operation failed") while the link is fine;
+   * leaving the page half-connected used to make the next Connect
+   * click disconnect it. */
+  setConnected(true);
+  setStatus(name, 'ok');
+  applyCapabilities();
+  lastGeneration = -1;
+
+  const failed = await startLiveUpdates();
+  if (failed) {
+    console.error('state updates', failed);
+    note(`live updates failed: ${errorText(failed)}`, true);
+    if (!sc.connected) {
+      /* the recovery reconnect failed: there is no link left */
+      setConnected(false);
+      return;
+    }
+  }
+  try {
+    await refreshInfo();
+  } catch (e) {
+    console.error('info', e);
+    note(`tune info failed: ${errorText(e)}`, true);
+  }
+  await readClock();
+  try {
+    showVolume(await sc.readVolume());
+  } catch (e) {
+    console.error('volume', e);
+  }
+  await setupSmp();
+  refreshControls();
+  refreshLibrary();
+
+  /* A link that died while the page was setting it up (typical right
+   * after the device rebooted for an update) must not leave a green
+   * "connected" page whose every press fails with "GATT Server is
+   * disconnected". Report it so the connect button / reboot loop can
+   * retry with a clean link. */
+  if (!sc.connected || !sc.device || !sc.device.gatt.connected) {
+    setConnected(false);
+    throw new Error('the Bluetooth link dropped while connecting');
+  }
+
+  /* the update check and the staged-image probe are not on the critical
+   * path of "the remote works now": run them after the controls are live */
+  checkUpdate()
+    .then(readStagedImage)
+    .then(renderUpdate)
+    .catch((e) => console.warn('update check', e));
+}
+
 sc.onDisconnect = () => {
   if (recovering) return; // our own recovery reconnect, not a lost link
   setConnected(false);
-  note('device disconnected');
+  /* a firmware reboot drops the link on purpose; waitForFirmware() is
+   * already reporting the reboot */
+  if (busy !== 'reboot') note('device disconnected');
 };
 
 /* ---------- pushed player state ---------- */
@@ -225,13 +348,16 @@ function renderState(st) {
   if (st.songs > 0) {
     sel.value = String(st.subtune + 1);
   }
-  sel.disabled = st.songs <= 0 || !sc.connected;
+  sel.disabled = st.songs <= 0 || !sc.connected || !supports('subplay');
 
-  $('chip').textContent =
-    `chip ${CHIP_NAMES[st.chip] || '?'} · ${MODEL_MODES[st.modelMode] || 'auto'}`;
-  $('engine').textContent = st.legacyEngine ? 'legacy engine'
-    : st.splitEngine ? 'cRSID split (FLPR CPU)' : 'cRSID';
-  $('snd').textContent = st.sound ? 'snd on' : 'muted';
+  if (!st.degraded) {
+    $('chip').textContent =
+      `chip ${st.chip ? label('chip', st.chip) : '?'} · ${label('model_mode', st.modelMode)}`;
+    $('engine').textContent = st.legacyEngine ? 'legacy engine'
+      : st.splitEngine ? 'cRSID split (FLPR CPU)' : 'cRSID';
+    $('snd').textContent = st.sound ? 'snd on' : 'muted';
+    $('ends').textContent = `ends: ${label('end_mode', st.endMode)}`;
+  }
   showVolume(st.volume);
 
   const pct = st.length > 0
@@ -239,7 +365,6 @@ function renderState(st) {
   $('progressbar').style.width = `${pct}%`;
   $('pos').textContent = fmtSeconds(st.elapsed);
   $('len').textContent = st.length > 0 ? fmtSeconds(st.length) : '--:--';
-  $('ends').textContent = `ends: ${END_MODES[st.endMode] || '?'}`;
 
   updateTrackHighlight();
 }
@@ -335,9 +460,19 @@ function showTime(t) {
 
 let clockTimer = 0;
 
-/* Repaint the two clocks, then re-arm for just after the next second
- * boundary of the clock being displayed: the device's when it is known, so
- * the seconds flip together with the device's own panel instead of on an
+/** Offset between the device clock and the browser one, short enough for
+ *  the collapsed line. Empty while they agree - the line is already full -
+ *  and `+0.2 s` / `-64 s` when they do not. */
+function fmtOffset(ms) {
+  if (Math.abs(ms) < 200) return '';
+  const sec = Math.abs(ms) / 1000;
+  const text = sec < 10 ? sec.toFixed(1) : String(Math.round(sec));
+  return `${ms < 0 ? '-' : '+'}${text} s`;
+}
+
+/* Repaint the clocks, then re-arm for just after the next second boundary
+ * of the clock being displayed: the device's when it is known, so the
+ * seconds flip together with the device's own panel instead of on an
  * arbitrary phase (which made one clock look a second ahead). */
 function tickClocks() {
   clearTimeout(clockTimer);
@@ -349,17 +484,24 @@ function tickClocks() {
 
   if (dev) {
     const devMs = dev.getTime();
+    const offset = devMs - now.getTime();
     $('devtime').textContent = fmtClock(dev);
     // a second and a half of slack: the read is accurate to a few ms now,
     // so anything more is a real disagreement
-    $('devtime').classList.toggle('warn',
-      Math.abs(devMs - now.getTime()) > 1500);
+    $('devtime').classList.toggle('warn', Math.abs(offset) > 1500);
+    $('systime').textContent = fmtClock(dev);
+    $('systime').classList.toggle('warn', Math.abs(offset) > 1500);
+    $('sysoff').textContent = fmtOffset(offset);
     wait = 1000 - (((devMs % 1000) + 1000) % 1000) + 15;
   } else {
     $('devtime').textContent = deviceTimeUnset ? 'unset' : '--:--:--';
     $('devtime').classList.toggle('warn', deviceTimeUnset);
+    $('systime').textContent = deviceTimeUnset ? 'clock unset' : '--:--:--';
+    $('systime').classList.toggle('warn', deviceTimeUnset);
+    $('sysoff').textContent = '';
     wait = 1000 - (performance.now() % 1000) + 15;
   }
+  renderSystem();
   clockTimer = setTimeout(tickClocks, wait);
 }
 
@@ -370,6 +512,48 @@ async function readClock() {
     console.error('time', e);
   }
 }
+
+/* ---------- device card (firmware + clocks) ---------- */
+
+/** Anything the collapsed line should not hide: a release to apply, an
+ *  image already staged, a clock that was never set or is more than a
+ *  minute off. */
+function systemAttention() {
+  if (!sc.connected) return false;
+  if (updateStaged) return true;
+  if (updatePlan && updatePlan.state === 'available') return true;
+  if (deviceTimeUnset) return true;
+  const dev = deviceNow();
+  return !!dev && Math.abs(dev.getTime() - Date.now()) > 60000;
+}
+
+function setSystemOpen(open) {
+  const card = $('systemcard');
+  systemApplied = open;
+  if (card.open !== open) card.open = open;
+}
+
+/** Keep the card open only while something needs doing (unless the user
+ *  made a choice): a new attention state wins over a manual collapse, but
+ *  a card the user opened stays open while that state is unchanged. */
+function renderSystem() {
+  const card = $('systemcard');
+  if (!sc.connected) return;
+  const attention = systemAttention();
+  card.classList.toggle('attention', attention);
+  if (attention !== systemAuto) {
+    systemAuto = attention;
+    systemChoice = null;
+  }
+  setSystemOpen(systemChoice === null ? attention : systemChoice);
+}
+
+$('systemcard').addEventListener('toggle', () => {
+  const card = $('systemcard');
+  if (card.open === systemApplied) return; // a renderSystem() open/close
+  systemChoice = card.open;
+  systemApplied = card.open;
+});
 
 /* ---------- hvsc: databases, search, upload, library, info ---------- */
 
@@ -395,13 +579,20 @@ function refreshControls() {
   $('stilopt').disabled = !!busy;
   $('librefresh').disabled = !ready;
   $('metastil').disabled = !!busy;
+  const upd = sc.connected && !busy && smpReady();
+  $('updinstall').disabled = !upd || !updatePlan ||
+    updatePlan.state !== 'available';
+  $('updreboot').disabled = !upd || !updateStaged;
+  $('upddiscard').disabled = !upd || !updateStaged;
+  $('updfile').disabled = !upd;
   for (const b of document.querySelectorAll('#results .tune button, ' +
                                            '#lib button')) {
     if (b.dataset.locked) {
       b.disabled = true;
     } else if (b.classList.contains('upload')) {
-      b.disabled = !ready || !smp;
-      b.title = smp ? '' : 'needs Bluetooth access in R/W mode';
+      b.disabled = !ready || !smpReady();
+      b.title = smpReady() ? ''
+        : (smp && smp.problem) || 'needs Bluetooth access in R/W mode';
     } else {
       b.disabled = !ready;
     }
@@ -409,18 +600,411 @@ function refreshControls() {
 }
 
 async function setupSmp() {
+  /* A client left over from an earlier link keeps its listener on the
+   * same GATT characteristic object (Chrome hands out the same one again
+   * after a reconnect), so it must be stopped, not just dropped. */
+  const prev = smp;
   smp = null;
+  if (prev) {
+    try {
+      await prev.stop();
+    } catch (e) { /* the link is going away anyway */ }
+  }
   if (!sc.smp) return; // R/O or OFF: the SMP service is not registered
   try {
     const client = new SmpClient(sc.smp);
-    /* set before start(): it reports a failed parameters read there */
+    /* set before start(): it reports the transport probe there */
     client.onLog = (m) => console.info(`smp: ${m}`);
     smp = await client.start();
   } catch (e) {
     console.warn('SMP setup failed', e);
     smp = null;
+    return;
+  }
+  if (!smp.healthy) note(smp.problem, true);
+}
+
+/** True when SMP is subscribed *and* the device answered the transport
+ *  probe - tune uploads and firmware updates need both. */
+function smpReady() {
+  return !!(smp && smp.healthy);
+}
+
+/* ---------- firmware update ---------- */
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** The firmware version the device reports. Hello carries the exact one;
+ *  the legacy probe only identifies a descriptor, so its version is the
+ *  best guess the page has. */
+function runningFirmware() {
+  if (sc.helloInfo && sc.helloInfo.firmware) return sc.helloInfo.firmware;
+  return sc.firmware;
+}
+
+function setUpdateProgress(what, got, total) {
+  const line = $('updprog');
+  line.hidden = !what;
+  if (!what) {
+    $('updprogbar').style.width = '0%';
+    $('updproglabel').textContent = '';
+    return;
+  }
+  const pct = total > 0 ? Math.min(100, (got / total) * 100) : 0;
+  $('updprogbar').style.width = `${pct}%`;
+  $('updproglabel').textContent = total > 0
+    ? `${what} ${fmtBytes(got)} / ${fmtBytes(total)}` : what;
+}
+
+/** Draw the firmware part of the device card. The summary line always
+ *  carries the version and the state; the block below is always there when
+ *  the card is open (a local build can be flashed even when the installed
+ *  firmware is the latest release) and only fills with release details for
+ *  an update, a staged image or an unusual state. */
+function renderUpdate() {
+  const plan = planUpdate({
+    manifest: updateManifest,
+    running: runningFirmware(),
+    connected: sc.connected,
+    smp: smpReady(),
+  });
+  updatePlan = plan;
+
+  const state = $('updstate');
+  const title = $('updtitle');
+  const sub = $('updsub');
+  const why = $('updwhy');
+  const notes = $('updnotes');
+  $('sysfw').textContent = sc.connected
+    ? `firmware ${runningFirmware() || '--'}` : 'firmware --';
+  $('updinstall').hidden = true;
+  $('updreboot').hidden = true;
+  $('upddiscard').hidden = true;
+  notes.hidden = true;
+  why.hidden = true;
+  title.textContent = '';
+  sub.textContent = '';
+
+  if (!sc.connected) {
+    state.textContent = '';
+    refreshControls();
+    renderSystem();
+    return;
+  }
+
+  if (updateStaged) {
+    state.textContent = 'staged';
+    title.textContent = `firmware ${updateStaged.version} is staged`;
+    sub.textContent = `the device keeps running ${runningFirmware()} until the ` +
+      'next reboot, which is when MCUboot swaps it in';
+    $('updreboot').hidden = false;
+    $('upddiscard').hidden = false;
+  } else if (plan.state === 'up-to-date') {
+    state.textContent = 'up to date';
+  } else if (plan.state === 'available') {
+    state.textContent = 'update available';
+    title.textContent = `update to ${plan.release.version}`;
+    sub.textContent = `${fmtBytes(plan.release.size || 0)} · app firmware ` +
+      'only - tunes, settings and the clock are not touched';
+    $('updinstall').hidden = false;
+    if (plan.release.page) {
+      notes.href = plan.release.page;
+      notes.hidden = false;
+    }
+  } else if (plan.state === 'ahead') {
+    state.textContent = 'dev build';
+    title.textContent = `development build ${runningFirmware()}`;
+    sub.textContent = `the latest release is ${plan.release.version} - ` +
+      'older than this device, so no update is offered';
+  } else if (plan.state === 'unknown') {
+    state.textContent = 'version unknown';
+    title.textContent = 'firmware version unknown';
+    sub.textContent = 'the device did not report its version - the latest ' +
+      `release is ${plan.release.version}`;
+  } else {
+    /* no manifest: stay quiet rather than show a permanent "unknown" */
+    state.textContent = '';
+  }
+
+  /* the local-build button is here in every state, so explain a dead SMP
+   * link even when no release is offered */
+  if (!smpReady()) {
+    const what = updateStaged ? 'before rebooting'
+      : plan.state === 'available' ? 'before updating' : 'before uploading';
+    why.textContent = `${what}: ${smp && smp.problem
+      ? smp.problem
+      : 'the device must be in BLE R/W mode (its main screen says so)'}`;
+    why.hidden = false;
+  }
+
+  /* a running update needs its progress and buttons even when the plan
+   * says "up to date" (a local file chosen by hand), and it must be
+   * visible even if the card was collapsed when the button was pressed */
+  if (busy === 'firmware update' || busy === 'discard update' ||
+      busy === 'reboot') {
+    if (!title.textContent) title.textContent = 'firmware update';
+    if (!sub.textContent) {
+      sub.textContent = 'the device keeps running the current image until ' +
+        'it reboots';
+    }
+    systemChoice = true;
+    setSystemOpen(true);
+  }
+
+  refreshControls();
+  renderSystem();
+}
+
+async function checkUpdate(fresh = false) {
+  if (!sc.connected) {
+    updateManifest = null;
+    renderUpdate();
+    return;
+  }
+  updateManifest = await loadManifest({ fresh });
+  renderUpdate();
+}
+
+/** Slot 1's pending image, if one is already armed (e.g. staged by an
+ *  earlier session or by tools/flash_ota.py). */
+async function readStagedImage() {
+  if (!smpReady()) return;
+  try {
+    const slots = await smp.imageState();
+    const sec = slots.find((s) => s.slot === 1 && s.pending);
+    updateStaged = sec ? { version: sec.version, hash: sec.hash } : null;
+  } catch (e) {
+    console.warn('image state', e);
   }
 }
+
+/** Verify, upload and arm one image (`source.release` from the manifest, or
+ *  `source.file` from the local picker). The device keeps running the old
+ *  image until the reboot button (or any other reset). */
+async function installFirmware(source) {
+  if (busy) return;
+  if (!sc.connected) {
+    note('connect to the device first', true);
+    return;
+  }
+  if (!smpReady()) {
+    note(smp && smp.problem
+      ? smp.problem
+      : 'firmware updates need Bluetooth access in R/W mode', true);
+    return;
+  }
+  busy = 'firmware update';
+  renderUpdate();
+  refreshControls();
+
+  try {
+    let bytes;
+    let info;
+    if (source.file) {
+      setUpdateProgress(`reading ${source.file.name}`, 0, 0);
+      bytes = new Uint8Array(await source.file.arrayBuffer());
+      const v = await verifyRelease(bytes, {});
+      if (!v.ok) throw new Error(v.reason);
+      info = v.info;
+      if (cmpVersion(info.version, runningFirmware()) === 0) {
+        note(`this file is the running version (${info.version}) - ` +
+             'flashing it anyway');
+      }
+    } else {
+      const release = source.release;
+      setUpdateProgress('downloading firmware', 0, release.size || 0);
+      bytes = await fetchRelease(release,
+        throttled((got, total) =>
+          setUpdateProgress('downloading firmware', got, total)));
+      setUpdateProgress('verifying firmware', bytes.length, bytes.length);
+      const v = await verifyRelease(bytes, release);
+      if (!v.ok) throw new Error(v.reason);
+      info = v.info;
+    }
+
+    setUpdateProgress('checking the device slots', 0, 0);
+    const slots = await smp.imageState();
+    const active = slots.find((s) => s.active) ||
+      slots.find((s) => s.slot === 0);
+    const secondary = slots.find((s) => s.slot === 1);
+    if (active && active.hash === info.imageHash) {
+      throw new Error(`the device already runs this image (${info.version})`);
+    }
+    if (secondary && secondary.hash === info.imageHash && secondary.pending) {
+      updateStaged = { version: info.version, hash: info.imageHash };
+      note(`firmware ${info.version} is already staged`);
+      return;
+    }
+
+    /* an earlier attempt may have uploaded the image but failed before
+     * arming it: reuse the slot instead of sending half a megabyte again */
+    if (!secondary || secondary.hash !== info.imageHash) {
+      setUpdateProgress('uploading firmware', 0, bytes.length);
+      await smp.uploadImage(bytes, {
+        sha: bytesOfHex(info.fileHash),
+        onProgress: throttled((got, total) =>
+          setUpdateProgress('uploading firmware', got, total)),
+      });
+    }
+
+    setUpdateProgress('checking the uploaded image', 0, 0);
+    const after = await smp.imageState();
+    const slot1 = after.find((s) => s.slot === 1);
+    if (!slot1 || slot1.hash !== info.imageHash) {
+      throw new Error('the upload did not land in slot 1' +
+        (slot1 && slot1.hash
+          ? ` (the slot holds ${slot1.hash.slice(0, 16)}…)`
+          : ' (the slot is empty)'));
+    }
+
+    setUpdateProgress('arming the update', 0, 0);
+    await smp.armImage(info.imageHash);
+    const armed = await smp.imageState();
+    const check = armed.find((s) => s.slot === 1);
+    if (!check || !check.pending) {
+      throw new Error('the device did not mark the image as pending - ' +
+        'a reset would boot the old image again');
+    }
+    updateStaged = { version: info.version, hash: info.imageHash };
+    note(`firmware ${info.version} staged - it boots on the next reboot`);
+  } catch (e) {
+    console.error('firmware update', e);
+    /* Arming the *running* image is refused; tools/flash_ota.py reports
+     * the same case in one line instead of failing. */
+    const activeDenied = e && e.name === 'SmpError' && e.err &&
+      e.err.group === 1 && e.err.rc === 33;
+    note(activeDenied
+      ? 'that image is already the running one - nothing to apply'
+      : commandError(e, 'firmware update'), true);
+  } finally {
+    setUpdateProgress(null);
+    busy = null;
+    refreshControls();
+    renderUpdate();
+  }
+}
+
+/** Apply the staged image: `os reset`, then wait for the swapped app. */
+async function rebootForUpdate() {
+  if (busy || !sc.connected || !smp) return;
+  const target = updateStaged;
+  if (!target) return;
+
+  busy = 'reboot';
+  $('connect').disabled = true;
+  renderUpdate();
+  refreshControls();
+  setUpdateProgress('rebooting', 0, 0);
+  try {
+    await smp.reset();
+  } catch (e) {
+    console.warn('reset', e);
+  }
+  setStatus('rebooting…', 'busy');
+
+  /* Drop the link ourselves. `os reset` reboots the device without a
+   * clean disconnect, and the stack can keep the dead connection
+   * "connected" for seconds: reconnecting into that window hands the
+   * page a client that fails every operation. A manual Disconnect ->
+   * Connect used to be the field workaround. */
+  try {
+    await sc.disconnect();
+  } catch (e) {
+    console.warn('disconnect for reboot', e);
+  }
+
+  const booted = await waitForFirmware(target);
+  setUpdateProgress(null);
+  busy = null;
+  $('connect').disabled = false;
+  refreshControls();
+  renderUpdate();
+  if (booted) {
+    note(`firmware ${target.version} is running - the clock needs setting`);
+  }
+}
+
+/** Poll the link until the new image answers (the swap takes a few
+ *  seconds and the device does not advertise while MCUboot runs). */
+async function waitForFirmware(target) {
+  const deadline = Date.now() + 120000;
+  let attempt = 0;
+  while (Date.now() < deadline) {
+    attempt++;
+    await sleep(attempt < 6 ? 1500 : 3000);
+    try {
+      if (smp) {
+        try {
+          await smp.stop();
+        } catch (e) { /* the link is gone anyway */ }
+      }
+      /* Never reconnect into a link the browser still believes in: it
+       * would be served from a stale GATT client. */
+      await sc.disconnect();
+      const epoch = sc.linkEpoch;
+      const name = await sc.connect();
+      await afterLink(name);
+      if (!sc.connected || sc.linkEpoch === epoch) {
+        /* the link died before the identity was read: try again */
+        continue;
+      }
+      if (cmpVersion(runningFirmware(), target.version) >= 0) {
+        updateStaged = null;
+        return true;
+      }
+      /* the old image answered: either the swap never happened or
+       * MCUboot reverted it */
+      const slots = smpReady() ? await smp.imageState() : [];
+      const sec = slots.find((s) => s.slot === 1);
+      note(sec && sec.pending
+        ? 'still on the old firmware with the update armed - reboot again'
+        : 'the device came back on the old firmware and the new image ' +
+          'is no longer pending: MCUboot reverted the test swap - check ' +
+          'the boot log (tools/sidclock_ble.py log --peek)', true);
+      return false;
+    } catch (e) {
+      console.info('waiting for the device', e.message || e);
+      if (!sc.connected || !sc.device || !sc.device.gatt.connected) {
+        setConnected(false);
+      }
+    }
+  }
+  note('the device did not come back with the new firmware within two ' +
+       'minutes - reconnect and check its screen', true);
+  return false;
+}
+
+async function discardUpdate() {
+  if (busy || !smpReady()) return;
+  busy = 'discard update';
+  renderUpdate();
+  refreshControls();
+  try {
+    await smp.eraseImage(1);
+    updateStaged = null;
+    note('staged firmware discarded (slot 1 erased)');
+  } catch (e) {
+    console.error('erase', e);
+    note(commandError(e, 'discard update'), true);
+  } finally {
+    busy = null;
+    refreshControls();
+    renderUpdate();
+  }
+}
+
+$('updinstall').addEventListener('click', () => {
+  if (!updatePlan || updatePlan.state !== 'available') return;
+  installFirmware({ release: updatePlan.release });
+});
+$('updreboot').addEventListener('click', rebootForUpdate);
+$('upddiscard').addEventListener('click', discardUpdate);
+$('updfile').addEventListener('click', () => $('updfileinput').click());
+$('updfileinput').addEventListener('change', async () => {
+  const file = $('updfileinput').files[0];
+  $('updfileinput').value = '';
+  if (file) await installFirmware({ file });
+});
 
 async function refreshDbState() {
   const st = await hvsc.dbStatus();
@@ -616,8 +1200,10 @@ async function uploadTune(res, ui) {
     note('connect to the device first', true);
     return;
   }
-  if (!smp) {
-    note('uploads need Bluetooth access in R/W mode', true);
+  if (!smpReady()) {
+    note(smp && smp.problem
+      ? smp.problem
+      : 'uploads need Bluetooth access in R/W mode', true);
     return;
   }
   busy = `upload ${res.id}`;
@@ -730,6 +1316,9 @@ async function refreshLibrary() {
 function renderLibrary(failed = false) {
   const ul = $('lib');
   ul.innerHTML = '';
+  const nameMax = (sc.protocol && sc.protocol.limits.name_max) || 23;
+  const deleteMax = (sc.protocol && sc.protocol.commandNameMax)
+    ? sc.protocol.commandNameMax('delete') : nameMax;
   const sids = library
     ? [...library].filter((f) => /\.sid$/i.test(f))
         .sort((a, b) => a.localeCompare(b))
@@ -752,7 +1341,7 @@ function renderLibrary(failed = false) {
     play.type = 'button';
     play.className = 'btn small';
     play.textContent = 'play';
-    if (name.length > 23) {
+    if (name.length > nameMax) {
       play.dataset.locked = '1';
       play.title = 'name too long for the play command';
     } else {
@@ -763,7 +1352,7 @@ function renderLibrary(failed = false) {
     del.type = 'button';
     del.className = 'btn small';
     del.textContent = '✕';
-    if (name.length > 23) {
+    if (name.length > deleteMax) {
       del.dataset.locked = '1';
       del.title = 'name too long for the delete command';
     } else {
@@ -842,7 +1431,13 @@ function renderTracks(info) {
     const len = info.lengths ? info.lengths[i - 1] : 0;
     d.textContent = len ? fmtSeconds(len) : '';
     b.append(n, t, d);
-    b.addEventListener('click', () => run(sc.playSubtune(i), 'play subtune'));
+    if (supports('subplay')) {
+      b.addEventListener('click', () => run(sc.playSubtune(i), 'play subtune'));
+    } else {
+      b.disabled = true;
+      b.title = `subtune selection needs a newer firmware ` +
+        `(connected: ${sc.firmware})`;
+    }
     li.append(b);
     ol.append(li);
   }
@@ -971,13 +1566,7 @@ $('dbload').addEventListener('click', () =>
   loadDbsFromCard({ songlengths: true, stil: true }, 'HVSC databases'));
 $('metastil').addEventListener('click', () =>
   loadDbsFromCard({ stil: true }, 'STIL.txt'));
-$('librefresh').addEventListener('click', (e) => {
-  /* the button sits in the card's <summary>: without this a refresh
-   * click would also toggle the card */
-  e.preventDefault();
-  e.stopPropagation();
-  refreshLibrary();
-});
+$('librefresh').addEventListener('click', () => refreshLibrary());
 
 /* ---------- theme ---------- */
 
@@ -1075,9 +1664,9 @@ $('stop').addEventListener('click', () => run(sc.stop(), 'stop'));
 /* the end-mode badge cycles: next sub -> next tune -> loop. The device
  * pushes the new state, which updates the label. */
 $('ends').addEventListener('click', () => {
-  if (!sc.connected || !currentState) return;
-  run(sc.setEndMode((currentState.endMode + 1) % END_MODES.length),
-      'end mode');
+  if (!sc.connected || !currentState || !supports('end_mode')) return;
+  const modes = sc.protocol.valueItems('end_mode').length || 3;
+  run(sc.setEndMode((currentState.endMode + 1) % modes), 'end mode');
 });
 
 $('subtune').addEventListener('change', () => {

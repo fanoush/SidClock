@@ -6,6 +6,9 @@ on:
     paths:
       - web/**
       - .github/workflows/pages.yml
+  # a published release redeploys the site so the update card can offer it
+  release:
+    types: [published]
   workflow_dispatch:
 
 permissions:
@@ -29,6 +32,42 @@ jobs:
       - uses: actions/configure-pages@v5
         with:
           enablement: true
+
+      # The page checks for updates by fetching `firmware/index.json` next to
+      # itself and downloading the image from there. Release assets cannot be
+      # read by a browser (the redirect to release-assets.githubusercontent.com
+      # has no CORS headers), GitHub Pages can, so stage the latest release
+      # inside the artifact. `fw_manifest.py` takes the version and hashes
+      # from the image itself, not from its name.
+      - name: Publish the latest release firmware
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          mkdir -p web/firmware
+          tag=$(gh release view --json tagName --jq .tagName 2>/dev/null || true)
+          if [ -z "$tag" ]; then
+            echo "no release published yet - the update card stays hidden"
+            exit 0
+          fi
+          # `gh release create` publishes the release before it finishes
+          # uploading the assets, so the download can race the upload.
+          for attempt in 1 2 3 4 5 6; do
+            if gh release download "$tag" --pattern '*.signed.bin' \
+                 --dir web/firmware --clobber 2>/dev/null; then
+              break
+            fi
+            if [ "$attempt" = 6 ]; then
+              echo "release $tag has no signed image" >&2
+              exit 1
+            fi
+            echo "assets not ready yet, retrying in 10 s"
+            sleep 10
+          done
+          image=$(ls web/firmware/*.signed.bin | head -1)
+          python3 tools/fw_manifest.py "$image" \
+            --page "https://github.com/${GH_REPO}/releases/tag/${tag}" \
+            --out web/firmware/index.json
 
       - uses: actions/upload-pages-artifact@v3
         with:

@@ -146,17 +146,20 @@ await test('page: boots the search card', async () => {
   ok($('more').hidden, '"show more" is hidden before any search');
 });
 
-await test('page: the device list is above the search and starts closed', async () => {
-  const card = $('libcard');
+await test('page: the device card is above the search and starts closed', async () => {
+  const card = $('systemcard');
   ok(card && card.tagName === 'DETAILS', 'it is a <details> card');
   const head = card.querySelector('summary');
   ok(head, 'its header is the summary');
   ok(!card.open, 'collapsed by default');
+  ok(card.hidden, 'hidden until a device is connected');
+  ok(card.contains($('lib')), 'the tune list lives inside the device card');
   const pos = card.compareDocumentPosition($('q'));
   ok(pos & win.Node.DOCUMENT_POSITION_FOLLOWING, 'it comes before the search box');
-  /* a probe row (the headless page has no device, so the list is empty)
-   * makes the card's growth measurable: a closed <details> must not take
-   * up the room its content would need */
+  /* a probe row makes the card's growth measurable: a closed <details>
+   * must not take up the room its content would need. The card is hidden
+   * without a device, so reveal it for the measurement only. */
+  card.hidden = false;
   const ul = $('lib');
   const wasHidden = ul.hidden;
   ul.hidden = false;
@@ -178,6 +181,7 @@ await test('page: the device list is above the search and starts closed', async 
   $('librefresh').click();
   await sleep(400);
   ok(!card.open, 'the refresh button does not toggle the card');
+  card.hidden = true;
 });
 
 const NAME_TERM = /commando/i;
