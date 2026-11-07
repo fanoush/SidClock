@@ -3932,18 +3932,36 @@ static void home_list_changed(void)
  * its position persist between calls (see the block above); only the
  * first page of a session, or a page that does not continue where the
  * previous one stopped, rescans from the start of the directory. */
-#define HOME_LIVE_NAME_MAX 24
+/* The longest name a page can carry: one entry plus its newline has to
+ * fit the 60 usable bytes of the listing text. Anything longer can never
+ * be served (and is too long for the play/delete commands anyway), so the
+ * walk skips it instead of buffering a name that cannot be sent.
+ *
+ * This used to be 24, one byte short of a 24-character name: the
+ * terminating NUL of a name that did not fit a page landed in the next
+ * byte, which happened to be the "iterator is open" flag. The handle was
+ * then never closed, one per listing, until fs_opendir() answered
+ * -ENOMEM for good ("0 tunes", "no .sid files in /home"). Never size this
+ * buffer for a name that this loop can be handed. */
+#define HOME_LIVE_NAME_MAX (SC_LISTING_TEXT_MAX - 1)
 static struct fs_dir_t home_live_dir;
-static bool home_live_open;
 static uint16_t home_live_next; /* index of the next file entry */
 static char home_live_pending[HOME_LIVE_NAME_MAX];
 static bool home_live_pending_used;
 
+/* The directory handle itself is the state: fs_opendir() leaves dirp set,
+ * fs_closedir()/fs_dir_t_init() clear it. A separate "open" flag can drift
+ * from the handle (that is what leaked them), and a leaked handle is not
+ * recoverable without a reboot because its slab block is lost. */
+static bool home_live_is_open(void)
+{
+	return home_live_dir.dirp != NULL;
+}
+
 static void home_live_reset(void)
 {
-	if (home_live_open) {
+	if (home_live_is_open()) {
 		fs_closedir(&home_live_dir);
-		home_live_open = false;
 	}
 	home_live_pending_used = false;
 	home_live_next = 0;
@@ -3955,7 +3973,7 @@ static int home_list_live(uint16_t start, uint8_t *dst, int size)
 	bool skipping;
 	int used = 0;
 
-	if (!home_live_open || start != home_live_next) {
+	if (!home_live_is_open() || start != home_live_next) {
 		/* first page, a new listing session, or the host jumped */
 		home_live_reset();
 		fs_dir_t_init(&home_live_dir);
@@ -3963,7 +3981,6 @@ static int home_list_live(uint16_t start, uint8_t *dst, int size)
 			dst[0] = '\0';
 			return -1;
 		}
-		home_live_open = true;
 	}
 	skipping = (home_live_next < start);
 
@@ -4000,6 +4017,14 @@ static int home_list_live(uint16_t start, uint8_t *dst, int size)
 			name = ent.name;
 		}
 		l = strlen(name);
+		if (l + 1U > sizeof(home_live_pending)) {
+			/* Cannot be carried on a page at all (and is too
+			 * long for the play/delete commands). Skip it, but
+			 * advance the index so a rescan of this position
+			 * stays aligned with the pages already served. */
+			home_live_next++;
+			continue;
+		}
 		if (used + (int)l + 1 > size - 1) {
 			/* keep it for the next page; the index does not move */
 			memcpy(home_live_pending, name, l + 1U);
